@@ -71,3 +71,18 @@ class ReceiptFlowTests(TestCase):
         self.assertFalse(path.exists())
         self.assertFalse(receipt.file_available)
         self.assertEqual(receipt.service_name_snapshot, "OpenAI API")
+
+
+class HealthcheckTests(TestCase):
+    def test_healthcheck_returns_200_for_railway_healthcheck_host(self):
+        response = self.client.get("/health/", HTTP_HOST="healthcheck.railway.app")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["status"], "ok")
+
+    @override_settings(DEBUG=False, SECURE_SSL_REDIRECT=True, SECURE_REDIRECT_EXEMPT=[r"^health/$"])
+    def test_healthcheck_is_not_redirected_when_ssl_redirect_is_enabled(self):
+        response = self.client.get("/health/", HTTP_HOST="healthcheck.railway.app", secure=False)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["status"], "ok")

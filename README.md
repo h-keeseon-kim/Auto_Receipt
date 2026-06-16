@@ -56,18 +56,23 @@ python manage.py purge_expired_receipts --noinput
 4. アプリサービスに環境変数を設定します。
    - `SECRET_KEY`: Django用の長いランダム文字列
    - `DEBUG`: `False`
-   - `ALLOWED_HOSTS`: Railwayのドメイン。例: `your-app.up.railway.app`
-   - `CSRF_TRUSTED_ORIGINS`: 例: `https://your-app.up.railway.app`
+   - `ALLOWED_HOSTS`: Railwayのドメイン。例: `your-app.up.railway.app`。`healthcheck.railway.app` と `RAILWAY_PUBLIC_DOMAIN` はアプリ側で自動追加されます。
+   - `CSRF_TRUSTED_ORIGINS`: 例: `https://your-app.up.railway.app`。`RAILWAY_PUBLIC_DOMAIN` がある場合は自動追加されます。
    - `DATABASE_URL`: Railway PostgreSQLの接続URL。Railway側で `PGHOST` などを使う構成でも動きます。
    - `RECEIPT_MEDIA_ROOT`: `/app/media`
    - `RECEIPT_RETENTION_MONTHS`: `3`
    - `ALLOW_SIGNUP`: 本番で管理者がユーザー作成するなら `False`
 5. Railway Volumeをアプリサービスに追加し、マウントパスを `/app/media` にします。
-6. 初回デプロイ後、Railway Shell等から管理者を作成します。
+6. ヘルスチェックパスは `railway.toml` で `/health/` に設定済みです。
+7. 初回デプロイ後、Railway Shell等から管理者を作成します。
 
 ```bash
 python manage.py createsuperuser
 ```
+
+## Railway ヘルスチェック
+
+Railwayのヘルスチェック用に `/health/` を用意しています。このURLはログイン不要でHTTP 200を返し、DBクエリも実行しません。`/accounts/login/` はDjangoのホスト検証やHTTPSリダイレクトの影響を受ける可能性があるため、Railwayでは `/health/` を使います。
 
 ## Railway Cron設定
 
