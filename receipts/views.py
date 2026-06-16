@@ -53,7 +53,8 @@ def add_validation_errors(form, exc: ValidationError):
 
 def register(request):
     if not settings.ALLOW_SIGNUP:
-        raise Http404("ユーザー登録は無効です。")
+        messages.info(request, "ユーザー登録は現在無効です。アカウントが必要な場合は管理者に作成を依頼してください。")
+        return redirect("login")
     if request.user.is_authenticated:
         return redirect("dashboard")
     if request.method == "POST":

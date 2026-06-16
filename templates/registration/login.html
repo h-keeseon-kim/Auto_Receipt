@@ -8,6 +8,10 @@
         {{ form.as_p }}
         <button type="submit" class="button primary">ログイン</button>
     </form>
-    <p class="muted">アカウントがない場合は <a href="{% url 'register' %}">登録</a> してください。</p>
+    {% if allow_signup %}
+        <p class="muted">アカウントがない場合は <a href="{% url 'register' %}">登録</a> してください。</p>
+    {% else %}
+        <p class="muted">アカウントが必要な場合は管理者に作成を依頼してください。</p>
+    {% endif %}
 </section>
 {% endblock %}

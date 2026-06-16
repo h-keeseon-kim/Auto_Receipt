@@ -21,7 +21,7 @@
                 </form>
             {% else %}
                 <a href="{% url 'login' %}">ログイン</a>
-                <a href="{% url 'register' %}">登録</a>
+                {% if allow_signup %}<a href="{% url 'register' %}">登録</a>{% endif %}
             {% endif %}
         </nav>
     </header>

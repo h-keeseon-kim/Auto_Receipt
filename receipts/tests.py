@@ -86,3 +86,20 @@ class HealthcheckTests(TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["status"], "ok")
+
+
+class SignupSettingsTests(TestCase):
+    @override_settings(ALLOW_SIGNUP=True)
+    def test_register_page_is_available_when_signup_is_enabled(self):
+        response = self.client.get(reverse("register"))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "ユーザー登録")
+
+    @override_settings(ALLOW_SIGNUP=False)
+    def test_register_page_redirects_to_login_when_signup_is_disabled(self):
+        response = self.client.get(reverse("register"), follow=True)
+
+        self.assertRedirects(response, reverse("login"))
+        self.assertContains(response, "ユーザー登録は現在無効です")
+        self.assertContains(response, "管理者に作成を依頼")

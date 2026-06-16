@@ -61,10 +61,12 @@ python manage.py purge_expired_receipts --noinput
    - `DATABASE_URL`: Railway PostgreSQLの接続URL。Railway側で `PGHOST` などを使う構成でも動きます。
    - `RECEIPT_MEDIA_ROOT`: `/app/media`
    - `RECEIPT_RETENTION_MONTHS`: `3`
-   - `ALLOW_SIGNUP`: 本番で管理者がユーザー作成するなら `False`
+   - `ALLOW_SIGNUP`: 一般ユーザーの自己登録を許可するなら `True`。管理者がユーザーを作成する運用なら `False`
 5. Railway Volumeをアプリサービスに追加し、マウントパスを `/app/media` にします。
 6. ヘルスチェックパスは `railway.toml` で `/health/` に設定済みです。
 7. 初回デプロイ後、Railway Shell等から管理者を作成します。
+
+一般ユーザーが自分でアカウント作成する運用の場合は、Railwayの環境変数で `ALLOW_SIGNUP=True` を設定してください。`ALLOW_SIGNUP=False` の場合、登録リンクは非表示になり、`/accounts/register/` に直接アクセスしてもログイン画面へ戻ります。
 
 ```bash
 python manage.py createsuperuser
