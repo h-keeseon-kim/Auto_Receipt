@@ -1,0 +1,103 @@
+{% extends "base.html" %}
+{% block title %}領収書アップロード - Auto Receipt{% endblock %}
+{% block content %}
+<div class="page-title">
+    <div>
+        <h1>領収書アップロード</h1>
+        <p class="muted">対象月ごとに領収書をアップロードし、内容を確認してから提出します。</p>
+    </div>
+    <form method="get" class="month-form">
+        {{ month_form.month.label_tag }}
+        {{ month_form.month }}
+        <button class="button" type="submit">表示</button>
+    </form>
+</div>
+
+<section class="status-grid">
+    <div class="card">
+        <span class="label">提出月</span>
+        <strong>{{ selected_month|date:"Y年m月" }}</strong>
+    </div>
+    <div class="card">
+        <span class="label">ステータス</span>
+        <strong class="badge {{ submission.status }}">{{ submission.get_status_display }}</strong>
+    </div>
+    <div class="card">
+        <span class="label">領収書数</span>
+        <strong>{{ submission.receipt_count }}</strong>
+    </div>
+    <div class="card">
+        <span class="label">ファイル保存期限</span>
+        <strong>最大{{ retention_months }}ヶ月</strong>
+    </div>
+</section>
+
+<section class="card section">
+    <div class="section-header">
+        <div>
+            <h2>登録サービス</h2>
+            <p class="muted">サブスク、従量課金/API、一回払いなど、領収書を提出するサービスを登録します。</p>
+        </div>
+        <a class="button" href="{% url 'service_create' %}">サービス追加</a>
+    </div>
+    <div class="table-wrap">
+        <table>
+            <thead><tr><th>サービス</th><th>種別</th><th>今月の領収書</th><th>操作</th></tr></thead>
+            <tbody>
+            {% for row in service_rows %}
+                <tr>
+                    <td><strong>{{ row.service.name }}</strong>{% if row.service.memo %}<div class="muted small">{{ row.service.memo|truncatechars:80 }}</div>{% endif %}</td>
+                    <td>{{ row.service.get_billing_type_display }}</td>
+                    <td>{% if row.uploaded %}<span class="badge submitted">アップロード済み</span>{% else %}<span class="badge draft">未アップロード</span>{% endif %}</td>
+                    <td class="actions">
+                        <a class="button small" href="{% url 'service_update' row.service.pk %}">編集</a>
+                        <form method="post" action="{% url 'service_archive' row.service.pk %}" onsubmit="return confirm('利用停止にしますか？過去の提出履歴は残ります。');">
+                            {% csrf_token %}
+                            <button class="button small danger-outline" type="submit">停止</button>
+                        </form>
+                    </td>
+                </tr>
+            {% empty %}
+                <tr><td colspan="4" class="muted center">まずサービスを登録してください。</td></tr>
+            {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</section>
+
+{% if submission.is_submitted %}
+    <section class="card section notice">
+        <h2>提出済みです</h2>
+        <p>この月の提出はロックされています。内容の確認とダウンロードのみ可能です。</p>
+        <a class="button primary" href="{{ submission.get_absolute_url }}">提出内容を見る</a>
+    </section>
+{% else %}
+    <section class="card section">
+        <h2>領収書を追加</h2>
+        {% if active_services %}
+            <form method="post" enctype="multipart/form-data" class="form-grid">
+                {% csrf_token %}
+                <input type="hidden" name="action" value="add_receipt">
+                {{ receipt_form.as_p }}
+                <button type="submit" class="button primary">アップロード</button>
+            </form>
+        {% else %}
+            <p class="muted">領収書をアップロードするには、先にサービス登録が必要です。</p>
+        {% endif %}
+    </section>
+{% endif %}
+
+<section class="card section">
+    <div class="section-header">
+        <h2>アップロード済み領収書</h2>
+        {% if not submission.is_submitted %}
+            <form method="post" onsubmit="return confirm('この内容で提出しますか？提出後は編集できません。');">
+                {% csrf_token %}
+                <input type="hidden" name="action" value="submit">
+                <button type="submit" class="button primary">提出する</button>
+            </form>
+        {% endif %}
+    </div>
+    {% include "receipts/_receipt_table.html" with receipts=receipts submission=submission %}
+</section>
+{% endblock %}

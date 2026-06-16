@@ -1,0 +1,10 @@
+# Railwayで期限切れファイル削除専用のCronサービスを作る場合の設定例です。
+# 同じGitHubリポジトリから2つ目のサービスを作成し、以下に相当する設定を入れてください。
+[build]
+builder = "DOCKERFILE"
+dockerfilePath = "Dockerfile"
+
+[deploy]
+startCommand = "python manage.py purge_expired_receipts --noinput"
+cronSchedule = "15 18 * * *"
+restartPolicyType = "NEVER"

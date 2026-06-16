@@ -1,0 +1,50 @@
+{% load receipt_extras %}
+<div class="table-wrap">
+    <table>
+        <thead>
+            <tr>
+                <th>サービス</th>
+                <th>種別</th>
+                <th>金額</th>
+                <th>発行日/支払日</th>
+                <th>ファイル</th>
+                <th>保存期限</th>
+                <th>操作</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for receipt in receipts %}
+                <tr>
+                    <td>
+                        <strong>{{ receipt.service_name_snapshot }}</strong>
+                        {% if receipt.memo %}<div class="muted small">{{ receipt.memo|linebreaksbr }}</div>{% endif %}
+                    </td>
+                    <td>{{ receipt.get_billing_type_snapshot_display }}</td>
+                    <td>{% if receipt.amount %}{{ receipt.currency }} {{ receipt.amount|money }}{% else %}-{% endif %}</td>
+                    <td>{{ receipt.issued_on|default:"-" }}</td>
+                    <td>
+                        <div>{{ receipt.original_filename|default:"-" }}</div>
+                        <div class="muted small">{{ receipt.file_size|filesize }} / {{ receipt.file_status_label }}</div>
+                    </td>
+                    <td>
+                        {% if receipt.expires_at %}{{ receipt.expires_at|date:"Y-m-d H:i" }}{% else %}-{% endif %}
+                        {% if receipt.file_deleted_at %}<div class="danger small">削除: {{ receipt.file_deleted_at|date:"Y-m-d H:i" }}</div>{% endif %}
+                    </td>
+                    <td class="actions">
+                        {% if receipt.file_available %}
+                            <a class="button small" href="{% url 'download_receipt' receipt.pk %}">DL</a>
+                        {% endif %}
+                        {% if not submission.is_submitted and receipt.submission.user == user %}
+                            <form method="post" action="{% url 'delete_receipt' receipt.pk %}" onsubmit="return confirm('この領収書を削除しますか？');">
+                                {% csrf_token %}
+                                <button type="submit" class="button small danger-outline">削除</button>
+                            </form>
+                        {% endif %}
+                    </td>
+                </tr>
+            {% empty %}
+                <tr><td colspan="7" class="muted center">領収書はまだアップロードされていません。</td></tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>

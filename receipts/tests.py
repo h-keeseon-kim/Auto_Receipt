@@ -1,0 +1,73 @@
+from __future__ import annotations
+
+import tempfile
+from datetime import date, timedelta
+from pathlib import Path
+
+from django.contrib.auth.models import User
+from django.core.files.uploadedfile import SimpleUploadedFile
+from django.core.management import call_command
+from django.test import TestCase, override_settings
+from django.urls import reverse
+from django.utils import timezone
+
+from .models import BillingType, Receipt, RegisteredService, Submission
+
+
+class ReceiptFlowTests(TestCase):
+    def setUp(self):
+        self.media_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.media_dir.cleanup)
+        self.override = override_settings(MEDIA_ROOT=self.media_dir.name)
+        self.override.enable()
+        self.addCleanup(self.override.disable)
+        self.user = User.objects.create_user(username="alice", password="password123")
+        self.service = RegisteredService.objects.create(
+            user=self.user,
+            name="OpenAI API",
+            billing_type=BillingType.METERED,
+        )
+
+    def test_user_can_upload_and_submit(self):
+        self.client.login(username="alice", password="password123")
+        upload = SimpleUploadedFile("receipt.pdf", b"%PDF-1.4 test", content_type="application/pdf")
+        response = self.client.post(
+            reverse("dashboard") + "?month=2026-06",
+            {
+                "action": "add_receipt",
+                "service": self.service.id,
+                "amount": "1200",
+                "currency": "JPY",
+                "file": upload,
+            },
+        )
+        self.assertEqual(response.status_code, 302)
+        submission = Submission.objects.get(user=self.user, period_month=date(2026, 6, 1))
+        self.assertEqual(submission.receipts.count(), 1)
+
+        response = self.client.post(reverse("dashboard") + "?month=2026-06", {"action": "submit"})
+        self.assertEqual(response.status_code, 302)
+        submission.refresh_from_db()
+        self.assertTrue(submission.is_submitted)
+
+    def test_purge_expired_receipts_deletes_file_but_keeps_metadata(self):
+        submission = Submission.objects.create(user=self.user, period_month=date(2026, 6, 1))
+        upload = SimpleUploadedFile("receipt.pdf", b"%PDF-1.4 test", content_type="application/pdf")
+        receipt = Receipt.objects.create(
+            submission=submission,
+            service=self.service,
+            service_name_snapshot=self.service.name,
+            billing_type_snapshot=self.service.billing_type,
+            original_filename="receipt.pdf",
+            file=upload,
+            expires_at=timezone.now() - timedelta(days=1),
+        )
+        path = Path(receipt.file.path)
+        self.assertTrue(path.exists())
+
+        call_command("purge_expired_receipts", "--noinput")
+
+        receipt.refresh_from_db()
+        self.assertFalse(path.exists())
+        self.assertFalse(receipt.file_available)
+        self.assertEqual(receipt.service_name_snapshot, "OpenAI API")

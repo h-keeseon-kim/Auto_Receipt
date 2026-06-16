@@ -1,0 +1,39 @@
+{% load static %}
+<!doctype html>
+<html lang="ja">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>{% block title %}Auto Receipt{% endblock %}</title>
+    <link rel="stylesheet" href="{% static 'css/app.css' %}">
+</head>
+<body>
+    <header class="topbar">
+        <a class="brand" href="{% url 'dashboard' %}">Auto Receipt</a>
+        <nav class="nav">
+            {% if user.is_authenticated %}
+                <a href="{% url 'dashboard' %}">アップロード</a>
+                <a href="{% url 'history' %}">提出履歴</a>
+                {% if user.is_staff %}<a href="{% url 'staff_dashboard' %}">管理者</a>{% endif %}
+                <form method="post" action="{% url 'logout' %}" class="inline-form">
+                    {% csrf_token %}
+                    <button type="submit" class="link-button">ログアウト</button>
+                </form>
+            {% else %}
+                <a href="{% url 'login' %}">ログイン</a>
+                <a href="{% url 'register' %}">登録</a>
+            {% endif %}
+        </nav>
+    </header>
+    <main class="container">
+        {% if messages %}
+            <div class="messages">
+                {% for message in messages %}
+                    <div class="message {{ message.tags }}">{{ message }}</div>
+                {% endfor %}
+            </div>
+        {% endif %}
+        {% block content %}{% endblock %}
+    </main>
+</body>
+</html>

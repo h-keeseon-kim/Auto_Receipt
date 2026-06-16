@@ -1,0 +1,22 @@
+{% extends "base.html" %}
+{% block title %}管理者 提出詳細 - Auto Receipt{% endblock %}
+{% block content %}
+<div class="page-title">
+    <div>
+        <h1>{{ submission.user.username }} / {{ submission.period_month|date:"Y年m月" }}</h1>
+        <p class="muted">ユーザーの提出内容と領収書ファイル状態を確認できます。</p>
+    </div>
+    <div class="actions">
+        <a class="button" href="{% url 'staff_dashboard' %}?month={{ submission.period_month|date:'Y-m' }}">一覧へ</a>
+        <a class="button primary" href="{% url 'staff_download_submission' submission.pk %}">ZIPダウンロード</a>
+    </div>
+</div>
+<section class="status-grid">
+    <div class="card"><span class="label">ステータス</span><strong class="badge {{ submission.status }}">{{ submission.get_status_display }}</strong></div>
+    <div class="card"><span class="label">提出日時</span><strong>{{ submission.submitted_at|date:"Y-m-d H:i"|default:"-" }}</strong></div>
+    <div class="card"><span class="label">領収書数</span><strong>{{ submission.receipt_count }}</strong></div>
+</section>
+<section class="card section">
+    {% include "receipts/_receipt_table.html" with receipts=submission.receipts.all submission=submission %}
+</section>
+{% endblock %}
