@@ -132,6 +132,15 @@ DATA_UPLOAD_MAX_MEMORY_SIZE = MAX_UPLOAD_SIZE + 1024 * 1024
 RECEIPT_RETENTION_MONTHS = min(max(int(os.environ.get("RECEIPT_RETENTION_MONTHS", "3")), 1), 3)
 ALLOW_SIGNUP = os.environ.get("ALLOW_SIGNUP", "True").lower() in {"1", "true", "yes", "on"}
 
+OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
+OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "")
+RECEIPT_AI_FILENAME_ENABLED = os.environ.get("RECEIPT_AI_FILENAME_ENABLED", "True").lower() in {"1", "true", "yes", "on"}
+RECEIPT_CARD_LAST4 = os.environ.get("RECEIPT_CARD_LAST4", "7210")
+try:
+    RECEIPT_AI_TIMEOUT = float(os.environ.get("RECEIPT_AI_TIMEOUT", "30"))
+except ValueError:
+    RECEIPT_AI_TIMEOUT = 30.0
+
 SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
 SECURE_REDIRECT_EXEMPT = [r"^health/$"]
 if not DEBUG:

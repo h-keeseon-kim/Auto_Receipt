@@ -23,8 +23,22 @@
                     <td>{% if receipt.amount %}{{ receipt.currency }} {{ receipt.amount|money }}{% else %}-{% endif %}</td>
                     <td>{{ receipt.issued_on|default:"-" }}</td>
                     <td>
-                        <div>{{ receipt.original_filename|default:"-" }}</div>
+                        <div><strong>{{ receipt.display_filename|default:"-" }}</strong></div>
+                        {% if user.is_staff and receipt.generated_filename and receipt.original_filename %}
+                            <div class="muted small">元: {{ receipt.original_filename }}</div>
+                        {% endif %}
                         <div class="muted small">{{ receipt.file_size|filesize }} / {{ receipt.file_status_label }}</div>
+                        {% if user.is_staff %}
+                            <div class="small ai-file-meta">
+                                <span class="badge {{ receipt.ai_filename_badge_class }}">AI: {{ receipt.get_ai_filename_status_display }}</span>
+                                <span class="badge {{ receipt.ai_period_check_badge_class }}">提出月: {{ receipt.get_ai_period_check_status_display }}</span>
+                                {% if receipt.ai_receipt_month %}<div class="muted small">判定月: {{ receipt.ai_receipt_month }}</div>{% endif %}
+                                {% if receipt.ai_extracted_payee %}<div class="muted small">払先: {{ receipt.ai_extracted_payee }}</div>{% endif %}
+                                {% if receipt.ai_extracted_card_last4 %}<div class="muted small">カード下4桁: {{ receipt.ai_extracted_card_last4 }}</div>{% endif %}
+                                {% if receipt.ai_filename_admin_memo %}<div class="danger small">{{ receipt.ai_filename_admin_memo|linebreaksbr }}</div>{% endif %}
+                                {% if receipt.ai_period_check_memo %}<div class="muted small">{{ receipt.ai_period_check_memo|linebreaksbr }}</div>{% endif %}
+                            </div>
+                        {% endif %}
                     </td>
                     <td>
                         {% if receipt.expires_at %}{{ receipt.expires_at|date:"Y-m-d H:i" }}{% else %}-{% endif %}

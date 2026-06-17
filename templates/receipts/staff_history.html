@@ -25,6 +25,8 @@
     <div class="card"><span class="label">未着手</span><strong>{{ stats.not_started }}</strong></div>
     <div class="card"><span class="label">領収書数</span><strong>{{ stats.receipt_count }}</strong></div>
     <div class="card"><span class="label">保存中ファイル</span><strong>{{ stats.available_file_count }}</strong></div>
+    <div class="card"><span class="label">AI要確認</span><strong>{{ stats.ai_review_count }}</strong></div>
+    <div class="card"><span class="label">提出月不一致</span><strong>{{ stats.period_mismatch_count }}</strong></div>
 </section>
 
 <section class="card section">
@@ -80,7 +82,7 @@
     </div>
     <div class="table-wrap scroll-box large">
         <table>
-            <thead><tr><th>ユーザー</th><th>提出月</th><th>ステータス</th><th>サービス</th><th>ファイル</th><th>保存状態</th><th>アップロード日時</th><th>操作</th></tr></thead>
+            <thead><tr><th>ユーザー</th><th>提出月</th><th>ステータス</th><th>サービス</th><th>ファイル</th><th>AI確認 / 提出月</th><th>保存状態</th><th>アップロード日時</th><th>操作</th></tr></thead>
             <tbody>
                 {% for receipt in receipts %}
                     <tr>
@@ -89,8 +91,18 @@
                         <td><span class="badge {{ receipt.submission.status }}">{{ receipt.submission.get_status_display }}</span></td>
                         <td>{{ receipt.service_display_name_snapshot }}</td>
                         <td>
-                            <div>{{ receipt.original_filename|default:"-" }}</div>
+                            <div><strong>{{ receipt.display_filename|default:"-" }}</strong></div>
+                            {% if receipt.generated_filename and receipt.original_filename %}<div class="muted small">元: {{ receipt.original_filename }}</div>{% endif %}
                             <div class="muted small">{{ receipt.file_size|filesizeformat }}</div>
+                        </td>
+                        <td>
+                            <span class="badge {{ receipt.ai_filename_badge_class }}">{{ receipt.get_ai_filename_status_display }}</span>
+                            <span class="badge {{ receipt.ai_period_check_badge_class }}">{{ receipt.get_ai_period_check_status_display }}</span>
+                            {% if receipt.ai_receipt_month %}<div class="muted small">判定月: {{ receipt.ai_receipt_month }}</div>{% endif %}
+                            {% if receipt.ai_extracted_payee %}<div class="muted small">払先: {{ receipt.ai_extracted_payee }}</div>{% endif %}
+                            {% if receipt.ai_extracted_card_last4 %}<div class="muted small">カード下4桁: {{ receipt.ai_extracted_card_last4 }}</div>{% endif %}
+                            {% if receipt.ai_filename_admin_memo %}<div class="danger small">{{ receipt.ai_filename_admin_memo|truncatechars:120 }}</div>{% endif %}
+                            {% if receipt.ai_period_check_memo %}<div class="muted small">{{ receipt.ai_period_check_memo|truncatechars:120 }}</div>{% endif %}
                         </td>
                         <td>
                             <span class="badge {% if receipt.file_available %}submitted{% else %}neutral{% endif %}">{{ receipt.file_status_label }}</span>
@@ -111,7 +123,7 @@
                         </td>
                     </tr>
                 {% empty %}
-                    <tr><td colspan="8" class="muted center">対象月にアップロード済み領収書はありません。</td></tr>
+                    <tr><td colspan="9" class="muted center">対象月にアップロード済み領収書はありません。</td></tr>
                 {% endfor %}
             </tbody>
         </table>

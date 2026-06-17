@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import tempfile
 from datetime import date, timedelta
+from decimal import Decimal
+from unittest import mock
 from pathlib import Path
 
 from django.contrib.auth.models import User
@@ -12,10 +14,13 @@ from django.test import TestCase, override_settings
 from django.urls import reverse
 from django.utils import timezone
 
+from .ai_filename import ReceiptFilenameResult, build_result_from_ai_payload
 from .forms import ReceiptUploadForm
 from .models import (
     BillingType,
     Receipt,
+    ReceiptFilenameStatus,
+    ReceiptPeriodCheckStatus,
     RegisteredService,
     ServiceCatalog,
     ServiceDeactivationSource,
@@ -58,6 +63,235 @@ class ReceiptFlowTests(TestCase):
         self.assertContains(response, "data-auto-upload-form")
         self.assertContains(response, "data-file-upload-field hidden")
         self.assertNotContains(response, ">アップロード</button>")
+
+
+    def test_ai_payload_uses_receipt_payee_for_filename_not_selected_service_name(self):
+        result = build_result_from_ai_payload(
+            {
+                "card_last4": "7210",
+                "card_ends_with_7210": True,
+                "payee": "OpenAI",
+                "payment_date": "2026-06-19",
+                "amount": "220.00",
+                "currency": "USD",
+                "confidence": "high",
+                "can_generate_filename": True,
+                "admin_memo": "",
+            },
+            original_filename="chatgpt-subscription.pdf",
+        )
+
+        self.assertEqual(result.status, ReceiptFilenameStatus.GENERATED)
+        self.assertEqual(result.suggested_filename, "260619_金_OpenAI_220_USD.pdf")
+        self.assertEqual(result.payee, "OpenAI")
+
+    @mock.patch("receipts.views.generate_ai_receipt_filename")
+    def test_user_upload_gets_ai_generated_filename_and_extracted_amount(self, mocked_generate):
+        mocked_generate.return_value = ReceiptFilenameResult(
+            status=ReceiptFilenameStatus.GENERATED,
+            suggested_filename="260619_金_OpenAI_220_USD.pdf",
+            payee="OpenAI",
+            payment_date=date(2026, 6, 19),
+            amount=Decimal("220.00"),
+            currency="USD",
+            card_last4="7210",
+        )
+        self.client.login(username="alice", password="password123")
+
+        response = self.client.post(
+            reverse("dashboard") + "?month=2026-06",
+            {
+                "action": "add_receipt",
+                "service": self.service.id,
+                "file": SimpleUploadedFile("raw.pdf", b"%PDF-1.4 test", content_type="application/pdf"),
+            },
+        )
+
+        self.assertEqual(response.status_code, 302)
+        receipt = Receipt.objects.get()
+        self.assertEqual(receipt.original_filename, "raw.pdf")
+        self.assertEqual(receipt.generated_filename, "260619_金_OpenAI_220_USD.pdf")
+        self.assertEqual(receipt.display_filename, "260619_金_OpenAI_220_USD.pdf")
+        self.assertEqual(receipt.ai_filename_status, ReceiptFilenameStatus.GENERATED)
+        self.assertEqual(receipt.ai_extracted_payee, "OpenAI")
+        self.assertEqual(receipt.ai_extracted_card_last4, "7210")
+        self.assertEqual(receipt.issued_on, date(2026, 6, 19))
+        self.assertEqual(receipt.amount, Decimal("220.00"))
+        self.assertEqual(receipt.currency, "USD")
+        self.assertEqual(receipt.ai_receipt_month, "2026-06")
+        self.assertEqual(receipt.ai_period_check_status, ReceiptPeriodCheckStatus.MATCHED)
+
+    @mock.patch("receipts.views.generate_ai_receipt_filename")
+    def test_user_upload_rejects_receipt_from_different_month(self, mocked_generate):
+        mocked_generate.return_value = ReceiptFilenameResult(
+            status=ReceiptFilenameStatus.GENERATED,
+            suggested_filename="260531_日_OpenAI_220_USD.pdf",
+            payee="OpenAI",
+            payment_date=date(2026, 5, 31),
+            amount=Decimal("220.00"),
+            currency="USD",
+            card_last4="7210",
+        )
+        self.client.login(username="alice", password="password123")
+
+        response = self.client.post(
+            reverse("dashboard") + "?month=2026-06",
+            {
+                "action": "add_receipt",
+                "service": self.service.id,
+                "file": SimpleUploadedFile("may.pdf", b"%PDF-1.4 may", content_type="application/pdf"),
+            },
+            follow=True,
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(Receipt.objects.count(), 0)
+        self.assertContains(response, "提出月（2026年06月）ではなく 2026年05月")
+        self.assertContains(response, "再度アップロードしてください")
+
+    @mock.patch("receipts.views.generate_ai_receipt_filename")
+    def test_ai_filename_review_memo_is_visible_to_staff_only(self, mocked_generate):
+        mocked_generate.return_value = ReceiptFilenameResult(
+            status=ReceiptFilenameStatus.NEEDS_REVIEW,
+            admin_memo="カード下4桁が7210として確認できませんでした。",
+            payee="OpenAI",
+            card_last4="1234",
+        )
+        self.client.login(username="alice", password="password123")
+        self.client.post(
+            reverse("dashboard") + "?month=2026-06",
+            {
+                "action": "add_receipt",
+                "service": self.service.id,
+                "file": SimpleUploadedFile("unclear.pdf", b"%PDF-1.4 unclear", content_type="application/pdf"),
+            },
+        )
+
+        receipt = Receipt.objects.get()
+        self.assertEqual(receipt.ai_filename_status, ReceiptFilenameStatus.NEEDS_REVIEW)
+        self.assertEqual(receipt.display_filename, "unclear.pdf")
+
+        user_response = self.client.get(reverse("dashboard") + "?month=2026-06")
+        self.assertNotContains(user_response, "カード下4桁が7210として確認できませんでした")
+        self.assertNotContains(user_response, "AI:")
+
+        admin = User.objects.create_superuser(username="admin", email="admin@example.com", password="admin-password-123")
+        self.client.logout()
+        self.client.login(username="admin", password="admin-password-123")
+        staff_response = self.client.get(reverse("history") + "?month=2026-06")
+        self.assertContains(staff_response, "AI要確認")
+        self.assertContains(staff_response, "カード下4桁が7210として確認できませんでした")
+        self.assertContains(staff_response, "OpenAI")
+
+    @mock.patch("receipts.views.generate_ai_receipt_filename")
+    def test_user_replace_receipt_file_runs_ai_filename_generation_after_submit(self, mocked_generate):
+        mocked_generate.return_value = ReceiptFilenameResult(
+            status=ReceiptFilenameStatus.GENERATED,
+            suggested_filename="260619_金_OpenAI_220_USD.pdf",
+            payee="OpenAI",
+            payment_date=date(2026, 6, 19),
+            amount=Decimal("220.00"),
+            currency="USD",
+            card_last4="7210",
+        )
+        self.client.login(username="alice", password="password123")
+        submission = Submission.objects.create(
+            user=self.user,
+            period_month=date(2026, 6, 1),
+            status="submitted",
+            submitted_at=timezone.now(),
+        )
+        receipt = Receipt.objects.create(
+            submission=submission,
+            service=self.service,
+            service_name_snapshot=self.service.name,
+            billing_type_snapshot=self.service.billing_type,
+            original_filename="wrong.pdf",
+            file=SimpleUploadedFile("wrong.pdf", b"%PDF-1.4 wrong", content_type="application/pdf"),
+            expires_at=timezone.now() + timedelta(days=30),
+        )
+
+        response = self.client.post(
+            reverse("replace_receipt_file", args=[receipt.pk]),
+            {
+                "file": SimpleUploadedFile("correct.pdf", b"%PDF-1.4 correct", content_type="application/pdf"),
+                "next": reverse("submission_detail", args=[submission.pk]),
+            },
+        )
+
+        self.assertRedirects(response, reverse("submission_detail", args=[submission.pk]))
+        receipt.refresh_from_db()
+        self.assertEqual(receipt.original_filename, "correct.pdf")
+        self.assertEqual(receipt.generated_filename, "260619_金_OpenAI_220_USD.pdf")
+        self.assertEqual(receipt.display_filename, "260619_金_OpenAI_220_USD.pdf")
+        self.assertEqual(receipt.ai_period_check_status, ReceiptPeriodCheckStatus.MATCHED)
+        mocked_generate.assert_called_once()
+
+    @mock.patch("receipts.views.generate_ai_receipt_filename")
+    def test_user_replace_receipt_file_rejects_different_month_and_keeps_old_file(self, mocked_generate):
+        mocked_generate.return_value = ReceiptFilenameResult(
+            status=ReceiptFilenameStatus.GENERATED,
+            suggested_filename="260531_日_OpenAI_220_USD.pdf",
+            payee="OpenAI",
+            payment_date=date(2026, 5, 31),
+            amount=Decimal("220.00"),
+            currency="USD",
+            card_last4="7210",
+        )
+        self.client.login(username="alice", password="password123")
+        submission = Submission.objects.create(
+            user=self.user,
+            period_month=date(2026, 6, 1),
+            status="submitted",
+            submitted_at=timezone.now(),
+        )
+        receipt = Receipt.objects.create(
+            submission=submission,
+            service=self.service,
+            service_name_snapshot=self.service.name,
+            billing_type_snapshot=self.service.billing_type,
+            original_filename="correct-june.pdf",
+            file=SimpleUploadedFile("correct-june.pdf", b"%PDF-1.4 june", content_type="application/pdf"),
+            expires_at=timezone.now() + timedelta(days=30),
+            ai_period_check_status=ReceiptPeriodCheckStatus.MATCHED,
+            ai_receipt_month="2026-06",
+        )
+        old_file_name = receipt.file.name
+
+        response = self.client.post(
+            reverse("replace_receipt_file", args=[receipt.pk]),
+            {
+                "file": SimpleUploadedFile("wrong-may.pdf", b"%PDF-1.4 may", content_type="application/pdf"),
+                "next": reverse("submission_detail", args=[submission.pk]),
+            },
+            follow=True,
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "提出月（2026年06月）ではなく 2026年05月")
+        receipt.refresh_from_db()
+        self.assertEqual(receipt.original_filename, "correct-june.pdf")
+        self.assertEqual(receipt.file.name, old_file_name)
+        self.assertEqual(receipt.ai_period_check_status, ReceiptPeriodCheckStatus.MATCHED)
+        with receipt.file.open("rb") as fp:
+            self.assertEqual(fp.read(), b"%PDF-1.4 june")
+
+    def test_submission_submit_blocks_persisted_period_mismatch(self):
+        submission = Submission.objects.create(user=self.user, period_month=date(2026, 6, 1))
+        Receipt.objects.create(
+            submission=submission,
+            service=self.service,
+            service_name_snapshot=self.service.name,
+            billing_type_snapshot=self.service.billing_type,
+            original_filename="may.pdf",
+            file=SimpleUploadedFile("may.pdf", b"%PDF-1.4 may", content_type="application/pdf"),
+            expires_at=timezone.now() + timedelta(days=30),
+            ai_period_check_status=ReceiptPeriodCheckStatus.MISMATCHED,
+            ai_receipt_month="2026-05",
+        )
+
+        with self.assertRaises(ValidationError):
+            submission.submit()
 
     def test_user_can_upload_and_submit(self):
         self.client.login(username="alice", password="password123")

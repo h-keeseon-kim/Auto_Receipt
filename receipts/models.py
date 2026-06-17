@@ -61,6 +61,21 @@ class SubmissionStatus(models.TextChoices):
     SUBMITTED = "submitted", "提出済み"
 
 
+class ReceiptFilenameStatus(models.TextChoices):
+    NOT_PROCESSED = "not_processed", "未確認"
+    GENERATED = "generated", "作成済み"
+    NEEDS_REVIEW = "needs_review", "要確認"
+    FAILED = "failed", "失敗"
+    SKIPPED = "skipped", "スキップ"
+
+
+class ReceiptPeriodCheckStatus(models.TextChoices):
+    NOT_CHECKED = "not_checked", "未確認"
+    MATCHED = "matched", "当月確認済み"
+    MISMATCHED = "mismatched", "提出月不一致"
+    UNKNOWN = "unknown", "確認不可"
+
+
 class ServiceRegistrationSource(models.TextChoices):
     ADMIN = "admin", "管理者登録"
     USER = "user", "ユーザー登録"
@@ -310,6 +325,8 @@ class Submission(models.Model):
     def submit(self):
         if not self.receipts.available_files().exists():
             raise ValidationError("領収書ファイルを1件以上アップロードしてから提出してください。")
+        if self.receipts.filter(ai_period_check_status=ReceiptPeriodCheckStatus.MISMATCHED).exists():
+            raise ValidationError("提出月と異なる可能性がある領収書があります。正しい当月分の領収書を再度アップロードしてください。")
         self.status = SubmissionStatus.SUBMITTED
         self.submitted_at = timezone.now()
         self.save(update_fields=["status", "submitted_at", "updated_at"])
@@ -382,6 +399,25 @@ class Receipt(models.Model):
         ],
     )
     original_filename = models.CharField("元ファイル名", max_length=255, blank=True)
+    generated_filename = models.CharField("AI修正ファイル名", max_length=255, blank=True)
+    ai_filename_status = models.CharField(
+        "AIファイル名ステータス",
+        max_length=20,
+        choices=ReceiptFilenameStatus.choices,
+        default=ReceiptFilenameStatus.NOT_PROCESSED,
+    )
+    ai_filename_admin_memo = models.TextField("AIファイル名管理者メモ", blank=True)
+    ai_filename_checked_at = models.DateTimeField("AIファイル名確認日時", null=True, blank=True)
+    ai_extracted_payee = models.CharField("AI抽出払先", max_length=160, blank=True)
+    ai_extracted_card_last4 = models.CharField("AI抽出カード下4桁", max_length=4, blank=True)
+    ai_receipt_month = models.CharField("AI判定領収書月", max_length=7, blank=True)
+    ai_period_check_status = models.CharField(
+        "AI提出月確認ステータス",
+        max_length=20,
+        choices=ReceiptPeriodCheckStatus.choices,
+        default=ReceiptPeriodCheckStatus.NOT_CHECKED,
+    )
+    ai_period_check_memo = models.TextField("AI提出月確認メモ", blank=True)
     file_size = models.PositiveIntegerField("ファイルサイズ", null=True, blank=True)
     content_type = models.CharField("Content-Type", max_length=120, blank=True)
     uploaded_at = models.DateTimeField("アップロード日時", auto_now_add=True)
@@ -419,6 +455,40 @@ class Receipt(models.Model):
     @property
     def service_display_name_snapshot(self) -> str:
         return f"{self.service_name_snapshot}（{self.get_billing_type_snapshot_display()}）"
+
+    @property
+    def display_filename(self) -> str:
+        if self.generated_filename:
+            return self.generated_filename
+        if self.original_filename:
+            return self.original_filename
+        if self.file:
+            return Path(self.file.name).name
+        return ""
+
+    @property
+    def ai_filename_badge_class(self) -> str:
+        if self.ai_filename_status == ReceiptFilenameStatus.GENERATED:
+            return "submitted"
+        if self.ai_filename_status in {ReceiptFilenameStatus.NEEDS_REVIEW, ReceiptFilenameStatus.FAILED}:
+            return "draft"
+        return "neutral"
+
+    @property
+    def needs_ai_filename_review(self) -> bool:
+        return self.ai_filename_status in {ReceiptFilenameStatus.NEEDS_REVIEW, ReceiptFilenameStatus.FAILED}
+
+    @property
+    def ai_period_check_badge_class(self) -> str:
+        if self.ai_period_check_status == ReceiptPeriodCheckStatus.MATCHED:
+            return "submitted"
+        if self.ai_period_check_status == ReceiptPeriodCheckStatus.MISMATCHED:
+            return "draft"
+        return "neutral"
+
+    @property
+    def needs_period_reupload(self) -> bool:
+        return self.ai_period_check_status == ReceiptPeriodCheckStatus.MISMATCHED
 
     @property
     def file_available(self) -> bool:

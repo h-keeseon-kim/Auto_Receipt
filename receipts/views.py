@@ -23,6 +23,7 @@ from django.urls import reverse, reverse_lazy
 from django.utils import timezone
 from django.utils.text import slugify
 
+from .ai_filename import generate_ai_receipt_filename
 from .forms import (
     MonthSelectForm,
     ReceiptFileReplaceForm,
@@ -38,6 +39,8 @@ from .forms import (
 )
 from .models import (
     Receipt,
+    ReceiptFilenameStatus,
+    ReceiptPeriodCheckStatus,
     RegisteredService,
     ServiceCatalog,
     ServiceDeactivationSource,
@@ -75,6 +78,112 @@ def add_validation_errors(form, exc: ValidationError):
     else:
         for error in getattr(exc, "messages", [str(exc)]):
             form.add_error(None, error)
+
+
+def month_label(value) -> str:
+    return value.strftime("%Y年%m月")
+
+
+def receipt_period_mismatch_message(receipt: Receipt) -> str:
+    expected = month_label(receipt.submission.period_month)
+    actual = receipt.ai_receipt_month.replace("-", "年") + "月" if receipt.ai_receipt_month else "不明"
+    return (
+        f"アップロードされた領収書は提出月（{expected}）ではなく {actual} の領収書として判定されました。"
+        "正しい当月分の領収書を再度アップロードしてください。"
+    )
+
+
+def apply_period_check_to_receipt(receipt: Receipt, result) -> list[str]:
+    """AIで抽出した日付が提出月と一致するかをReceiptに反映する。"""
+
+    expected_month = receipt.submission.period_month if receipt.submission_id else None
+    payment_date = getattr(result, "payment_date", None) if result is not None else None
+    if payment_date:
+        actual_month = payment_date.replace(day=1)
+        receipt.ai_receipt_month = actual_month.strftime("%Y-%m")
+        if expected_month and actual_month == expected_month:
+            receipt.ai_period_check_status = ReceiptPeriodCheckStatus.MATCHED
+            receipt.ai_period_check_memo = f"領収書日付 {payment_date:%Y-%m-%d} は提出月 {expected_month:%Y-%m} と一致しています。"
+        elif expected_month:
+            receipt.ai_period_check_status = ReceiptPeriodCheckStatus.MISMATCHED
+            receipt.ai_period_check_memo = (
+                f"領収書日付 {payment_date:%Y-%m-%d} は提出月 {expected_month:%Y-%m} と一致しません。"
+                "ユーザーへ再アップロードを依頼してください。"
+            )
+        else:
+            receipt.ai_period_check_status = ReceiptPeriodCheckStatus.UNKNOWN
+            receipt.ai_period_check_memo = f"領収書日付 {payment_date:%Y-%m-%d} を抽出しましたが、提出月を確認できませんでした。"
+    else:
+        receipt.ai_receipt_month = ""
+        if result is not None and getattr(result, "status", "") == ReceiptFilenameStatus.SKIPPED:
+            receipt.ai_period_check_status = ReceiptPeriodCheckStatus.NOT_CHECKED
+            receipt.ai_period_check_memo = "AIファイル名修正が未実行のため、提出月との一致確認も未実行です。"
+        else:
+            receipt.ai_period_check_status = ReceiptPeriodCheckStatus.UNKNOWN
+            receipt.ai_period_check_memo = "領収書日付をAIで確認できなかったため、提出月との一致確認はできませんでした。"
+    return ["ai_receipt_month", "ai_period_check_status", "ai_period_check_memo"]
+
+
+def apply_ai_filename_to_receipt(receipt: Receipt):
+    if not receipt.file_available:
+        return None
+
+    try:
+        with receipt.file.open("rb") as file_obj:
+            file_bytes = file_obj.read()
+    except Exception as exc:
+        receipt.generated_filename = ""
+        receipt.ai_filename_status = ReceiptFilenameStatus.FAILED
+        receipt.ai_filename_admin_memo = f"AIファイル名作成前にファイルを読み込めませんでした: {exc}"
+        receipt.ai_filename_checked_at = timezone.now()
+        update_fields = [
+            "generated_filename",
+            "ai_filename_status",
+            "ai_filename_admin_memo",
+            "ai_filename_checked_at",
+            *apply_period_check_to_receipt(receipt, None),
+            "updated_at",
+        ]
+        receipt.save(update_fields=update_fields)
+        return None
+
+    result = generate_ai_receipt_filename(
+        file_bytes=file_bytes,
+        original_filename=receipt.original_filename or Path(receipt.file.name).name,
+        content_type=receipt.content_type,
+        service_display_name=receipt.service_display_name_snapshot,
+    )
+
+    receipt.generated_filename = result.suggested_filename[:255] if result.suggested_filename else ""
+    receipt.ai_filename_status = result.status
+    receipt.ai_filename_admin_memo = result.admin_memo
+    receipt.ai_filename_checked_at = timezone.now()
+    receipt.ai_extracted_payee = result.payee[:160] if result.payee else ""
+    receipt.ai_extracted_card_last4 = result.card_last4[-4:] if result.card_last4 else ""
+
+    update_fields = [
+        "generated_filename",
+        "ai_filename_status",
+        "ai_filename_admin_memo",
+        "ai_filename_checked_at",
+        "ai_extracted_payee",
+        "ai_extracted_card_last4",
+        *apply_period_check_to_receipt(receipt, result),
+        "updated_at",
+    ]
+    if result.status == ReceiptFilenameStatus.GENERATED:
+        if result.payment_date is not None:
+            receipt.issued_on = result.payment_date
+            update_fields.append("issued_on")
+        if result.amount is not None:
+            receipt.amount = result.amount
+            update_fields.append("amount")
+        if result.currency:
+            receipt.currency = result.currency
+            update_fields.append("currency")
+
+    receipt.save(update_fields=update_fields)
+    return result
 
 
 def managed_users_queryset():
@@ -158,6 +267,13 @@ def dashboard(request):
                 except ValidationError as exc:
                     add_validation_errors(receipt_form, exc)
                 else:
+                    apply_ai_filename_to_receipt(receipt)
+                    receipt.refresh_from_db()
+                    if receipt.needs_period_reupload:
+                        error_message = receipt_period_mismatch_message(receipt)
+                        receipt.delete()
+                        messages.error(request, error_message)
+                        return redirect(f"{reverse('dashboard')}?month={month_query(selected_month)}")
                     messages.success(request, f"{receipt.service_display_name_snapshot} の領収書を追加しました。")
                     return redirect(f"{reverse('dashboard')}?month={month_query(selected_month)}")
         elif action == "submit":
@@ -524,9 +640,32 @@ def replace_receipt_file(request, pk: int):
     upload = form.cleaned_data["file"]
     old_storage = receipt.file.storage if receipt.file else None
     old_file_name = receipt.file.name if receipt.file else ""
+    restore_fields = [
+        "file",
+        "original_filename",
+        "generated_filename",
+        "file_size",
+        "content_type",
+        "expires_at",
+        "file_deleted_at",
+        "file_delete_reason",
+        "ai_filename_status",
+        "ai_filename_admin_memo",
+        "ai_filename_checked_at",
+        "ai_extracted_payee",
+        "ai_extracted_card_last4",
+        "ai_receipt_month",
+        "ai_period_check_status",
+        "ai_period_check_memo",
+        "amount",
+        "currency",
+        "issued_on",
+    ]
+    old_values = {field: (receipt.file.name if field == "file" and receipt.file else getattr(receipt, field)) for field in restore_fields}
 
     receipt.file = upload
     receipt.original_filename = upload.name
+    receipt.generated_filename = ""
     receipt.file_size = upload.size
     receipt.content_type = getattr(upload, "content_type", "") or ""
     receipt.expires_at = receipt_expiry_from(timezone.now())
@@ -536,6 +675,7 @@ def replace_receipt_file(request, pk: int):
         update_fields=[
             "file",
             "original_filename",
+            "generated_filename",
             "file_size",
             "content_type",
             "expires_at",
@@ -544,6 +684,24 @@ def replace_receipt_file(request, pk: int):
             "updated_at",
         ]
     )
+
+    apply_ai_filename_to_receipt(receipt)
+    receipt.refresh_from_db()
+    if receipt.needs_period_reupload:
+        rejected_storage = receipt.file.storage if receipt.file else None
+        rejected_file_name = receipt.file.name if receipt.file else ""
+        error_message = receipt_period_mismatch_message(receipt)
+        for field, value in old_values.items():
+            setattr(receipt, field, value)
+        receipt.save(update_fields=[*restore_fields, "updated_at"])
+        if rejected_storage is not None and rejected_file_name and rejected_file_name != old_file_name:
+            try:
+                if rejected_storage.exists(rejected_file_name):
+                    rejected_storage.delete(rejected_file_name)
+            except Exception:
+                pass
+        messages.error(request, error_message)
+        return redirect_back_or(request, fallback_url)
 
     if old_storage is not None and old_file_name and old_file_name != receipt.file.name:
         try:
@@ -667,6 +825,8 @@ def staff_history(request):
         .select_related("submission", "submission__user", "service")
         .order_by("submission__user__username", "service_name_snapshot", "uploaded_at")
     )
+    ai_review_count = receipts.filter(ai_filename_status__in=[ReceiptFilenameStatus.NEEDS_REVIEW, ReceiptFilenameStatus.FAILED]).count()
+    period_mismatch_count = receipts.filter(ai_period_check_status=ReceiptPeriodCheckStatus.MISMATCHED).count()
     stats = {
         "total_users": len(users),
         "submitted": sum(1 for row in rows if row["status"] == "提出済み"),
@@ -677,6 +837,8 @@ def staff_history(request):
         "active_service_count": sum(row["active_service_count"] for row in rows),
         "user_registered_count": sum(row["user_registered_count"] for row in rows),
         "user_stopped_count": sum(row["user_stopped_count"] for row in rows),
+        "ai_review_count": ai_review_count,
+        "period_mismatch_count": period_mismatch_count,
     }
     return render(
         request,
@@ -722,7 +884,7 @@ def download_receipt(request, pk: int):
         raise PermissionDenied
     if not receipt.file_available:
         raise Http404("保存期限が過ぎたか、ファイルが削除済みです。")
-    filename = receipt.original_filename or Path(receipt.file.name).name
+    filename = receipt.display_filename or Path(receipt.file.name).name
     return FileResponse(receipt.file.open("rb"), as_attachment=True, filename=filename)
 
 
@@ -791,7 +953,15 @@ def receipt_manifest_csv(submissions) -> str:
         "uploaded_at",
         "expires_at",
         "file_status",
+        "display_filename",
         "original_filename",
+        "ai_filename_status",
+        "ai_filename_admin_memo",
+        "ai_extracted_payee",
+        "ai_extracted_card_last4",
+        "ai_receipt_month",
+        "ai_period_check_status",
+        "ai_period_check_memo",
         "file_size",
         "memo",
     ])
@@ -811,7 +981,15 @@ def receipt_manifest_csv(submissions) -> str:
                 receipt.uploaded_at.isoformat() if receipt.uploaded_at else "",
                 receipt.expires_at.isoformat() if receipt.expires_at else "",
                 receipt.file_status_label,
+                receipt.display_filename,
                 receipt.original_filename,
+                receipt.get_ai_filename_status_display(),
+                receipt.ai_filename_admin_memo,
+                receipt.ai_extracted_payee,
+                receipt.ai_extracted_card_last4,
+                receipt.ai_receipt_month,
+                receipt.get_ai_period_check_status_display(),
+                receipt.ai_period_check_memo,
                 receipt.file_size or "",
                 receipt.memo,
             ])
@@ -831,10 +1009,10 @@ def build_receipts_zip(submissions, zip_label: str) -> HttpResponse:
             for receipt in submission.receipts.all():
                 if not receipt.file_available:
                     continue
-                service_part = safe_part(receipt.service_display_name_snapshot, f"receipt-{receipt.id}")
-                original = receipt.original_filename or Path(receipt.file.name).name
-                original_suffix = Path(original).suffix.lower() or Path(receipt.file.name).suffix.lower()
-                arcname = f"{period}/{user_part}/{status_part}/{receipt.id}_{service_part}{original_suffix}"
+                display_name = receipt.display_filename or Path(receipt.file.name).name
+                display_stem = safe_part(Path(display_name).stem, f"receipt-{receipt.id}")
+                display_suffix = Path(display_name).suffix.lower() or Path(receipt.file.name).suffix.lower()
+                arcname = f"{period}/{user_part}/{status_part}/{receipt.id}_{display_stem}{display_suffix}"
                 with receipt.file.open("rb") as file_obj:
                     archive.writestr(arcname, file_obj.read())
                     has_files = True
