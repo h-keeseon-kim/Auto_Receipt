@@ -5,15 +5,21 @@ from datetime import date, timedelta
 from pathlib import Path
 
 from django.contrib.auth.models import User
+from django.core.exceptions import ValidationError
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.core.management import call_command
 from django.test import TestCase, override_settings
 from django.urls import reverse
 from django.utils import timezone
 
+from .forms import ReceiptUploadForm
 from .models import BillingType, Receipt, RegisteredService, Submission
 
 
+FAST_PASSWORD_HASHERS = ["django.contrib.auth.hashers.MD5PasswordHasher"]
+
+
+@override_settings(PASSWORD_HASHERS=FAST_PASSWORD_HASHERS)
 class ReceiptFlowTests(TestCase):
     def setUp(self):
         self.media_dir = tempfile.TemporaryDirectory()
@@ -88,6 +94,7 @@ class HealthcheckTests(TestCase):
         self.assertEqual(response.json()["status"], "ok")
 
 
+@override_settings(PASSWORD_HASHERS=FAST_PASSWORD_HASHERS)
 class SignupSettingsTests(TestCase):
     @override_settings(ALLOW_SIGNUP=True)
     def test_register_page_is_available_when_signup_is_enabled(self):
@@ -105,6 +112,7 @@ class SignupSettingsTests(TestCase):
         self.assertContains(response, "管理者に作成を依頼")
 
 
+@override_settings(PASSWORD_HASHERS=FAST_PASSWORD_HASHERS)
 class StaffUserProvisioningTests(TestCase):
     def setUp(self):
         self.admin = User.objects.create_superuser(
@@ -151,6 +159,7 @@ class StaffUserProvisioningTests(TestCase):
         self.assertIn("/admin/login/", response["Location"])
 
 
+@override_settings(PASSWORD_HASHERS=FAST_PASSWORD_HASHERS)
 class ForcedPasswordChangeTests(TestCase):
     def setUp(self):
         self.user = User.objects.create_user(
@@ -193,3 +202,122 @@ class ForcedPasswordChangeTests(TestCase):
 
         self.assertEqual(response.status_code, 302)
         self.assertEqual(response["Location"], reverse("dashboard"))
+
+
+@override_settings(PASSWORD_HASHERS=FAST_PASSWORD_HASHERS)
+class StaffServiceAssignmentTests(TestCase):
+    def setUp(self):
+        self.media_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.media_dir.cleanup)
+        self.override = override_settings(MEDIA_ROOT=self.media_dir.name)
+        self.override.enable()
+        self.addCleanup(self.override.disable)
+        self.admin = User.objects.create_superuser(
+            username="admin",
+            email="admin@example.com",
+            password="admin-password-123",
+        )
+        self.user = User.objects.create_user(
+            username="user@example.com",
+            email="user@example.com",
+            password="password123",
+        )
+        self.other_user = User.objects.create_user(
+            username="other@example.com",
+            email="other@example.com",
+            password="password123",
+        )
+
+    def test_staff_registers_service_for_user_and_user_sees_it(self):
+        self.client.login(username="admin", password="admin-password-123")
+        response = self.client.post(
+            reverse("staff_user_services", args=[self.user.pk]),
+            {
+                "name": "OpenAI API",
+                "billing_type": BillingType.METERED,
+                "is_active": "on",
+                "memo": "API利用料",
+            },
+        )
+
+        self.assertRedirects(response, reverse("staff_user_services", args=[self.user.pk]))
+        service = RegisteredService.objects.get(name="OpenAI API")
+        self.assertEqual(service.user, self.user)
+        self.assertTrue(service.is_active)
+
+        self.client.logout()
+        self.client.login(username="user@example.com", password="password123")
+        response = self.client.get(reverse("dashboard"))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "OpenAI API")
+        self.assertContains(response, "管理者があなたに登録したサービス")
+        self.assertNotContains(response, "サービス追加")
+        self.assertNotContains(response, "サービス編集")
+
+    def test_user_cannot_upload_receipt_for_another_users_service(self):
+        own_service = RegisteredService.objects.create(
+            user=self.user,
+            name="Notion",
+            billing_type=BillingType.SUBSCRIPTION,
+        )
+        other_service = RegisteredService.objects.create(
+            user=self.other_user,
+            name="AWS",
+            billing_type=BillingType.METERED,
+        )
+
+        form = ReceiptUploadForm(user=self.user)
+        service_ids = set(form.fields["service"].queryset.values_list("id", flat=True))
+        self.assertIn(own_service.id, service_ids)
+        self.assertNotIn(other_service.id, service_ids)
+
+        submission = Submission.objects.create(user=self.user, period_month=date(2026, 6, 1))
+        receipt = Receipt(
+            submission=submission,
+            service=other_service,
+            service_name_snapshot=other_service.name,
+            billing_type_snapshot=other_service.billing_type,
+            original_filename="receipt.pdf",
+            file=SimpleUploadedFile("receipt.pdf", b"%PDF-1.4 test", content_type="application/pdf"),
+        )
+
+        with self.assertRaises(ValidationError):
+            receipt.full_clean()
+
+    def test_non_staff_cannot_access_service_management(self):
+        self.client.login(username="user@example.com", password="password123")
+
+        response = self.client.get(reverse("staff_user_services", args=[self.user.pk]))
+        self.assertEqual(response.status_code, 302)
+        self.assertIn("/admin/login/", response["Location"])
+
+        response = self.client.get(reverse("service_create"))
+        self.assertEqual(response.status_code, 302)
+        self.assertIn("/admin/login/", response["Location"])
+
+    def test_staff_can_archive_and_reactivate_user_service(self):
+        service = RegisteredService.objects.create(
+            user=self.user,
+            name="AWS",
+            billing_type=BillingType.METERED,
+        )
+        self.client.login(username="admin", password="admin-password-123")
+
+        response = self.client.post(reverse("staff_service_archive", args=[service.pk]))
+        self.assertRedirects(response, reverse("staff_user_services", args=[self.user.pk]))
+        service.refresh_from_db()
+        self.assertFalse(service.is_active)
+
+        self.client.logout()
+        self.client.login(username="user@example.com", password="password123")
+        response = self.client.get(reverse("dashboard"))
+        self.assertNotContains(response, "AWS")
+        self.assertContains(response, "利用サービスがまだ登録されていません")
+
+        self.client.logout()
+        self.client.login(username="admin", password="admin-password-123")
+        response = self.client.post(reverse("staff_service_activate", args=[service.pk]))
+        self.assertRedirects(response, reverse("staff_user_services", args=[self.user.pk]))
+        service.refresh_from_db()
+        self.assertTrue(service.is_active)

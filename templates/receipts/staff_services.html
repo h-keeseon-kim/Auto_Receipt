@@ -1,0 +1,91 @@
+{% extends "base.html" %}
+{% block title %}利用サービス管理 - Auto Receipt{% endblock %}
+{% block content %}
+<div class="page-title">
+    <div>
+        <h1>利用サービス管理</h1>
+        <p class="muted">管理者がユーザーごとに利用サービスを登録します。一般ユーザーは、ここで登録された利用中サービスだけを選択できます。</p>
+    </div>
+    <div class="actions">
+        <a class="button" href="{% url 'staff_dashboard' %}">提出状況へ戻る</a>
+        <a class="button primary" href="{% url 'staff_service_create' %}">サービス登録</a>
+    </div>
+</div>
+
+<section class="card section">
+    <div class="section-header">
+        <div>
+            <h2>ユーザー別登録状況</h2>
+            <p class="muted">ユーザーを選ぶと、そのユーザーのサービス登録・停止・再開ができます。</p>
+        </div>
+    </div>
+    <div class="table-wrap">
+        <table>
+            <thead><tr><th>ユーザー</th><th>メール</th><th>利用中サービス</th><th>登録サービス合計</th><th>操作</th></tr></thead>
+            <tbody>
+                {% for account in users %}
+                    <tr>
+                        <td><strong>{{ account.username }}</strong></td>
+                        <td>{{ account.email|default:"-" }}</td>
+                        <td>{{ account.active_service_count }}</td>
+                        <td>{{ account.total_service_count }}</td>
+                        <td class="actions">
+                            <a class="button small" href="{% url 'staff_user_services' account.pk %}">このユーザーを管理</a>
+                            <a class="button small" href="{% url 'staff_services' %}?user={{ account.pk }}">一覧表示</a>
+                        </td>
+                    </tr>
+                {% empty %}
+                    <tr><td colspan="5" class="muted center">一般ユーザーがまだ作成されていません。</td></tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</section>
+
+<section class="card section">
+    <div class="section-header">
+        <div>
+            <h2>{% if selected_user %}{{ selected_user.username }} の登録サービス{% else %}登録サービス一覧{% endif %}</h2>
+            <p class="muted">停止中のサービスはユーザーのアップロード画面には表示されません。過去の提出履歴には残ります。</p>
+        </div>
+        {% if selected_user %}
+            <div class="actions">
+                <a class="button" href="{% url 'staff_services' %}">全件表示</a>
+                <a class="button primary" href="{% url 'staff_user_services' selected_user.pk %}">このユーザーへ登録</a>
+            </div>
+        {% endif %}
+    </div>
+    <div class="table-wrap">
+        <table>
+            <thead><tr><th>ユーザー</th><th>サービス</th><th>種別</th><th>状態</th><th>メモ</th><th>操作</th></tr></thead>
+            <tbody>
+                {% for service in services %}
+                    <tr>
+                        <td><strong>{{ service.user.username }}</strong></td>
+                        <td>{{ service.name }}</td>
+                        <td>{{ service.get_billing_type_display }}</td>
+                        <td>{% if service.is_active %}<span class="badge submitted">利用中</span>{% else %}<span class="badge neutral">停止中</span>{% endif %}</td>
+                        <td>{{ service.memo|default:"-"|truncatechars:80 }}</td>
+                        <td class="actions">
+                            <a class="button small" href="{% url 'staff_service_update' service.pk %}">編集</a>
+                            {% if service.is_active %}
+                                <form method="post" action="{% url 'staff_service_archive' service.pk %}" onsubmit="return confirm('このサービスを停止しますか？ユーザーの選択肢から外れます。');">
+                                    {% csrf_token %}
+                                    <button class="button small danger-outline" type="submit">停止</button>
+                                </form>
+                            {% else %}
+                                <form method="post" action="{% url 'staff_service_activate' service.pk %}">
+                                    {% csrf_token %}
+                                    <button class="button small" type="submit">再開</button>
+                                </form>
+                            {% endif %}
+                        </td>
+                    </tr>
+                {% empty %}
+                    <tr><td colspan="6" class="muted center">登録サービスはまだありません。</td></tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</section>
+{% endblock %}

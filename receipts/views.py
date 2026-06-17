@@ -8,13 +8,13 @@ from pathlib import Path
 from django.conf import settings
 from django.contrib import messages
 from django.contrib.admin.views.decorators import staff_member_required
-from django.contrib.auth.views import PasswordChangeView
 from django.contrib.auth import login
 from django.contrib.auth.decorators import login_required
 from django.contrib.auth.mixins import LoginRequiredMixin
 from django.contrib.auth.models import User
+from django.contrib.auth.views import PasswordChangeView
 from django.core.exceptions import PermissionDenied, ValidationError
-from django.db.models import Count, Prefetch
+from django.db.models import Count, Prefetch, Q
 from django.http import FileResponse, Http404, HttpResponse
 from django.shortcuts import get_object_or_404, redirect, render
 from django.urls import reverse, reverse_lazy
@@ -25,7 +25,7 @@ from .forms import (
     MonthSelectForm,
     ReceiptUploadForm,
     RegisterForm,
-    RegisteredServiceForm,
+    StaffServiceForm,
     StaffUserCreateForm,
     StyledPasswordChangeForm,
     current_month,
@@ -59,6 +59,14 @@ def add_validation_errors(form, exc: ValidationError):
     else:
         for error in getattr(exc, "messages", [str(exc)]):
             form.add_error(None, error)
+
+
+def managed_users_queryset():
+    return User.objects.filter(is_active=True, is_staff=False, is_superuser=False).order_by("username")
+
+
+def get_managed_user(user_id: int):
+    return get_object_or_404(User, pk=user_id, is_active=True, is_staff=False, is_superuser=False)
 
 
 class ForcedPasswordChangeView(LoginRequiredMixin, PasswordChangeView):
@@ -161,55 +169,134 @@ def dashboard(request):
     )
 
 
-@login_required
-def service_create(request):
+@staff_member_required
+def staff_services(request):
+    users = managed_users_queryset().annotate(
+        total_service_count=Count("registered_services", distinct=True),
+        active_service_count=Count(
+            "registered_services",
+            filter=Q(registered_services__is_active=True),
+            distinct=True,
+        ),
+    )
+    selected_user = None
+    services = RegisteredService.objects.select_related("user").filter(user__is_staff=False, user__is_superuser=False)
+    user_id = request.GET.get("user")
+    if user_id:
+        selected_user = get_managed_user(user_id)
+        services = services.filter(user=selected_user)
+    services = services.order_by("user__username", "name")
+    return render(
+        request,
+        "receipts/staff_services.html",
+        {
+            "users": users,
+            "services": services,
+            "selected_user": selected_user,
+        },
+    )
+
+
+@staff_member_required
+def staff_user_services(request, user_id: int):
+    managed_user = get_managed_user(user_id)
     if request.method == "POST":
-        form = RegisteredServiceForm(request.POST)
+        form = StaffServiceForm(request.POST, fixed_user=managed_user)
         if form.is_valid():
-            service = form.save(commit=False)
-            service.user = request.user
-            try:
-                service.full_clean()
-                service.save()
-            except ValidationError as exc:
-                form.add_error(None, exc)
-            else:
-                messages.success(request, f"{service.name} を登録しました。")
-                return redirect("dashboard")
+            service = form.save()
+            messages.success(request, f"{managed_user.username} に {service.name} を登録しました。")
+            return redirect("staff_user_services", user_id=managed_user.pk)
     else:
-        form = RegisteredServiceForm()
-    return render(request, "receipts/service_form.html", {"form": form, "title": "サービス登録"})
+        form = StaffServiceForm(fixed_user=managed_user)
+    services = RegisteredService.objects.filter(user=managed_user).order_by("-is_active", "name")
+    return render(
+        request,
+        "receipts/staff_user_services.html",
+        {
+            "managed_user": managed_user,
+            "services": services,
+            "form": form,
+        },
+    )
 
 
-@login_required
-def service_update(request, pk: int):
-    service = get_object_or_404(RegisteredService, pk=pk, user=request.user)
+@staff_member_required
+def staff_service_create(request):
+    initial = {}
+    requested_user_id = request.GET.get("user")
+    if requested_user_id:
+        initial["user"] = get_managed_user(requested_user_id).pk
     if request.method == "POST":
-        form = RegisteredServiceForm(request.POST, instance=service)
+        form = StaffServiceForm(request.POST)
         if form.is_valid():
-            service = form.save(commit=False)
-            try:
-                service.full_clean()
-                service.save()
-            except ValidationError as exc:
-                form.add_error(None, exc)
-            else:
-                messages.success(request, f"{service.name} を更新しました。")
-                return redirect("dashboard")
+            service = form.save()
+            messages.success(request, f"{service.user.username} に {service.name} を登録しました。")
+            return redirect("staff_user_services", user_id=service.user_id)
     else:
-        form = RegisteredServiceForm(instance=service)
-    return render(request, "receipts/service_form.html", {"form": form, "title": "サービス編集", "service": service})
+        form = StaffServiceForm(initial=initial)
+    return render(
+        request,
+        "receipts/staff_service_form.html",
+        {
+            "title": "利用サービス登録",
+            "form": form,
+            "back_url": reverse("staff_services"),
+            "submit_label": "登録する",
+        },
+    )
 
 
-@login_required
-def service_archive(request, pk: int):
-    service = get_object_or_404(RegisteredService, pk=pk, user=request.user)
+@staff_member_required
+def staff_service_update(request, pk: int):
+    service = get_object_or_404(RegisteredService.objects.select_related("user"), pk=pk, user__is_staff=False, user__is_superuser=False)
+    if request.method == "POST":
+        form = StaffServiceForm(request.POST, instance=service, fixed_user=service.user)
+        if form.is_valid():
+            service = form.save()
+            messages.success(request, f"{service.user.username} の {service.name} を更新しました。")
+            return redirect("staff_user_services", user_id=service.user_id)
+    else:
+        form = StaffServiceForm(instance=service, fixed_user=service.user)
+    return render(
+        request,
+        "receipts/staff_service_form.html",
+        {
+            "title": "利用サービス編集",
+            "form": form,
+            "service": service,
+            "managed_user": service.user,
+            "back_url": reverse("staff_user_services", kwargs={"user_id": service.user_id}),
+            "submit_label": "保存する",
+        },
+    )
+
+
+@staff_member_required
+def staff_service_archive(request, pk: int):
+    service = get_object_or_404(RegisteredService.objects.select_related("user"), pk=pk, user__is_staff=False, user__is_superuser=False)
     if request.method != "POST":
         raise Http404
     service.is_active = False
     service.save(update_fields=["is_active", "updated_at"])
-    messages.success(request, f"{service.name} を利用停止にしました。過去の提出履歴は残ります。")
-    return redirect("dashboard")
+    messages.success(request, f"{service.user.username} の {service.name} を利用停止にしました。過去の提出履歴は残ります。")
+    return redirect("staff_user_services", user_id=service.user_id)
+
+
+@staff_member_required
+def staff_service_activate(request, pk: int):
+    service = get_object_or_404(RegisteredService.objects.select_related("user"), pk=pk, user__is_staff=False, user__is_superuser=False)
+    if request.method != "POST":
+        raise Http404
+    service.is_active = True
+    service.save(update_fields=["is_active", "updated_at"])
+    messages.success(request, f"{service.user.username} の {service.name} を利用中に戻しました。")
+    return redirect("staff_user_services", user_id=service.user_id)
+
+
+# 旧URL互換: 一般ユーザーには表示せず、管理者専用のサービス管理へ移行する。
+service_create = staff_service_create
+service_update = staff_service_update
+service_archive = staff_service_archive
 
 
 @login_required
@@ -295,7 +382,13 @@ def staff_user_create(request):
 @staff_member_required
 def staff_dashboard(request):
     selected_month, month_form = parse_month_from_request(request)
-    users = User.objects.filter(is_active=True, is_staff=False).order_by("username")
+    users = managed_users_queryset().annotate(
+        active_service_count=Count(
+            "registered_services",
+            filter=Q(registered_services__is_active=True),
+            distinct=True,
+        )
+    )
     receipt_prefetch = Prefetch("receipts", queryset=Receipt.objects.select_related("service"))
     submissions = (
         Submission.objects.filter(period_month=selected_month, user__in=users)
@@ -330,6 +423,7 @@ def staff_dashboard(request):
                 "receipt_count": receipt_count,
                 "available_file_count": available_file_count,
                 "purged_file_count": purged_file_count,
+                "active_service_count": user.active_service_count,
             }
         )
 
@@ -340,6 +434,7 @@ def staff_dashboard(request):
         "not_started": sum(1 for row in rows if row["status"] == "未着手"),
         "receipt_count": sum(row["receipt_count"] for row in rows),
         "available_file_count": sum(row["available_file_count"] for row in rows),
+        "active_service_count": sum(row["active_service_count"] for row in rows),
     }
     return render(
         request,

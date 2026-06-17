@@ -215,7 +215,9 @@ class Receipt(models.Model):
         if self.submission_id and self.submission.is_submitted:
             raise ValidationError("提出済みの領収書は変更できません。")
         if self.service_id and self.submission_id and self.service.user_id != self.submission.user_id:
-            raise ValidationError("自分の登録サービスだけを選択できます。")
+            raise ValidationError("管理者が割り当てた自分の利用サービスだけを選択できます。")
+        if self.service_id and not self.service.is_active:
+            raise ValidationError("利用中のサービスだけを選択できます。")
 
     def save(self, *args, **kwargs):
         if self.service_id:

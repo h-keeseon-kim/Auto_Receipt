@@ -5,6 +5,7 @@ from . import views
 urlpatterns = [
     path("accounts/register/", views.register, name="register"),
     path("dashboard/", views.dashboard, name="dashboard"),
+    # 旧URL互換。一般ユーザー画面からは表示せず、管理者専用画面へ移行済み。
     path("services/new/", views.service_create, name="service_create"),
     path("services/<int:pk>/edit/", views.service_update, name="service_update"),
     path("services/<int:pk>/archive/", views.service_archive, name="service_archive"),
@@ -14,6 +15,12 @@ urlpatterns = [
     path("receipts/<int:pk>/delete/", views.delete_receipt, name="delete_receipt"),
     path("staff/", views.staff_dashboard, name="staff_dashboard"),
     path("staff/users/new/", views.staff_user_create, name="staff_user_create"),
+    path("staff/services/", views.staff_services, name="staff_services"),
+    path("staff/services/new/", views.staff_service_create, name="staff_service_create"),
+    path("staff/services/<int:pk>/edit/", views.staff_service_update, name="staff_service_update"),
+    path("staff/services/<int:pk>/archive/", views.staff_service_archive, name="staff_service_archive"),
+    path("staff/services/<int:pk>/activate/", views.staff_service_activate, name="staff_service_activate"),
+    path("staff/users/<int:user_id>/services/", views.staff_user_services, name="staff_user_services"),
     path("staff/submissions/<int:pk>/", views.staff_submission_detail, name="staff_submission_detail"),
     path("staff/download/month/", views.staff_download_month, name="staff_download_month"),
     path("staff/download/submission/<int:pk>/", views.staff_download_submission, name="staff_download_submission"),

@@ -35,30 +35,22 @@
 <section class="card section">
     <div class="section-header">
         <div>
-            <h2>登録サービス</h2>
-            <p class="muted">サブスク、従量課金/API、一回払いなど、領収書を提出するサービスを登録します。</p>
+            <h2>利用サービス</h2>
+            <p class="muted">管理者があなたに登録したサービスだけが表示されます。領収書アップロード時はこの一覧から選択します。</p>
         </div>
-        <a class="button" href="{% url 'service_create' %}">サービス追加</a>
     </div>
     <div class="table-wrap">
         <table>
-            <thead><tr><th>サービス</th><th>種別</th><th>今月の領収書</th><th>操作</th></tr></thead>
+            <thead><tr><th>サービス</th><th>種別</th><th>今月の領収書</th></tr></thead>
             <tbody>
             {% for row in service_rows %}
                 <tr>
                     <td><strong>{{ row.service.name }}</strong>{% if row.service.memo %}<div class="muted small">{{ row.service.memo|truncatechars:80 }}</div>{% endif %}</td>
                     <td>{{ row.service.get_billing_type_display }}</td>
                     <td>{% if row.uploaded %}<span class="badge submitted">アップロード済み</span>{% else %}<span class="badge draft">未アップロード</span>{% endif %}</td>
-                    <td class="actions">
-                        <a class="button small" href="{% url 'service_update' row.service.pk %}">編集</a>
-                        <form method="post" action="{% url 'service_archive' row.service.pk %}" onsubmit="return confirm('利用停止にしますか？過去の提出履歴は残ります。');">
-                            {% csrf_token %}
-                            <button class="button small danger-outline" type="submit">停止</button>
-                        </form>
-                    </td>
                 </tr>
             {% empty %}
-                <tr><td colspan="4" class="muted center">まずサービスを登録してください。</td></tr>
+                <tr><td colspan="3" class="muted center">利用サービスがまだ登録されていません。管理者に登録を依頼してください。</td></tr>
             {% endfor %}
             </tbody>
         </table>
@@ -82,7 +74,7 @@
                 <button type="submit" class="button primary">アップロード</button>
             </form>
         {% else %}
-            <p class="muted">領収書をアップロードするには、先にサービス登録が必要です。</p>
+            <p class="muted">領収書をアップロードするには、管理者による利用サービス登録が必要です。</p>
         {% endif %}
     </section>
 {% endif %}

@@ -19,6 +19,8 @@ def apply_design_classes(form):
         widget = field.widget
         if isinstance(widget, forms.CheckboxInput):
             widget.attrs.setdefault("class", "form-check-input")
+        elif isinstance(widget, forms.HiddenInput):
+            continue
         elif isinstance(widget, forms.ClearableFileInput):
             widget.attrs.setdefault("class", "form-control")
         elif isinstance(widget, forms.Select):
@@ -95,18 +97,67 @@ class MonthSelectForm(forms.Form):
         apply_design_classes(self)
 
 
-class RegisteredServiceForm(forms.ModelForm):
+class StaffServiceForm(forms.ModelForm):
+    """管理者が一般ユーザーへ利用サービスを割り当てるためのフォーム。"""
+
     class Meta:
         model = RegisteredService
-        fields = ["name", "billing_type", "is_active", "memo"]
+        fields = ["user", "name", "billing_type", "is_active", "memo"]
         widgets = {
             "name": forms.TextInput(attrs={"placeholder": "例: OpenAI API / Notion / AWS"}),
             "memo": forms.Textarea(attrs={"rows": 3, "placeholder": "任意: 用途、担当、契約メモなど"}),
         }
+        labels = {
+            "user": "対象ユーザー",
+        }
+        help_texts = {
+            "user": "このサービスを利用できる一般ユーザーを選択します。",
+            "is_active": "停止すると、ユーザーのアップロード画面の選択肢から外れます。過去の提出履歴は残ります。",
+        }
 
-    def __init__(self, *args, **kwargs):
+    def __init__(self, *args, fixed_user: User | None = None, **kwargs):
+        self.fixed_user = fixed_user
         super().__init__(*args, **kwargs)
+        user_queryset = User.objects.filter(is_active=True, is_staff=False, is_superuser=False).order_by("username")
+        if self.instance.pk and self.instance.user_id:
+            user_queryset = (user_queryset | User.objects.filter(pk=self.instance.user_id)).distinct().order_by("username")
+        self.fields["user"].queryset = user_queryset
+        self.fields["user"].empty_label = "対象ユーザーを選択"
+        if fixed_user is not None:
+            self.fields["user"].initial = fixed_user.pk
+            self.fields["user"].widget = forms.HiddenInput()
+            self.fields["user"].required = False
         apply_design_classes(self)
+
+    def clean_name(self):
+        name = " ".join((self.cleaned_data.get("name") or "").strip().split())
+        if not name:
+            raise forms.ValidationError("サービス名を入力してください。")
+        return name
+
+    def clean_user(self):
+        if self.fixed_user is not None:
+            return self.fixed_user
+        user = self.cleaned_data.get("user")
+        if user is None:
+            raise forms.ValidationError("対象ユーザーを選択してください。")
+        if user.is_staff or user.is_superuser:
+            raise forms.ValidationError("一般ユーザーだけを選択してください。")
+        return user
+
+    def clean(self):
+        cleaned = super().clean()
+        user = cleaned.get("user")
+        name = cleaned.get("name")
+        if user and name:
+            duplicate = RegisteredService.objects.filter(user=user, name__iexact=name).exclude(pk=self.instance.pk)
+            if duplicate.exists():
+                self.add_error("name", "このユーザーには同じサービス名がすでに登録されています。")
+        return cleaned
+
+
+# 旧バージョンから参照される可能性があるため、互換用に残す。
+RegisteredServiceForm = StaffServiceForm
 
 
 class ReceiptUploadForm(forms.ModelForm):
@@ -119,6 +170,7 @@ class ReceiptUploadForm(forms.ModelForm):
             "file": forms.ClearableFileInput(attrs={"accept": ".pdf,.png,.jpg,.jpeg,.webp"}),
         }
         help_texts = {
+            "service": "管理者が登録した利用サービスから選択します。",
             "amount": "任意。確認用に税込金額などを入力できます。",
             "file": "PDF / PNG / JPG / JPEG / WEBP。最大10MB。ファイル本体は最大3ヶ月保存されます。",
         }
@@ -127,6 +179,7 @@ class ReceiptUploadForm(forms.ModelForm):
         super().__init__(*args, **kwargs)
         if user is not None:
             self.fields["service"].queryset = RegisteredService.objects.filter(user=user, is_active=True).order_by("name")
+        self.fields["service"].empty_label = "利用サービスを選択"
         apply_design_classes(self)
 
     def clean_currency(self):

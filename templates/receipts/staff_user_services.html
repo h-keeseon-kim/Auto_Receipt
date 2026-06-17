@@ -1,0 +1,71 @@
+{% extends "base.html" %}
+{% block title %}{{ managed_user.username }} の利用サービス - Auto Receipt{% endblock %}
+{% block content %}
+<div class="page-title">
+    <div>
+        <h1>{{ managed_user.username }} の利用サービス</h1>
+        <p class="muted">このユーザーが領収書アップロード時に選択できるサービスを管理します。</p>
+    </div>
+    <div class="actions">
+        <a class="button" href="{% url 'staff_services' %}">サービス管理一覧へ</a>
+        <a class="button" href="{% url 'staff_dashboard' %}">提出状況へ戻る</a>
+    </div>
+</div>
+
+<section class="status-grid">
+    <div class="card"><span class="label">対象ユーザー</span><strong>{{ managed_user.username }}</strong></div>
+    <div class="card"><span class="label">メール</span><strong>{{ managed_user.email|default:"-" }}</strong></div>
+    <div class="card"><span class="label">登録サービス数</span><strong>{{ services|length }}</strong></div>
+</section>
+
+<section class="card section">
+    <h2>サービスを登録</h2>
+    <p class="muted">登録後、ユーザーのアップロード画面に「利用中」のサービスとして表示されます。</p>
+    <form method="post" class="stack">
+        {% csrf_token %}
+        {{ form.as_p }}
+        <button type="submit" class="button primary">登録する</button>
+    </form>
+</section>
+
+<section class="card section">
+    <div class="section-header">
+        <div>
+            <h2>登録済みサービス</h2>
+            <p class="muted">停止中のサービスは新規アップロードでは選択できません。過去の提出履歴は残ります。</p>
+        </div>
+    </div>
+    <div class="table-wrap">
+        <table>
+            <thead><tr><th>サービス</th><th>種別</th><th>状態</th><th>メモ</th><th>更新日時</th><th>操作</th></tr></thead>
+            <tbody>
+                {% for service in services %}
+                    <tr>
+                        <td><strong>{{ service.name }}</strong></td>
+                        <td>{{ service.get_billing_type_display }}</td>
+                        <td>{% if service.is_active %}<span class="badge submitted">利用中</span>{% else %}<span class="badge neutral">停止中</span>{% endif %}</td>
+                        <td>{{ service.memo|default:"-"|truncatechars:80 }}</td>
+                        <td>{{ service.updated_at|date:"Y-m-d H:i" }}</td>
+                        <td class="actions">
+                            <a class="button small" href="{% url 'staff_service_update' service.pk %}">編集</a>
+                            {% if service.is_active %}
+                                <form method="post" action="{% url 'staff_service_archive' service.pk %}" onsubmit="return confirm('このサービスを停止しますか？ユーザーの選択肢から外れます。');">
+                                    {% csrf_token %}
+                                    <button class="button small danger-outline" type="submit">停止</button>
+                                </form>
+                            {% else %}
+                                <form method="post" action="{% url 'staff_service_activate' service.pk %}">
+                                    {% csrf_token %}
+                                    <button class="button small" type="submit">再開</button>
+                                </form>
+                            {% endif %}
+                        </td>
+                    </tr>
+                {% empty %}
+                    <tr><td colspan="6" class="muted center">このユーザーにはサービスがまだ登録されていません。</td></tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</section>
+{% endblock %}
