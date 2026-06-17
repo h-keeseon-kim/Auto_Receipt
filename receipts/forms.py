@@ -107,6 +107,12 @@ class MonthSelectForm(forms.Form):
         apply_design_classes(self)
 
 
+def same_service_identity_q(catalog: ServiceCatalog) -> Q:
+    """同一サービス判定。サービス名だけでなく支払い種別も含める。"""
+
+    return Q(catalog_service=catalog) | Q(name__iexact=catalog.name, billing_type=catalog.billing_type)
+
+
 class ServiceCatalogForm(forms.ModelForm):
     """管理者がユーザーに公開するサービスマスターを登録するフォーム。"""
 
@@ -129,10 +135,17 @@ class ServiceCatalogForm(forms.ModelForm):
         name = " ".join((self.cleaned_data.get("name") or "").strip().split())
         if not name:
             raise forms.ValidationError("サービス名を入力してください。")
-        duplicate = ServiceCatalog.objects.filter(name__iexact=name).exclude(pk=self.instance.pk)
-        if duplicate.exists():
-            raise forms.ValidationError("同じサービス名のマスターがすでに登録されています。")
         return name
+
+    def clean(self):
+        cleaned = super().clean()
+        name = cleaned.get("name")
+        billing_type = cleaned.get("billing_type")
+        if name and billing_type:
+            duplicate = ServiceCatalog.objects.filter(name__iexact=name, billing_type=billing_type).exclude(pk=self.instance.pk)
+            if duplicate.exists():
+                raise forms.ValidationError("同じサービス名・同じ支払い種別のマスターがすでに登録されています。")
+        return cleaned
 
 
 class StaffServiceForm(forms.ModelForm):
@@ -170,11 +183,14 @@ class StaffServiceForm(forms.ModelForm):
             self.fields["user"].widget = forms.HiddenInput()
             self.fields["user"].required = False
 
-        catalog_queryset = ServiceCatalog.objects.filter(is_active=True).order_by("name")
+        catalog_queryset = ServiceCatalog.objects.filter(is_active=True).order_by("name", "billing_type")
         if self.instance.pk and self.instance.catalog_service_id:
-            catalog_queryset = (catalog_queryset | ServiceCatalog.objects.filter(pk=self.instance.catalog_service_id)).distinct().order_by("name")
+            catalog_queryset = (
+                catalog_queryset | ServiceCatalog.objects.filter(pk=self.instance.catalog_service_id)
+            ).distinct().order_by("name", "billing_type")
         self.fields["catalog_service"].queryset = catalog_queryset
         self.fields["catalog_service"].empty_label = "サービスマスターを選択"
+        self.fields["catalog_service"].label_from_instance = lambda catalog: catalog.display_name
         apply_design_classes(self)
 
     def clean_user(self):
@@ -194,9 +210,9 @@ class StaffServiceForm(forms.ModelForm):
         is_active = cleaned.get("is_active")
         final_receipt_month = cleaned.get("final_receipt_month")
         if user and catalog:
-            duplicate = RegisteredService.objects.filter(user=user, name__iexact=catalog.name).exclude(pk=self.instance.pk)
+            duplicate = RegisteredService.objects.filter(user=user).filter(same_service_identity_q(catalog)).exclude(pk=self.instance.pk)
             if duplicate.exists():
-                self.add_error("catalog_service", "このユーザーには同じサービスがすでに登録されています。停止中の場合は再開してください。")
+                self.add_error("catalog_service", "このユーザーには同じサービス・同じ支払い種別がすでに登録されています。停止中の場合は再開してください。")
         if not is_active and final_receipt_month is None and self.instance.deactivation_source == ServiceDeactivationSource.USER:
             self.add_error("final_receipt_month", "ユーザー停止の記録には最終領収書月が必要です。")
         return cleaned
@@ -247,23 +263,34 @@ class UserServiceRegistrationForm(forms.Form):
     def __init__(self, *args, user: User, **kwargs):
         self.user = user
         super().__init__(*args, **kwargs)
-        active_service_names = RegisteredService.objects.filter(user=user, is_active=True).values_list("name", flat=True)
-        self.fields["catalog_service"].queryset = ServiceCatalog.objects.filter(is_active=True).exclude(
-            name__in=list(active_service_names)
-        ).order_by("name")
+        queryset = ServiceCatalog.objects.filter(is_active=True).order_by("name", "billing_type")
+        active_services = list(RegisteredService.objects.filter(user=user, is_active=True))
+        exclude_query = Q()
+        has_exclusions = False
+        active_catalog_ids = [service.catalog_service_id for service in active_services if service.catalog_service_id]
+        if active_catalog_ids:
+            exclude_query |= Q(pk__in=active_catalog_ids)
+            has_exclusions = True
+        for service in active_services:
+            exclude_query |= Q(name__iexact=service.name, billing_type=service.billing_type)
+            has_exclusions = True
+        if has_exclusions:
+            queryset = queryset.exclude(exclude_query)
+        self.fields["catalog_service"].queryset = queryset
+        self.fields["catalog_service"].label_from_instance = lambda catalog: catalog.display_name
         apply_design_classes(self)
 
     def clean_catalog_service(self):
         catalog = self.cleaned_data["catalog_service"]
-        active_duplicate = RegisteredService.objects.filter(user=self.user, name__iexact=catalog.name, is_active=True)
+        active_duplicate = RegisteredService.objects.filter(user=self.user, is_active=True).filter(same_service_identity_q(catalog))
         if active_duplicate.exists():
-            raise forms.ValidationError("このサービスはすでに利用中です。")
+            raise forms.ValidationError("このサービス・支払い種別はすでに利用中です。")
         return catalog
 
     def save(self) -> RegisteredService:
         catalog = self.cleaned_data["catalog_service"]
         memo = self.cleaned_data.get("memo", "")
-        service = RegisteredService.objects.filter(user=self.user, name__iexact=catalog.name).order_by("id").first()
+        service = RegisteredService.objects.filter(user=self.user).filter(same_service_identity_q(catalog)).order_by("id").first()
         if service is None:
             service = RegisteredService(
                 user=self.user,
@@ -332,7 +359,7 @@ class ReceiptUploadForm(forms.ModelForm):
     def __init__(self, *args, user=None, period_month=None, **kwargs):
         super().__init__(*args, **kwargs)
         if user is not None:
-            self.fields["service"].queryset = RegisteredService.objects.uploadable_for(user, period_month).order_by("-is_active", "name")
+            self.fields["service"].queryset = RegisteredService.objects.uploadable_for(user, period_month).order_by("-is_active", "name", "billing_type")
         self.fields["service"].empty_label = "利用サービスを選択"
         self.fields["service"].label_from_instance = self.service_label
         apply_design_classes(self)
@@ -340,10 +367,10 @@ class ReceiptUploadForm(forms.ModelForm):
     @staticmethod
     def service_label(service: RegisteredService) -> str:
         if service.is_active:
-            return service.name
+            return service.display_name
         if service.final_receipt_month:
-            return f"{service.name}（停止済み・最終 {service.final_receipt_month:%Y-%m}）"
-        return f"{service.name}（停止済み）"
+            return f"{service.display_name}（停止済み・最終 {service.final_receipt_month:%Y-%m}）"
+        return f"{service.display_name}（停止済み）"
 
     def clean_currency(self):
         currency = self.cleaned_data.get("currency", "JPY")

@@ -32,7 +32,7 @@ class ReceiptInline(admin.TabularInline):
 
 @admin.register(ServiceCatalog)
 class ServiceCatalogAdmin(admin.ModelAdmin):
-    list_display = ("name", "billing_type", "is_active", "created_by", "updated_at")
+    list_display = ("display_name", "name", "billing_type", "is_active", "created_by", "updated_at")
     list_filter = ("billing_type", "is_active")
     search_fields = ("name", "memo", "created_by__username", "created_by__email")
 
@@ -40,6 +40,7 @@ class ServiceCatalogAdmin(admin.ModelAdmin):
 @admin.register(RegisteredService)
 class RegisteredServiceAdmin(admin.ModelAdmin):
     list_display = (
+        "display_name",
         "name",
         "user",
         "billing_type",

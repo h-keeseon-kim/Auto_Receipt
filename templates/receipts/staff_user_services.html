@@ -41,7 +41,7 @@
             <tbody>
                 {% for service in services %}
                     <tr>
-                        <td><strong>{{ service.name }}</strong></td>
+                        <td><strong>{{ service.display_name }}</strong></td>
                         <td>{{ service.get_billing_type_display }}</td>
                         <td>{% if service.is_active %}<span class="badge submitted">利用中</span>{% else %}<span class="badge neutral">停止中</span>{% endif %}</td>
                         <td><span class="badge {{ service.source_badge_class }}">{{ service.get_registration_source_display }}</span></td>

@@ -31,7 +31,7 @@
             <tbody>
                 {% for service in active_services %}
                     <tr>
-                        <td><strong>{{ service.name }}</strong></td>
+                        <td><strong>{{ service.display_name }}</strong></td>
                         <td>{{ service.get_billing_type_display }}</td>
                         <td><span class="badge {{ service.source_badge_class }}">{{ service.get_registration_source_display }}</span></td>
                         <td>{{ service.memo|default:"-"|truncatechars:80 }}</td>
@@ -60,7 +60,7 @@
             <tbody>
                 {% for service in stopped_services %}
                     <tr>
-                        <td><strong>{{ service.name }}</strong></td>
+                        <td><strong>{{ service.display_name }}</strong></td>
                         <td>{{ service.get_billing_type_display }}</td>
                         <td>{% if service.deactivation_source %}<span class="badge {{ service.stop_badge_class }}">{{ service.get_deactivation_source_display }}</span>{% else %}-{% endif %}</td>
                         <td>{% if service.final_receipt_month %}{{ service.final_receipt_month|date:"Y年m月" }}{% else %}-{% endif %}</td>

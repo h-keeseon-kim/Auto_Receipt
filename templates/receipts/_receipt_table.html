@@ -16,7 +16,7 @@
             {% for receipt in receipts %}
                 <tr>
                     <td>
-                        <strong>{{ receipt.service_name_snapshot }}</strong>
+                        <strong>{{ receipt.service_display_name_snapshot }}</strong>
                         {% if receipt.memo %}<div class="muted small">{{ receipt.memo|linebreaksbr }}</div>{% endif %}
                     </td>
                     <td>{{ receipt.get_billing_type_snapshot_display }}</td>

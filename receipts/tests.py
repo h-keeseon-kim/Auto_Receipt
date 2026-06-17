@@ -355,6 +355,71 @@ class StaffServiceAssignmentTests(TestCase):
         self.assertEqual(catalog.billing_type, BillingType.SUBSCRIPTION)
         self.assertEqual(catalog.created_by, self.admin)
 
+    def test_staff_can_create_same_catalog_name_with_different_billing_type(self):
+        self.client.login(username="admin", password="admin-password-123")
+        response = self.client.post(
+            reverse("staff_catalog_create"),
+            {
+                "name": "ChatGPT",
+                "billing_type": BillingType.SUBSCRIPTION,
+                "is_active": "on",
+            },
+        )
+        self.assertRedirects(response, reverse("staff_services"))
+
+        response = self.client.post(
+            reverse("staff_catalog_create"),
+            {
+                "name": "ChatGPT",
+                "billing_type": BillingType.METERED,
+                "is_active": "on",
+            },
+        )
+        self.assertRedirects(response, reverse("staff_services"))
+
+        self.assertEqual(ServiceCatalog.objects.filter(name="ChatGPT").count(), 2)
+        response = self.client.get(reverse("staff_services"))
+        self.assertContains(response, "ChatGPT（サブスク）")
+        self.assertContains(response, "ChatGPT（従量課金 / API）")
+
+    def test_staff_cannot_create_same_catalog_name_and_same_billing_type(self):
+        ServiceCatalog.objects.create(name="ChatGPT", billing_type=BillingType.SUBSCRIPTION, created_by=self.admin)
+        self.client.login(username="admin", password="admin-password-123")
+        response = self.client.post(
+            reverse("staff_catalog_create"),
+            {
+                "name": "chatgpt",
+                "billing_type": BillingType.SUBSCRIPTION,
+                "is_active": "on",
+            },
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "同じサービス名・同じ支払い種別のマスターがすでに登録されています。")
+
+    def test_staff_can_assign_same_name_with_different_billing_type_to_same_user(self):
+        subscription = ServiceCatalog.objects.create(name="ChatGPT", billing_type=BillingType.SUBSCRIPTION, created_by=self.admin)
+        metered = ServiceCatalog.objects.create(name="ChatGPT", billing_type=BillingType.METERED, created_by=self.admin)
+        self.client.login(username="admin", password="admin-password-123")
+
+        for catalog in [subscription, metered]:
+            response = self.client.post(
+                reverse("staff_user_services", args=[self.user.pk]),
+                {
+                    "catalog_service": catalog.pk,
+                    "is_active": "on",
+                },
+            )
+            self.assertRedirects(response, reverse("staff_user_services", args=[self.user.pk]))
+
+        services = RegisteredService.objects.filter(user=self.user, name="ChatGPT").order_by("billing_type")
+        self.assertEqual(services.count(), 2)
+        self.assertEqual({service.billing_type for service in services}, {BillingType.SUBSCRIPTION, BillingType.METERED})
+
+        response = self.client.get(reverse("staff_user_services", args=[self.user.pk]))
+        self.assertContains(response, "ChatGPT（サブスク）")
+        self.assertContains(response, "ChatGPT（従量課金 / API）")
+
 
 @override_settings(PASSWORD_HASHERS=FAST_PASSWORD_HASHERS)
 class UserServiceRegistrationTests(TestCase):
@@ -386,8 +451,35 @@ class UserServiceRegistrationTests(TestCase):
         self.client.login(username="admin", password="admin-password-123")
         response = self.client.get(reverse("staff_services"))
         self.assertContains(response, "ユーザー操作の通知")
-        self.assertContains(response, "Slack")
+        self.assertContains(response, "Slack（サブスク）")
         self.assertContains(response, "ユーザー登録")
+
+    def test_user_can_register_same_name_with_different_billing_type(self):
+        subscription = ServiceCatalog.objects.create(name="ChatGPT", billing_type=BillingType.SUBSCRIPTION, created_by=self.admin)
+        metered = ServiceCatalog.objects.create(name="ChatGPT", billing_type=BillingType.METERED, created_by=self.admin)
+        self.client.login(username="user@example.com", password="password123")
+
+        response = self.client.get(reverse("user_service_create"))
+        self.assertContains(response, "ChatGPT（サブスク）")
+        self.assertContains(response, "ChatGPT（従量課金 / API）")
+
+        response = self.client.post(reverse("user_service_create"), {"catalog_service": subscription.pk})
+        self.assertRedirects(response, reverse("user_services"))
+
+        response = self.client.get(reverse("user_service_create"))
+        self.assertNotContains(response, "ChatGPT（サブスク）")
+        self.assertContains(response, "ChatGPT（従量課金 / API）")
+
+        response = self.client.post(reverse("user_service_create"), {"catalog_service": metered.pk})
+        self.assertRedirects(response, reverse("user_services"))
+
+        services = RegisteredService.objects.filter(user=self.user, name="ChatGPT")
+        self.assertEqual(services.count(), 2)
+        self.assertEqual({service.billing_type for service in services}, {BillingType.SUBSCRIPTION, BillingType.METERED})
+
+        response = self.client.get(reverse("dashboard"))
+        self.assertContains(response, "ChatGPT（サブスク）")
+        self.assertContains(response, "ChatGPT（従量課金 / API）")
 
     def test_user_can_stop_service_with_final_receipt_month_and_staff_can_see_it(self):
         service = RegisteredService.objects.create(

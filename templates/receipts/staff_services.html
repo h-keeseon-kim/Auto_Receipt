@@ -26,7 +26,7 @@
             <tbody>
                 {% for catalog in catalog_services %}
                     <tr>
-                        <td><strong>{{ catalog.name }}</strong></td>
+                        <td><strong>{{ catalog.display_name }}</strong></td>
                         <td>{{ catalog.get_billing_type_display }}</td>
                         <td>{% if catalog.is_active %}<span class="badge submitted">選択可能</span>{% else %}<span class="badge neutral">停止中</span>{% endif %}</td>
                         <td>{{ catalog.active_user_count }}</td>
@@ -69,7 +69,7 @@
                 {% for service in user_change_services %}
                     <tr>
                         <td><strong>{{ service.user.username }}</strong></td>
-                        <td>{{ service.name }}</td>
+                        <td>{{ service.display_name }}</td>
                         <td><span class="badge {{ service.source_badge_class }}">{{ service.get_registration_source_display }}</span></td>
                         <td>{% if service.is_active %}<span class="badge submitted">利用中</span>{% else %}<span class="badge neutral">停止中</span>{% endif %}</td>
                         <td>{% if service.deactivation_source %}<span class="badge {{ service.stop_badge_class }}">{{ service.get_deactivation_source_display }}</span>{% else %}-{% endif %}</td>
@@ -136,7 +136,7 @@
                 {% for service in services %}
                     <tr>
                         <td><strong>{{ service.user.username }}</strong></td>
-                        <td>{{ service.name }}</td>
+                        <td>{{ service.display_name }}</td>
                         <td>{{ service.get_billing_type_display }}</td>
                         <td>{% if service.is_active %}<span class="badge submitted">利用中</span>{% else %}<span class="badge neutral">停止中</span>{% endif %}</td>
                         <td><span class="badge {{ service.source_badge_class }}">{{ service.get_registration_source_display }}</span></td>

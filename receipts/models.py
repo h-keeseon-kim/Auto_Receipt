@@ -9,6 +9,7 @@ from django.core.exceptions import ValidationError
 from django.core.validators import FileExtensionValidator, MinValueValidator
 from django.db import models
 from django.db.models import Q
+from django.db.models.functions import Lower
 from django.db.models.signals import post_delete, post_save
 from django.dispatch import receiver
 from django.urls import reverse
@@ -73,7 +74,7 @@ class ServiceDeactivationSource(models.TextChoices):
 class ServiceCatalog(models.Model):
     """管理者が登録するサービスマスター。ユーザーはこの一覧から利用登録する。"""
 
-    name = models.CharField("サービス名", max_length=120, unique=True)
+    name = models.CharField("サービス名", max_length=120)
     billing_type = models.CharField("支払い種別", max_length=20, choices=BillingType.choices)
     is_active = models.BooleanField("選択可能", default=True)
     memo = models.TextField("メモ", blank=True)
@@ -89,7 +90,10 @@ class ServiceCatalog(models.Model):
     updated_at = models.DateTimeField("更新日時", auto_now=True)
 
     class Meta:
-        ordering = ["name"]
+        ordering = ["name", "billing_type"]
+        constraints = [
+            models.UniqueConstraint(Lower("name"), "billing_type", name="unique_service_catalog_name_billing_type_ci"),
+        ]
         verbose_name = "サービスマスター"
         verbose_name_plural = "サービスマスター"
 
@@ -99,8 +103,12 @@ class ServiceCatalog(models.Model):
         if not self.name:
             raise ValidationError({"name": "サービス名を入力してください。"})
 
+    @property
+    def display_name(self) -> str:
+        return f"{self.name}（{self.get_billing_type_display()}）"
+
     def __str__(self) -> str:
-        return self.name
+        return self.display_name
 
 
 class RegisteredServiceQuerySet(models.QuerySet):
@@ -110,11 +118,11 @@ class RegisteredServiceQuerySet(models.QuerySet):
     def uploadable_for(self, user, period_month=None):
         queryset = self.filter(user=user)
         if period_month is None:
-            return queryset.filter(is_active=True).order_by("name")
+            return queryset.filter(is_active=True).order_by("name", "billing_type")
         period_month = month_start(period_month)
         return queryset.filter(
             Q(is_active=True) | Q(is_active=False, final_receipt_month__gte=period_month)
-        ).order_by("-is_active", "name")
+        ).order_by("-is_active", "name", "billing_type")
 
 
 class RegisteredService(models.Model):
@@ -169,9 +177,14 @@ class RegisteredService(models.Model):
 
     class Meta:
         constraints = [
-            models.UniqueConstraint(fields=["user", "name"], name="unique_registered_service_per_user"),
+            models.UniqueConstraint(
+                "user",
+                Lower("name"),
+                "billing_type",
+                name="unique_registered_service_per_user_name_billing_type_ci",
+            ),
         ]
-        ordering = ["-is_active", "name"]
+        ordering = ["-is_active", "name", "billing_type"]
         verbose_name = "登録サービス"
         verbose_name_plural = "登録サービス"
 
@@ -205,6 +218,10 @@ class RegisteredService(models.Model):
     def is_uploadable_for(self, period_month) -> bool:
         period_month = month_start(period_month)
         return self.is_active or bool(self.final_receipt_month and period_month <= self.final_receipt_month)
+
+    @property
+    def display_name(self) -> str:
+        return f"{self.name}（{self.get_billing_type_display()}）"
 
     @property
     def source_badge_class(self) -> str:
@@ -253,7 +270,7 @@ class RegisteredService(models.Model):
         )
 
     def __str__(self) -> str:
-        return f"{self.name} / {self.user}"
+        return f"{self.display_name} / {self.user}"
 
 
 class Submission(models.Model):
@@ -398,6 +415,10 @@ class Receipt(models.Model):
         if self.file and not self.expires_at:
             self.expires_at = receipt_expiry_from(timezone.now())
         super().save(*args, **kwargs)
+
+    @property
+    def service_display_name_snapshot(self) -> str:
+        return f"{self.service_name_snapshot}（{self.get_billing_type_snapshot_display()}）"
 
     @property
     def file_available(self) -> bool:

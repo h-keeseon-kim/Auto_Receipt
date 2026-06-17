@@ -48,7 +48,7 @@
             <tbody>
             {% for row in service_rows %}
                 <tr>
-                    <td><strong>{{ row.service.name }}</strong>{% if row.service.memo %}<div class="muted small">{{ row.service.memo|truncatechars:80 }}</div>{% endif %}</td>
+                    <td><strong>{{ row.service.display_name }}</strong>{% if row.service.memo %}<div class="muted small">{{ row.service.memo|truncatechars:80 }}</div>{% endif %}</td>
                     <td>{{ row.service.get_billing_type_display }}</td>
                     <td><span class="badge {{ row.service.source_badge_class }}">{{ row.service.get_registration_source_display }}</span></td>
                     <td>{% if row.uploaded %}<span class="badge submitted">アップロード済み</span>{% else %}<span class="badge draft">未アップロード</span>{% endif %}</td>
@@ -75,7 +75,7 @@
             <tbody>
             {% for row in stopped_rows %}
                 <tr>
-                    <td><strong>{{ row.service.name }}</strong></td>
+                    <td><strong>{{ row.service.display_name }}</strong></td>
                     <td>{% if row.service.final_receipt_month %}{{ row.service.final_receipt_month|date:"Y年m月" }}{% else %}-{% endif %}</td>
                     <td>{% if row.service.deactivation_source %}<span class="badge {{ row.service.stop_badge_class }}">{{ row.service.get_deactivation_source_display }}</span>{% else %}-{% endif %}</td>
                     <td>{% if row.uploadable %}<span class="badge draft">選択可</span>{% else %}<span class="badge neutral">選択不可</span>{% endif %}</td>
