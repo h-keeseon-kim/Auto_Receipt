@@ -158,10 +158,10 @@ class ReceiptAdmin(admin.ModelAdmin):
 
 @admin.register(UserProfile)
 class UserProfileAdmin(admin.ModelAdmin):
-    list_display = ("user", "must_change_password", "initial_password_generated_at", "password_changed_at", "created_by")
-    list_filter = ("must_change_password", "initial_password_generated_at", "password_changed_at")
+    list_display = ("user", "must_change_password", "initial_password_generated_at", "password_changed_at", "tutorial_completed_at", "created_by")
+    list_filter = ("must_change_password", "initial_password_generated_at", "password_changed_at", "tutorial_completed_at")
     search_fields = ("user__username", "user__email", "created_by__username", "created_by__email")
-    readonly_fields = ("created_at", "updated_at", "initial_password_generated_at", "password_changed_at")
+    readonly_fields = ("created_at", "updated_at", "initial_password_generated_at", "password_changed_at", "tutorial_completed_at")
 
 
 @admin.register(ReceiptResubmissionRequest)

@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% block title %}ユーザー発行 - Auto Receipt{% endblock %}
+{% block title %}ユーザー発行 - ReceiptHub{% endblock %}
 {% block content %}
 <div class="page-title">
     <div>
@@ -33,7 +33,7 @@
 </section>
 {% endif %}
 
-<section class="card section">
+<section class="card section" data-tutorial-target="staff-user-create-form">
     <h2>新規ユーザー作成</h2>
     <form method="post" class="stack">
         {% csrf_token %}

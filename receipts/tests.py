@@ -29,6 +29,7 @@ from .models import (
     ServiceRegistrationSource,
     Submission,
     SubmissionStatus,
+    UserProfile,
 )
 
 
@@ -1325,3 +1326,56 @@ class UserServiceRegistrationTests(TestCase):
 
         with self.assertRaises(ValidationError):
             receipt.full_clean()
+
+
+@override_settings(PASSWORD_HASHERS=FAST_PASSWORD_HASHERS)
+class TutorialTests(TestCase):
+    def test_app_name_is_receipthub_and_user_tutorial_auto_opens_until_completed(self):
+        user = User.objects.create_user(username="tutorial@example.com", email="tutorial@example.com", password="password123")
+        self.client.login(username="tutorial@example.com", password="password123")
+
+        response = self.client.get(reverse("user_services"))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "ReceiptHub")
+        self.assertContains(response, "data-tutorial-open")
+        self.assertContains(response, 'data-auto-start="true"')
+        self.assertContains(response, 'data-tutorial-target="user-services-nav"')
+        self.assertContains(response, 'data-tutorial-target="service-registration-button"')
+        self.assertContains(response, "完了後も右上の「?」からいつでも再表示できます。")
+
+        complete_response = self.client.post(reverse("tutorial_complete"), HTTP_X_REQUESTED_WITH="XMLHttpRequest")
+
+        self.assertEqual(complete_response.status_code, 200)
+        self.assertJSONEqual(complete_response.content, {"ok": True, "tutorial_completed": True})
+        user.profile.refresh_from_db()
+        self.assertIsNotNone(user.profile.tutorial_completed_at)
+
+        response = self.client.get(reverse("user_services"))
+        self.assertContains(response, 'data-auto-start="false"')
+        self.assertContains(response, "data-tutorial-open")
+
+    def test_staff_gets_staff_tutorial_steps(self):
+        admin = User.objects.create_superuser(username="admin", email="admin@example.com", password="admin-password-123")
+        self.client.login(username="admin", password="admin-password-123")
+
+        response = self.client.get(reverse("history"))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, 'data-auto-start="true"')
+        self.assertContains(response, 'data-tutorial-target="staff-history-nav"')
+        self.assertContains(response, 'data-tutorial-target="staff-status-table"')
+        self.assertContains(response, 'data-tutorial-target="staff-receipt-table"')
+        self.assertContains(response, "ReceiptHub")
+
+    def test_tutorial_completion_requires_login_and_post(self):
+        get_response = self.client.get(reverse("tutorial_complete"))
+        self.assertEqual(get_response.status_code, 302)
+        self.assertIn(reverse("login"), get_response["Location"])
+
+        user = User.objects.create_user(username="postonly@example.com", password="password123")
+        self.client.login(username="postonly@example.com", password="password123")
+        response = self.client.get(reverse("tutorial_complete"))
+        self.assertEqual(response.status_code, 405)
+        user.profile.refresh_from_db()
+        self.assertIsNone(user.profile.tutorial_completed_at)

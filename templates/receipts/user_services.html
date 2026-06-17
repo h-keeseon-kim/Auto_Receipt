@@ -1,7 +1,7 @@
 {% extends "base.html" %}
-{% block title %}利用サービス管理 - Auto Receipt{% endblock %}
+{% block title %}利用サービス管理 - ReceiptHub{% endblock %}
 {% block content %}
-<div class="page-title">
+<div class="page-title" data-tutorial-target="user-services-page">
     <div>
         <h1>利用サービス管理</h1>
         <p class="muted">新しく使い始めたサービスを自分で登録し、使わなくなったサービスは最終領収書月を指定して停止できます。</p>
@@ -14,14 +14,14 @@
     <div class="card"><span class="label">選択可能なサービスマスター</span><strong>{{ available_catalog_count }}</strong></div>
 </section>
 
-<section class="card section">
+<section class="card section" data-tutorial-target="active-services-section">
     <div class="section-header">
         <div>
             <h2>利用中サービス</h2>
             <p class="muted">領収書アップロード時に通常表示されるサービスです。</p>
         </div>
         <div class="actions">
-            <a class="button primary" href="{% url 'user_service_create' %}">サービス利用登録</a>
+            <a class="button primary" href="{% url 'user_service_create' %}" data-tutorial-target="service-registration-button">サービス利用登録</a>
         </div>
     </div>
     <div class="table-wrap">
@@ -46,7 +46,7 @@
     </div>
 </section>
 
-<section class="card section">
+<section class="card section" data-tutorial-target="stopped-services-section">
     <div class="section-header">
         <div>
             <h2>停止済みサービス</h2>

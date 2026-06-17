@@ -1,12 +1,12 @@
 {% extends "base.html" %}
-{% block title %}領収書アップロード - Auto Receipt{% endblock %}
+{% block title %}領収書アップロード - ReceiptHub{% endblock %}
 {% block content %}
 <div class="page-title">
     <div>
         <h1>領収書アップロード</h1>
         <p class="muted">対象月ごとに領収書をアップロードし、内容を確認してから提出します。</p>
     </div>
-    <form method="get" class="month-form">
+    <form method="get" class="month-form" data-tutorial-target="upload-month-form">
         {{ month_form.month.label_tag }}
         {{ month_form.month }}
         <button class="button" type="submit">表示</button>
@@ -61,7 +61,7 @@
         <a class="button primary" href="{{ submission.get_absolute_url }}">提出内容を見る</a>
     </section>
 {% else %}
-    <section class="card section">
+    <section class="card section" data-tutorial-target="receipt-add-form">
         <h2>領収書を追加</h2>
         {% if uploadable_services %}
             <form method="post" enctype="multipart/form-data" class="form-grid auto-upload-form" data-auto-upload-form>
@@ -90,14 +90,14 @@
     </section>
 {% endif %}
 
-<section class="card section">
+<section class="card section" data-tutorial-target="uploaded-receipts-section">
     <div class="section-header">
         <h2>アップロード済み領収書</h2>
         {% if not submission.is_submitted %}
             <form method="post" onsubmit="return confirm('この内容で提出しますか？提出後は新規追加と削除はできませんが、ファイル修正は可能です。');">
                 {% csrf_token %}
                 <input type="hidden" name="action" value="submit">
-                <button type="submit" class="button primary">提出する</button>
+                <button type="submit" class="button primary" data-tutorial-target="submit-receipts-button">提出する</button>
             </form>
         {% endif %}
     </div>

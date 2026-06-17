@@ -33,11 +33,12 @@ class ForcePasswordChangeMiddleware:
             password_change_url = reverse("password_change")
             logout_url = reverse("logout")
             healthcheck_url = reverse("healthcheck")
+            tutorial_complete_url = reverse("tutorial_complete")
         except NoReverseMatch:
             return None
 
         path = request.path
-        exempt_paths = {password_change_url, logout_url, healthcheck_url}
+        exempt_paths = {password_change_url, logout_url, healthcheck_url, tutorial_complete_url}
         if path in exempt_paths:
             return None
         if path.startswith(getattr(settings, "STATIC_URL", "/static/")):

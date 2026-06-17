@@ -1,4 +1,4 @@
-# Generated for Auto Receipt MVP
+# Generated for ReceiptHub MVP
 
 import django.core.validators
 import django.db.models.deletion

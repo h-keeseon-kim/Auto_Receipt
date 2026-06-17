@@ -17,12 +17,13 @@ from django.core.exceptions import PermissionDenied, ValidationError
 from django.core.paginator import Paginator
 from django.db import transaction
 from django.db.models import Count, Prefetch, Q
-from django.http import FileResponse, Http404, HttpResponse
+from django.http import FileResponse, Http404, HttpResponse, JsonResponse
 from django.utils.http import url_has_allowed_host_and_scheme
 from django.shortcuts import get_object_or_404, redirect, render
 from django.urls import reverse, reverse_lazy
 from django.utils import timezone
 from django.utils.text import slugify
+from django.views.decorators.http import require_POST
 
 from .ai_processing import reset_ai_processing_state
 from .forms import (
@@ -85,6 +86,14 @@ def add_validation_errors(form, exc: ValidationError):
 
 def month_label(value) -> str:
     return value.strftime("%Y年%m月")
+
+
+@login_required
+@require_POST
+def tutorial_complete(request):
+    profile, _ = UserProfile.objects.get_or_create(user=request.user)
+    profile.mark_tutorial_completed()
+    return JsonResponse({"ok": True, "tutorial_completed": True})
 
 
 def resolve_matching_resubmission_requests(receipt: Receipt, *, by) -> int:

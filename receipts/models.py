@@ -346,6 +346,7 @@ class UserProfile(models.Model):
     must_change_password = models.BooleanField("次回ログイン時にパスワード変更を必須にする", default=False)
     initial_password_generated_at = models.DateTimeField("初期パスワード生成日時", null=True, blank=True)
     password_changed_at = models.DateTimeField("初回パスワード変更日時", null=True, blank=True)
+    tutorial_completed_at = models.DateTimeField("チュートリアル完了日時", null=True, blank=True)
     created_by = models.ForeignKey(
         settings.AUTH_USER_MODEL,
         on_delete=models.SET_NULL,
@@ -370,6 +371,10 @@ class UserProfile(models.Model):
         self.must_change_password = False
         self.password_changed_at = timezone.now()
         self.save(update_fields=["must_change_password", "password_changed_at", "updated_at"])
+
+    def mark_tutorial_completed(self):
+        self.tutorial_completed_at = timezone.now()
+        self.save(update_fields=["tutorial_completed_at", "updated_at"])
 
     def __str__(self) -> str:
         return f"{self.user} / password_change_required={self.must_change_password}"

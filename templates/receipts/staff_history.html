@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% block title %}提出履歴 - Auto Receipt{% endblock %}
+{% block title %}提出履歴 - ReceiptHub{% endblock %}
 {% block content %}
 <div class="page-title">
     <div>
@@ -10,7 +10,7 @@
             <a class="button" href="{% url 'staff_services' %}">利用サービス管理</a>
         </div>
     </div>
-    <form method="get" class="month-form">
+    <form method="get" class="month-form" data-tutorial-target="staff-month-form">
         {{ month_form.month.label_tag }}
         {{ month_form.month }}
         <button class="button" type="submit">表示</button>
@@ -33,7 +33,7 @@
     <div class="card"><span class="label">再提出待ち</span><strong>{{ stats.open_resubmission_request_count }}</strong></div>
 </section>
 
-<section class="card section">
+<section class="card section" data-tutorial-target="staff-status-section">
     <div class="section-header">
         <div>
             <h2>提出状況</h2>
@@ -43,7 +43,7 @@
             <a class="button primary" href="{% url 'staff_download_month' %}?month={{ selected_month|date:'Y-m' }}">提出済みZIP</a>
         </div>
     </div>
-    <div class="table-wrap scroll-box medium table-scroll-wide" aria-label="提出状況テーブル">
+    <div class="table-wrap scroll-box medium table-scroll-wide" aria-label="提出状況テーブル" data-tutorial-target="staff-status-table">
         <table class="staff-status-table">
             <thead><tr><th>ユーザー</th><th>メール</th><th>利用中サービス</th><th>ユーザー登録</th><th>ユーザー停止</th><th>ステータス</th><th>領収書数</th><th>保存中</th><th>削除済み</th><th>操作</th></tr></thead>
             <tbody>
@@ -105,14 +105,14 @@
 </section>
 {% endif %}
 
-<section class="card section">
+<section class="card section" data-tutorial-target="staff-receipts-section">
     <div class="section-header">
         <div>
             <h2>アップロード済み領収書</h2>
             <p class="muted">対象月にアップロードされた領収書ファイルをアップロード日時の新しい順にまとめて表示します。削除すると、該当ユーザー側の提出履歴からも削除されます。</p>
         </div>
     </div>
-    <div class="table-wrap scroll-box large table-scroll-wide" aria-label="アップロード済み領収書テーブル">
+    <div class="table-wrap scroll-box large table-scroll-wide" aria-label="アップロード済み領収書テーブル" data-tutorial-target="staff-receipt-table">
         <table class="receipt-history-table">
             <thead><tr><th>ユーザー</th><th>提出月</th><th>ステータス</th><th>サービス</th><th>ファイル</th><th>AI確認 / 提出月</th><th>保存状態</th><th>アップロード日時</th><th>操作</th></tr></thead>
             <tbody>
