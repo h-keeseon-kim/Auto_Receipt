@@ -35,18 +35,31 @@
 {% if submission.is_submitted %}
     <section class="card section notice">
         <h2>提出済みです</h2>
-        <p>この月の提出はロックされています。内容の確認とダウンロードのみ可能です。</p>
+        <p>この月の提出はロックされています。新規追加と削除はできませんが、アップロード済み領収書のファイル修正は可能です。</p>
         <a class="button primary" href="{{ submission.get_absolute_url }}">提出内容を見る</a>
     </section>
 {% else %}
     <section class="card section">
         <h2>領収書を追加</h2>
         {% if uploadable_services %}
-            <form method="post" enctype="multipart/form-data" class="form-grid">
+            <form method="post" enctype="multipart/form-data" class="form-grid auto-upload-form" data-auto-upload-form>
                 {% csrf_token %}
                 <input type="hidden" name="action" value="add_receipt">
-                {{ receipt_form.as_p }}
-                <button type="submit" class="button primary">アップロード</button>
+                {{ receipt_form.non_field_errors }}
+                <div class="form-row">
+                    {{ receipt_form.service.errors }}
+                    {{ receipt_form.service.label_tag }}
+                    {{ receipt_form.service }}
+                    {% if receipt_form.service.help_text %}<span class="helptext">{{ receipt_form.service.help_text }}</span>{% endif %}
+                </div>
+                <div class="form-row file-upload-field" data-file-upload-field hidden>
+                    {{ receipt_form.file.errors }}
+                    {{ receipt_form.file.label_tag }}
+                    {{ receipt_form.file }}
+                    {% if receipt_form.file.help_text %}<span class="helptext">{{ receipt_form.file.help_text }}</span>{% endif %}
+                    <p class="muted small auto-upload-note">ファイルを選択すると、自動で下の「アップロード済み領収書」に追加されます。</p>
+                </div>
+                <p class="muted small auto-upload-status" data-auto-upload-status aria-live="polite"></p>
             </form>
         {% else %}
             <p class="muted">領収書をアップロードするには、利用サービス登録が必要です。管理者が登録したサービスマスターから「利用サービス管理」で追加してください。</p>
@@ -59,7 +72,7 @@
     <div class="section-header">
         <h2>アップロード済み領収書</h2>
         {% if not submission.is_submitted %}
-            <form method="post" onsubmit="return confirm('この内容で提出しますか？提出後は編集できません。');">
+            <form method="post" onsubmit="return confirm('この内容で提出しますか？提出後は新規追加と削除はできませんが、ファイル修正は可能です。');">
                 {% csrf_token %}
                 <input type="hidden" name="action" value="submit">
                 <button type="submit" class="button primary">提出する</button>
@@ -68,4 +81,42 @@
     </div>
     {% include "receipts/_receipt_table.html" with receipts=receipts submission=submission %}
 </section>
+
+<script>
+(function () {
+    const form = document.querySelector("[data-auto-upload-form]");
+    if (!form) return;
+
+    const serviceSelect = form.querySelector("select[name='service']");
+    const fileField = form.querySelector("[data-file-upload-field]");
+    const fileInput = form.querySelector("input[type='file'][name='file']");
+    const status = form.querySelector("[data-auto-upload-status]");
+
+    function refreshFileVisibility() {
+        const hasService = serviceSelect && serviceSelect.value;
+        if (fileField) fileField.hidden = !hasService;
+        if (fileInput) fileInput.disabled = !hasService;
+        if (status && !hasService) status.textContent = "サービスを選択すると、ファイルアップロード欄が表示されます。";
+        if (status && hasService) status.textContent = "";
+    }
+
+    if (serviceSelect) {
+        serviceSelect.addEventListener("change", function () {
+            if (fileInput) fileInput.value = "";
+            refreshFileVisibility();
+        });
+    }
+
+    if (fileInput) {
+        fileInput.addEventListener("change", function () {
+            if (!fileInput.files || fileInput.files.length === 0) return;
+            if (!serviceSelect || !serviceSelect.value) return;
+            if (status) status.textContent = "アップロード中です...";
+            form.submit();
+        });
+    }
+
+    refreshFileVisibility();
+})();
+</script>
 {% endblock %}

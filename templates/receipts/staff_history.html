@@ -1,0 +1,120 @@
+{% extends "base.html" %}
+{% block title %}提出履歴 - Auto Receipt{% endblock %}
+{% block content %}
+<div class="page-title">
+    <div>
+        <h1>提出履歴</h1>
+        <p class="muted">ユーザー別の提出状況と、各ユーザーがアップロードした領収書ファイルを確認できます。</p>
+        <div class="actions">
+            <a class="button" href="{% url 'staff_user_create' %}">新規ユーザー発行</a>
+            <a class="button" href="{% url 'staff_services' %}">利用サービス管理</a>
+        </div>
+    </div>
+    <form method="get" class="month-form">
+        {{ month_form.month.label_tag }}
+        {{ month_form.month }}
+        <button class="button" type="submit">表示</button>
+    </form>
+</div>
+
+<section class="status-grid">
+    <div class="card"><span class="label">対象月</span><strong>{{ selected_month|date:"Y年m月" }}</strong></div>
+    <div class="card"><span class="label">対象ユーザー</span><strong>{{ stats.total_users }}</strong></div>
+    <div class="card"><span class="label">提出済み</span><strong>{{ stats.submitted }}</strong></div>
+    <div class="card"><span class="label">下書き</span><strong>{{ stats.draft }}</strong></div>
+    <div class="card"><span class="label">未着手</span><strong>{{ stats.not_started }}</strong></div>
+    <div class="card"><span class="label">領収書数</span><strong>{{ stats.receipt_count }}</strong></div>
+    <div class="card"><span class="label">保存中ファイル</span><strong>{{ stats.available_file_count }}</strong></div>
+</section>
+
+<section class="card section">
+    <div class="section-header">
+        <div>
+            <h2>提出状況</h2>
+            <p class="muted">ユーザー名順に、対象月の提出状況を表示します。</p>
+        </div>
+        <div class="actions">
+            <a class="button primary" href="{% url 'staff_download_month' %}?month={{ selected_month|date:'Y-m' }}">提出済みZIP</a>
+            <a class="button" href="{% url 'staff_download_month' %}?month={{ selected_month|date:'Y-m' }}&include_drafts=1">下書き含むZIP</a>
+        </div>
+    </div>
+    <div class="table-wrap scroll-box medium">
+        <table>
+            <thead><tr><th>ユーザー</th><th>メール</th><th>利用中サービス</th><th>ユーザー登録</th><th>ユーザー停止</th><th>ステータス</th><th>領収書数</th><th>保存中</th><th>削除済み</th><th>操作</th></tr></thead>
+            <tbody>
+                {% for row in rows %}
+                    <tr>
+                        <td><strong>{{ row.user.username }}</strong></td>
+                        <td>{{ row.user.email|default:"-" }}</td>
+                        <td>{{ row.active_service_count }}</td>
+                        <td>{% if row.user_registered_count %}<span class="badge draft">{{ row.user_registered_count }}</span>{% else %}0{% endif %}</td>
+                        <td>{% if row.user_stopped_count %}<span class="badge draft">{{ row.user_stopped_count }}</span>{% else %}0{% endif %}</td>
+                        <td><span class="badge {% if row.status == '提出済み' %}submitted{% elif row.status == '下書き' %}draft{% else %}neutral{% endif %}">{{ row.status }}</span></td>
+                        <td>{{ row.receipt_count }}</td>
+                        <td>{{ row.available_file_count }}</td>
+                        <td>{{ row.purged_file_count }}</td>
+                        <td class="actions">
+                            <a class="button small" href="{% url 'staff_services' %}?user={{ row.user.pk }}">サービス</a>
+                            {% if row.submission %}
+                                <a class="button small" href="{% url 'staff_submission_detail' row.submission.pk %}">詳細</a>
+                                <a class="button small" href="{% url 'staff_download_submission' row.submission.pk %}">ZIP</a>
+                            {% else %}
+                                <span class="muted">提出なし</span>
+                            {% endif %}
+                        </td>
+                    </tr>
+                {% empty %}
+                    <tr><td colspan="10" class="muted center">対象ユーザーがいません。</td></tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</section>
+
+<section class="card section">
+    <div class="section-header">
+        <div>
+            <h2>アップロード済み領収書</h2>
+            <p class="muted">対象月にアップロードされた領収書ファイルをユーザー名順に表示します。削除すると、該当ユーザー側の提出履歴からも削除されます。</p>
+        </div>
+    </div>
+    <div class="table-wrap scroll-box large">
+        <table>
+            <thead><tr><th>ユーザー</th><th>提出月</th><th>ステータス</th><th>サービス</th><th>ファイル</th><th>保存状態</th><th>アップロード日時</th><th>操作</th></tr></thead>
+            <tbody>
+                {% for receipt in receipts %}
+                    <tr>
+                        <td><strong>{{ receipt.submission.user.username }}</strong></td>
+                        <td>{{ receipt.submission.period_month|date:"Y年m月" }}</td>
+                        <td><span class="badge {{ receipt.submission.status }}">{{ receipt.submission.get_status_display }}</span></td>
+                        <td>{{ receipt.service_display_name_snapshot }}</td>
+                        <td>
+                            <div>{{ receipt.original_filename|default:"-" }}</div>
+                            <div class="muted small">{{ receipt.file_size|filesizeformat }}</div>
+                        </td>
+                        <td>
+                            <span class="badge {% if receipt.file_available %}submitted{% else %}neutral{% endif %}">{{ receipt.file_status_label }}</span>
+                            {% if receipt.expires_at %}<div class="muted small">保存期限: {{ receipt.expires_at|date:"Y-m-d H:i" }}</div>{% endif %}
+                            {% if receipt.file_deleted_at %}<div class="danger small">削除: {{ receipt.file_deleted_at|date:"Y-m-d H:i" }}</div>{% endif %}
+                        </td>
+                        <td>{{ receipt.uploaded_at|date:"Y-m-d H:i" }}</td>
+                        <td class="actions">
+                            <a class="button small" href="{% url 'staff_submission_detail' receipt.submission.pk %}">詳細</a>
+                            {% if receipt.file_available %}
+                                <a class="button small" href="{% url 'download_receipt' receipt.pk %}">DL</a>
+                            {% endif %}
+                            <form method="post" action="{% url 'staff_delete_receipt' receipt.pk %}" onsubmit="return confirm('この領収書ファイルと履歴を削除しますか？該当ユーザーの画面からも削除されます。');">
+                                {% csrf_token %}
+                                <input type="hidden" name="next" value="{{ request.get_full_path }}">
+                                <button type="submit" class="button small danger-outline">削除</button>
+                            </form>
+                        </td>
+                    </tr>
+                {% empty %}
+                    <tr><td colspan="8" class="muted center">対象月にアップロード済み領収書はありません。</td></tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</section>
+{% endblock %}

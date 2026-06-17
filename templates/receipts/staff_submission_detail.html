@@ -7,7 +7,7 @@
         <p class="muted">ユーザーの提出内容と領収書ファイル状態を確認できます。</p>
     </div>
     <div class="actions">
-        <a class="button" href="{% url 'staff_dashboard' %}?month={{ submission.period_month|date:'Y-m' }}">一覧へ</a>
+        <a class="button" href="{% url 'history' %}?month={{ submission.period_month|date:'Y-m' }}">一覧へ</a>
         <a class="button primary" href="{% url 'staff_download_submission' submission.pk %}">ZIPダウンロード</a>
     </div>
 </div>

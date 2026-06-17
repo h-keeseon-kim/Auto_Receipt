@@ -9,6 +9,7 @@ from django.contrib.auth.forms import AuthenticationForm, PasswordChangeForm, Us
 from django.contrib.auth.models import User
 from django.contrib.auth.password_validation import validate_password
 from django.core.exceptions import ValidationError
+from django.core.validators import FileExtensionValidator
 from django.db.models import Q
 from django.utils import timezone
 from django.utils.crypto import get_random_string
@@ -19,6 +20,7 @@ from .models import (
     ServiceCatalog,
     ServiceDeactivationSource,
     ServiceRegistrationSource,
+    validate_upload_size,
 )
 
 
@@ -382,6 +384,22 @@ class ReceiptUploadForm(forms.ModelForm):
         if uploaded_file.size > max_size:
             raise forms.ValidationError(f"ファイルサイズは {max_size // 1024 // 1024}MB 以下にしてください。")
         return uploaded_file
+
+
+class ReceiptFileReplaceForm(forms.Form):
+    file = forms.FileField(
+        label="修正後ファイル",
+        validators=[
+            FileExtensionValidator(allowed_extensions=["pdf", "png", "jpg", "jpeg", "webp"]),
+            validate_upload_size,
+        ],
+        widget=forms.ClearableFileInput(attrs={"accept": ".pdf,.png,.jpg,.jpeg,.webp"}),
+        help_text="PDF / PNG / JPG / JPEG / WEBP。最大10MB。修正後のファイルも最大3ヶ月保存されます。",
+    )
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        apply_design_classes(self)
 
 
 class RegisterForm(UserCreationForm):

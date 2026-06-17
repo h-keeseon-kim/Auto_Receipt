@@ -30,13 +30,29 @@
                         {% if receipt.expires_at %}{{ receipt.expires_at|date:"Y-m-d H:i" }}{% else %}-{% endif %}
                         {% if receipt.file_deleted_at %}<div class="danger small">削除: {{ receipt.file_deleted_at|date:"Y-m-d H:i" }}</div>{% endif %}
                     </td>
-                    <td class="actions">
+                    <td class="actions receipt-actions">
                         {% if receipt.file_available %}
                             <a class="button small" href="{% url 'download_receipt' receipt.pk %}">DL</a>
+                        {% endif %}
+                        {% if receipt.submission.user == user %}
+                            <form method="post" action="{% url 'replace_receipt_file' receipt.pk %}" enctype="multipart/form-data" class="replace-file-form">
+                                {% csrf_token %}
+                                <input type="hidden" name="next" value="{{ request.get_full_path }}">
+                                <label class="sr-only" for="replace-file-{{ receipt.pk }}">修正後ファイル</label>
+                                <input id="replace-file-{{ receipt.pk }}" type="file" name="file" accept=".pdf,.png,.jpg,.jpeg,.webp" required>
+                                <button type="submit" class="button small">ファイル修正</button>
+                            </form>
                         {% endif %}
                         {% if not submission.is_submitted and receipt.submission.user == user %}
                             <form method="post" action="{% url 'delete_receipt' receipt.pk %}" onsubmit="return confirm('この領収書を削除しますか？');">
                                 {% csrf_token %}
+                                <button type="submit" class="button small danger-outline">削除</button>
+                            </form>
+                        {% endif %}
+                        {% if user.is_staff and receipt.submission.user != user %}
+                            <form method="post" action="{% url 'staff_delete_receipt' receipt.pk %}" onsubmit="return confirm('この領収書ファイルと履歴を削除しますか？該当ユーザーの画面からも削除されます。');">
+                                {% csrf_token %}
+                                <input type="hidden" name="next" value="{{ request.get_full_path }}">
                                 <button type="submit" class="button small danger-outline">削除</button>
                             </form>
                         {% endif %}

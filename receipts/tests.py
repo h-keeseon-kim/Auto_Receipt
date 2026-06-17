@@ -42,6 +42,23 @@ class ReceiptFlowTests(TestCase):
             billing_type=BillingType.METERED,
         )
 
+    def test_home_redirects_user_to_service_management(self):
+        self.client.login(username="alice", password="password123")
+
+        response = self.client.get(reverse("home"))
+
+        self.assertRedirects(response, reverse("user_services"))
+
+    def test_dashboard_auto_upload_form_has_no_visible_upload_button(self):
+        self.client.login(username="alice", password="password123")
+
+        response = self.client.get(reverse("dashboard"))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "data-auto-upload-form")
+        self.assertContains(response, "data-file-upload-field hidden")
+        self.assertNotContains(response, ">アップロード</button>")
+
     def test_user_can_upload_and_submit(self):
         self.client.login(username="alice", password="password123")
         upload = SimpleUploadedFile("receipt.pdf", b"%PDF-1.4 test", content_type="application/pdf")
@@ -65,6 +82,65 @@ class ReceiptFlowTests(TestCase):
         self.assertEqual(response.status_code, 302)
         submission.refresh_from_db()
         self.assertTrue(submission.is_submitted)
+
+    def test_user_can_upload_multiple_receipts_before_submit(self):
+        self.client.login(username="alice", password="password123")
+
+        for filename in ["receipt-a.pdf", "receipt-b.pdf"]:
+            upload = SimpleUploadedFile(filename, b"%PDF-1.4 test", content_type="application/pdf")
+            response = self.client.post(
+                reverse("dashboard") + "?month=2026-06",
+                {
+                    "action": "add_receipt",
+                    "service": self.service.id,
+                    "file": upload,
+                },
+            )
+            self.assertEqual(response.status_code, 302)
+
+        submission = Submission.objects.get(user=self.user, period_month=date(2026, 6, 1))
+        self.assertEqual(submission.receipts.count(), 2)
+        self.assertEqual(
+            list(submission.receipts.order_by("original_filename").values_list("original_filename", flat=True)),
+            ["receipt-a.pdf", "receipt-b.pdf"],
+        )
+
+    def test_user_can_replace_receipt_file_after_submit(self):
+        self.client.login(username="alice", password="password123")
+        submission = Submission.objects.create(
+            user=self.user,
+            period_month=date(2026, 6, 1),
+            status="submitted",
+            submitted_at=timezone.now(),
+        )
+        receipt = Receipt.objects.create(
+            submission=submission,
+            service=self.service,
+            service_name_snapshot=self.service.name,
+            billing_type_snapshot=self.service.billing_type,
+            original_filename="wrong.pdf",
+            file=SimpleUploadedFile("wrong.pdf", b"%PDF-1.4 wrong", content_type="application/pdf"),
+            expires_at=timezone.now() + timedelta(days=30),
+        )
+        old_path = Path(receipt.file.path)
+        self.assertTrue(old_path.exists())
+
+        response = self.client.post(
+            reverse("replace_receipt_file", args=[receipt.pk]),
+            {
+                "file": SimpleUploadedFile("correct.pdf", b"%PDF-1.4 correct", content_type="application/pdf"),
+                "next": reverse("submission_detail", args=[submission.pk]),
+            },
+        )
+
+        self.assertRedirects(response, reverse("submission_detail", args=[submission.pk]))
+        receipt.refresh_from_db()
+        self.assertEqual(receipt.original_filename, "correct.pdf")
+        self.assertTrue(receipt.file_available)
+        self.assertIsNone(receipt.file_deleted_at)
+        self.assertFalse(old_path.exists())
+        with receipt.file.open("rb") as fp:
+            self.assertEqual(fp.read(), b"%PDF-1.4 correct")
 
     def test_receipt_upload_form_has_only_service_and_file_fields(self):
         form = ReceiptUploadForm(user=self.user, period_month=date(2026, 6, 1))
@@ -219,7 +295,7 @@ class ForcedPasswordChangeTests(TestCase):
         )
 
         self.assertEqual(response.status_code, 302)
-        self.assertEqual(response["Location"], reverse("dashboard"))
+        self.assertEqual(response["Location"], reverse("home"))
 
 
 @override_settings(PASSWORD_HASHERS=FAST_PASSWORD_HASHERS)
@@ -250,6 +326,112 @@ class StaffServiceAssignmentTests(TestCase):
             billing_type=BillingType.METERED,
             created_by=self.admin,
         )
+
+    def test_home_redirects_staff_to_history(self):
+        self.client.login(username="admin", password="admin-password-123")
+
+        response = self.client.get(reverse("home"))
+
+        self.assertRedirects(response, reverse("history"))
+
+    def test_staff_has_history_page_instead_of_upload_or_admin_page(self):
+        self.client.login(username="admin", password="admin-password-123")
+
+        dashboard_response = self.client.get(reverse("dashboard"))
+        self.assertRedirects(dashboard_response, reverse("history"))
+
+        response = self.client.get(reverse("history"))
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "提出履歴")
+        self.assertNotContains(response, ">アップロード</a>")
+        self.assertNotContains(response, ">管理者</a>")
+
+    def test_staff_history_lists_receipts_by_username_and_delete_removes_user_history(self):
+        user_service = RegisteredService.objects.create(
+            user=self.user,
+            catalog_service=self.catalog,
+            name=self.catalog.name,
+            billing_type=self.catalog.billing_type,
+        )
+        other_service = RegisteredService.objects.create(
+            user=self.other_user,
+            name="Notion",
+            billing_type=BillingType.SUBSCRIPTION,
+        )
+        user_submission = Submission.objects.create(user=self.user, period_month=date(2026, 6, 1))
+        other_submission = Submission.objects.create(user=self.other_user, period_month=date(2026, 6, 1))
+        user_receipt = Receipt.objects.create(
+            submission=user_submission,
+            service=user_service,
+            service_name_snapshot=user_service.name,
+            billing_type_snapshot=user_service.billing_type,
+            original_filename="user.pdf",
+            file=SimpleUploadedFile("user.pdf", b"%PDF-1.4 user", content_type="application/pdf"),
+            expires_at=timezone.now() + timedelta(days=30),
+        )
+        other_receipt = Receipt.objects.create(
+            submission=other_submission,
+            service=other_service,
+            service_name_snapshot=other_service.name,
+            billing_type_snapshot=other_service.billing_type,
+            original_filename="other.pdf",
+            file=SimpleUploadedFile("other.pdf", b"%PDF-1.4 other", content_type="application/pdf"),
+            expires_at=timezone.now() + timedelta(days=30),
+        )
+        user_receipt_path = Path(user_receipt.file.path)
+        self.assertTrue(user_receipt_path.exists())
+
+        self.client.login(username="admin", password="admin-password-123")
+        response = self.client.get(reverse("history") + "?month=2026-06")
+
+        self.assertContains(response, "アップロード済み領収書")
+        content = response.content.decode()
+        self.assertLess(content.index("other@example.com"), content.index("user@example.com"))
+        self.assertContains(response, "other.pdf")
+        self.assertContains(response, "user.pdf")
+
+        response = self.client.post(
+            reverse("staff_delete_receipt", args=[user_receipt.pk]),
+            {"next": reverse("history") + "?month=2026-06"},
+        )
+
+        self.assertRedirects(response, reverse("history") + "?month=2026-06")
+        self.assertFalse(Receipt.objects.filter(pk=user_receipt.pk).exists())
+        self.assertFalse(Submission.objects.filter(pk=user_submission.pk).exists())
+        self.assertFalse(user_receipt_path.exists())
+        self.assertTrue(Receipt.objects.filter(pk=other_receipt.pk).exists())
+
+        self.client.logout()
+        self.client.login(username="user@example.com", password="password123")
+        response = self.client.get(reverse("history"))
+        self.assertNotContains(response, "2026年06月")
+
+    def test_staff_services_catalog_is_paginated_and_user_sections_are_combined(self):
+        for index in range(25):
+            ServiceCatalog.objects.create(
+                name=f"Catalog {index:02d}",
+                billing_type=BillingType.SUBSCRIPTION,
+                created_by=self.admin,
+            )
+        RegisteredService.objects.create(
+            user=self.user,
+            catalog_service=self.catalog,
+            name=self.catalog.name,
+            billing_type=self.catalog.billing_type,
+        )
+        self.client.login(username="admin", password="admin-password-123")
+
+        response = self.client.get(reverse("staff_services") + f"?user={self.user.pk}")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.context["catalog_page_obj"].paginator.num_pages, 2)
+        self.assertContains(response, "1 / 2ページ")
+        self.assertContains(response, "対象ユーザー")
+        self.assertContains(response, "scroll-box")
+        self.assertNotContains(response, "ユーザー操作の通知")
+        content = response.content.decode()
+        self.assertLess(content.index("登録状況"), content.index("登録サービス一覧"))
+        self.assertLess(content.index("登録サービス一覧"), content.index("新規登録/停止"))
 
     def test_staff_registers_service_for_user_and_user_sees_it(self):
         self.client.login(username="admin", password="admin-password-123")
@@ -330,7 +512,7 @@ class StaffServiceAssignmentTests(TestCase):
         self.client.login(username="admin", password="admin-password-123")
 
         response = self.client.post(reverse("staff_service_archive", args=[service.pk]))
-        self.assertRedirects(response, reverse("staff_user_services", args=[self.user.pk]))
+        self.assertRedirects(response, reverse("staff_services") + f"?user={self.user.pk}")
         service.refresh_from_db()
         self.assertFalse(service.is_active)
         self.assertEqual(service.deactivation_source, ServiceDeactivationSource.ADMIN)
@@ -344,7 +526,7 @@ class StaffServiceAssignmentTests(TestCase):
         self.client.logout()
         self.client.login(username="admin", password="admin-password-123")
         response = self.client.post(reverse("staff_service_activate", args=[service.pk]))
-        self.assertRedirects(response, reverse("staff_user_services", args=[self.user.pk]))
+        self.assertRedirects(response, reverse("staff_services") + f"?user={self.user.pk}")
         service.refresh_from_db()
         self.assertTrue(service.is_active)
         self.assertEqual(service.deactivation_source, "")
@@ -461,7 +643,8 @@ class UserServiceRegistrationTests(TestCase):
         self.client.logout()
         self.client.login(username="admin", password="admin-password-123")
         response = self.client.get(reverse("staff_services"))
-        self.assertContains(response, "ユーザー操作の通知")
+        self.assertContains(response, "新規登録/停止")
+        self.assertNotContains(response, "ユーザー操作の通知")
         self.assertContains(response, "Slack（サブスク）")
         self.assertContains(response, "ユーザー登録")
 

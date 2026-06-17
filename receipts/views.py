@@ -14,8 +14,10 @@ from django.contrib.auth.mixins import LoginRequiredMixin
 from django.contrib.auth.models import User
 from django.contrib.auth.views import PasswordChangeView
 from django.core.exceptions import PermissionDenied, ValidationError
+from django.core.paginator import Paginator
 from django.db.models import Count, Prefetch, Q
 from django.http import FileResponse, Http404, HttpResponse
+from django.utils.http import url_has_allowed_host_and_scheme
 from django.shortcuts import get_object_or_404, redirect, render
 from django.urls import reverse, reverse_lazy
 from django.utils import timezone
@@ -23,6 +25,7 @@ from django.utils.text import slugify
 
 from .forms import (
     MonthSelectForm,
+    ReceiptFileReplaceForm,
     ReceiptUploadForm,
     RegisterForm,
     ServiceCatalogForm,
@@ -82,6 +85,14 @@ def get_managed_user(user_id: int):
     return get_object_or_404(User, pk=user_id, is_active=True, is_staff=False, is_superuser=False)
 
 
+def home_redirect(request):
+    if not request.user.is_authenticated:
+        return redirect("login")
+    if request.user.is_staff:
+        return redirect("history")
+    return redirect("user_services")
+
+
 class ForcedPasswordChangeView(LoginRequiredMixin, PasswordChangeView):
     form_class = StyledPasswordChangeForm
     template_name = "registration/password_change_form.html"
@@ -101,14 +112,14 @@ def register(request):
         messages.info(request, "ユーザー登録は現在無効です。アカウントが必要な場合は管理者に作成を依頼してください。")
         return redirect("login")
     if request.user.is_authenticated:
-        return redirect("dashboard")
+        return redirect("home")
     if request.method == "POST":
         form = RegisterForm(request.POST)
         if form.is_valid():
             user = form.save()
             login(request, user)
             messages.success(request, "アカウントを作成しました。")
-            return redirect("dashboard")
+            return redirect("user_services")
     else:
         form = RegisterForm()
     return render(request, "registration/register.html", {"form": form})
@@ -116,6 +127,8 @@ def register(request):
 
 @login_required
 def dashboard(request):
+    if request.user.is_staff:
+        return redirect("history")
     selected_month, month_form = parse_month_from_request(request)
     submission, _ = Submission.objects.get_or_create(user=request.user, period_month=selected_month)
     uploadable_services = RegisteredService.objects.uploadable_for(request.user, selected_month)
@@ -243,44 +256,55 @@ def user_service_stop(request, pk: int):
 
 @staff_member_required
 def staff_services(request):
-    users = managed_users_queryset().annotate(
-        total_service_count=Count("registered_services", distinct=True),
-        active_service_count=Count(
-            "registered_services",
-            filter=Q(registered_services__is_active=True),
-            distinct=True,
-        ),
-        user_registered_count=Count(
-            "registered_services",
-            filter=Q(registered_services__registration_source=ServiceRegistrationSource.USER),
-            distinct=True,
-        ),
-        user_stopped_count=Count(
-            "registered_services",
-            filter=Q(registered_services__deactivation_source=ServiceDeactivationSource.USER),
-            distinct=True,
-        ),
+    users = list(
+        managed_users_queryset().annotate(
+            total_service_count=Count("registered_services", distinct=True),
+            active_service_count=Count(
+                "registered_services",
+                filter=Q(registered_services__is_active=True),
+                distinct=True,
+            ),
+            user_registered_count=Count(
+                "registered_services",
+                filter=Q(registered_services__registration_source=ServiceRegistrationSource.USER),
+                distinct=True,
+            ),
+            user_stopped_count=Count(
+                "registered_services",
+                filter=Q(registered_services__deactivation_source=ServiceDeactivationSource.USER),
+                distinct=True,
+            ),
+        )
     )
-    selected_user = None
-    services = RegisteredService.objects.select_related(
-        "user", "catalog_service", "registered_by", "deactivated_by"
-    ).filter(user__is_staff=False, user__is_superuser=False)
-    user_id = request.GET.get("user")
-    if user_id:
-        selected_user = get_managed_user(user_id)
-        services = services.filter(user=selected_user)
-    services = services.order_by("user__username", "-is_active", "name", "billing_type")
 
-    catalog_services = ServiceCatalog.objects.annotate(
+    selected_user = None
+    selected_user_id = request.GET.get("user")
+    if selected_user_id:
+        selected_user = next((account for account in users if str(account.pk) == selected_user_id), None)
+        if selected_user is None:
+            raise Http404("対象ユーザーが見つかりません。")
+    elif users:
+        selected_user = users[0]
+
+    services = RegisteredService.objects.none()
+    user_change_services = RegisteredService.objects.none()
+    if selected_user is not None:
+        services = (
+            RegisteredService.objects.select_related("user", "catalog_service", "registered_by", "deactivated_by")
+            .filter(user=selected_user)
+            .order_by("-is_active", "name", "billing_type")
+        )
+        user_change_services = services.filter(
+            Q(registration_source=ServiceRegistrationSource.USER) | Q(deactivation_source=ServiceDeactivationSource.USER)
+        ).order_by("-updated_at")
+
+    catalog_queryset = ServiceCatalog.objects.annotate(
         assigned_count=Count("registered_services", distinct=True),
         active_user_count=Count("registered_services", filter=Q(registered_services__is_active=True), distinct=True),
     ).order_by("name", "billing_type")
+    catalog_paginator = Paginator(catalog_queryset, 25)
+    catalog_page_obj = catalog_paginator.get_page(request.GET.get("catalog_page"))
 
-    user_change_services = (
-        RegisteredService.objects.select_related("user", "catalog_service", "registered_by", "deactivated_by")
-        .filter(Q(registration_source=ServiceRegistrationSource.USER) | Q(deactivation_source=ServiceDeactivationSource.USER))
-        .order_by("-updated_at")[:25]
-    )
     return render(
         request,
         "receipts/staff_services.html",
@@ -288,7 +312,7 @@ def staff_services(request):
             "users": users,
             "services": services,
             "selected_user": selected_user,
-            "catalog_services": catalog_services,
+            "catalog_page_obj": catalog_page_obj,
             "user_change_services": user_change_services,
         },
     )
@@ -375,7 +399,7 @@ def staff_service_archive(request, pk: int):
         raise Http404
     service.deactivate(by=request.user, source=ServiceDeactivationSource.ADMIN)
     messages.success(request, f"{service.user.username} の {service.display_name} を利用停止にしました。過去の提出履歴は残ります。")
-    return redirect("staff_user_services", user_id=service.user_id)
+    return redirect_back_or(request, f"{reverse('staff_services')}?user={service.user_id}")
 
 
 @staff_member_required
@@ -385,7 +409,7 @@ def staff_service_activate(request, pk: int):
         raise Http404
     service.activate()
     messages.success(request, f"{service.user.username} の {service.display_name} を利用中に戻しました。")
-    return redirect("staff_user_services", user_id=service.user_id)
+    return redirect_back_or(request, f"{reverse('staff_services')}?user={service.user_id}")
 
 
 @staff_member_required
@@ -446,7 +470,7 @@ def staff_catalog_archive(request, pk: int):
     catalog.is_active = False
     catalog.save(update_fields=["is_active", "updated_at"])
     messages.success(request, f"サービスマスター {catalog.display_name} を新規選択不可にしました。既存のユーザー別利用登録は維持されます。")
-    return redirect("staff_services")
+    return redirect_back_or(request, reverse("staff_services"))
 
 
 @staff_member_required
@@ -457,13 +481,80 @@ def staff_catalog_activate(request, pk: int):
     catalog.is_active = True
     catalog.save(update_fields=["is_active", "updated_at"])
     messages.success(request, f"サービスマスター {catalog.display_name} を選択可能に戻しました。")
-    return redirect("staff_services")
+    return redirect_back_or(request, reverse("staff_services"))
 
 
 # 旧URL互換: 一般ユーザーには表示せず、管理者専用のサービス管理へ移行する。
 service_create = staff_service_create
 service_update = staff_service_update
 service_archive = staff_service_archive
+
+
+def redirect_back_or(request, fallback_url: str):
+    next_url = request.POST.get("next") or request.GET.get("next")
+    if next_url and url_has_allowed_host_and_scheme(
+        next_url,
+        allowed_hosts={request.get_host()},
+        require_https=request.is_secure(),
+    ):
+        return redirect(next_url)
+    return redirect(fallback_url)
+
+
+@login_required
+def replace_receipt_file(request, pk: int):
+    receipt = get_object_or_404(Receipt.objects.select_related("submission", "submission__user"), pk=pk)
+    if receipt.submission.user != request.user:
+        raise PermissionDenied
+    if request.method != "POST":
+        raise Http404
+
+    fallback_url = (
+        receipt.submission.get_absolute_url()
+        if receipt.submission.is_submitted
+        else f"{reverse('dashboard')}?month={month_query(receipt.submission.period_month)}"
+    )
+    form = ReceiptFileReplaceForm(request.POST, request.FILES)
+    if not form.is_valid():
+        for errors in form.errors.values():
+            for error in errors:
+                messages.error(request, error)
+        return redirect_back_or(request, fallback_url)
+
+    upload = form.cleaned_data["file"]
+    old_storage = receipt.file.storage if receipt.file else None
+    old_file_name = receipt.file.name if receipt.file else ""
+
+    receipt.file = upload
+    receipt.original_filename = upload.name
+    receipt.file_size = upload.size
+    receipt.content_type = getattr(upload, "content_type", "") or ""
+    receipt.expires_at = receipt_expiry_from(timezone.now())
+    receipt.file_deleted_at = None
+    receipt.file_delete_reason = ""
+    receipt.save(
+        update_fields=[
+            "file",
+            "original_filename",
+            "file_size",
+            "content_type",
+            "expires_at",
+            "file_deleted_at",
+            "file_delete_reason",
+            "updated_at",
+        ]
+    )
+
+    if old_storage is not None and old_file_name and old_file_name != receipt.file.name:
+        try:
+            if old_storage.exists(old_file_name):
+                old_storage.delete(old_file_name)
+        except Exception:
+            # ストレージ削除に失敗しても、ユーザーの差し替え処理自体は完了させる。
+            pass
+
+    messages.success(request, f"{receipt.service_display_name_snapshot} の領収書ファイルを修正しました。")
+    return redirect_back_or(request, fallback_url)
 
 
 @login_required
@@ -483,8 +574,127 @@ def delete_receipt(request, pk: int):
     return redirect(f"{reverse('dashboard')}?month={month_query(selected_month)}")
 
 
+@staff_member_required
+def staff_delete_receipt(request, pk: int):
+    receipt = get_object_or_404(
+        Receipt.objects.select_related("submission", "submission__user"),
+        pk=pk,
+        submission__user__is_staff=False,
+        submission__user__is_superuser=False,
+    )
+    if request.method != "POST":
+        raise Http404
+
+    submission = receipt.submission
+    selected_month = submission.period_month
+    username = submission.user.get_username()
+    service_name = receipt.service_display_name_snapshot
+    receipt.delete()
+    fallback_url = f"{reverse('history')}?month={month_query(selected_month)}"
+    if not submission.receipts.exists():
+        submission.delete()
+        messages.success(request, f"{username} / {service_name} の領収書を削除しました。空になった提出履歴も削除しました。")
+        return redirect(fallback_url)
+
+    messages.success(request, f"{username} / {service_name} の領収書を削除しました。")
+    return redirect_back_or(request, fallback_url)
+
+
+def staff_history(request):
+    selected_month, month_form = parse_month_from_request(request)
+    users = list(
+        managed_users_queryset().annotate(
+            active_service_count=Count(
+                "registered_services",
+                filter=Q(registered_services__is_active=True),
+                distinct=True,
+            ),
+            user_registered_count=Count(
+                "registered_services",
+                filter=Q(registered_services__registration_source=ServiceRegistrationSource.USER),
+                distinct=True,
+            ),
+            user_stopped_count=Count(
+                "registered_services",
+                filter=Q(registered_services__deactivation_source=ServiceDeactivationSource.USER),
+                distinct=True,
+            ),
+        )
+    )
+    user_ids = [user.pk for user in users]
+    receipt_prefetch = Prefetch("receipts", queryset=Receipt.objects.select_related("service"))
+    submissions = (
+        Submission.objects.filter(period_month=selected_month, user_id__in=user_ids)
+        .select_related("user")
+        .prefetch_related(receipt_prefetch)
+        .annotate(receipts_count=Count("receipts"))
+    )
+    submissions_by_user = {submission.user_id: submission for submission in submissions}
+    rows = []
+    for user in users:
+        submission = submissions_by_user.get(user.id)
+        if submission is None:
+            status = "未着手"
+            receipt_count = 0
+            available_file_count = 0
+            purged_file_count = 0
+        elif submission.status == SubmissionStatus.SUBMITTED:
+            status = "提出済み"
+            receipt_count = submission.receipt_count
+            available_file_count = sum(1 for receipt in submission.receipts.all() if receipt.file_available)
+            purged_file_count = sum(1 for receipt in submission.receipts.all() if receipt.file_deleted_at)
+        else:
+            status = "下書き"
+            receipt_count = submission.receipt_count
+            available_file_count = sum(1 for receipt in submission.receipts.all() if receipt.file_available)
+            purged_file_count = sum(1 for receipt in submission.receipts.all() if receipt.file_deleted_at)
+        rows.append(
+            {
+                "user": user,
+                "submission": submission,
+                "status": status,
+                "receipt_count": receipt_count,
+                "available_file_count": available_file_count,
+                "purged_file_count": purged_file_count,
+                "active_service_count": user.active_service_count,
+                "user_registered_count": user.user_registered_count,
+                "user_stopped_count": user.user_stopped_count,
+            }
+        )
+
+    receipts = (
+        Receipt.objects.filter(submission__period_month=selected_month, submission__user_id__in=user_ids)
+        .select_related("submission", "submission__user", "service")
+        .order_by("submission__user__username", "service_name_snapshot", "uploaded_at")
+    )
+    stats = {
+        "total_users": len(users),
+        "submitted": sum(1 for row in rows if row["status"] == "提出済み"),
+        "draft": sum(1 for row in rows if row["status"] == "下書き"),
+        "not_started": sum(1 for row in rows if row["status"] == "未着手"),
+        "receipt_count": sum(row["receipt_count"] for row in rows),
+        "available_file_count": sum(row["available_file_count"] for row in rows),
+        "active_service_count": sum(row["active_service_count"] for row in rows),
+        "user_registered_count": sum(row["user_registered_count"] for row in rows),
+        "user_stopped_count": sum(row["user_stopped_count"] for row in rows),
+    }
+    return render(
+        request,
+        "receipts/staff_history.html",
+        {
+            "rows": rows,
+            "stats": stats,
+            "month_form": month_form,
+            "selected_month": selected_month,
+            "receipts": receipts,
+        },
+    )
+
+
 @login_required
 def history(request):
+    if request.user.is_staff:
+        return staff_history(request)
     submissions = (
         Submission.objects.filter(user=request.user)
         .prefetch_related("receipts")
@@ -548,85 +758,11 @@ def staff_user_create(request):
 
 @staff_member_required
 def staff_dashboard(request):
-    selected_month, month_form = parse_month_from_request(request)
-    users = managed_users_queryset().annotate(
-        active_service_count=Count(
-            "registered_services",
-            filter=Q(registered_services__is_active=True),
-            distinct=True,
-        ),
-        user_registered_count=Count(
-            "registered_services",
-            filter=Q(registered_services__registration_source=ServiceRegistrationSource.USER),
-            distinct=True,
-        ),
-        user_stopped_count=Count(
-            "registered_services",
-            filter=Q(registered_services__deactivation_source=ServiceDeactivationSource.USER),
-            distinct=True,
-        ),
-    )
-    receipt_prefetch = Prefetch("receipts", queryset=Receipt.objects.select_related("service"))
-    submissions = (
-        Submission.objects.filter(period_month=selected_month, user__in=users)
-        .select_related("user")
-        .prefetch_related(receipt_prefetch)
-        .annotate(receipts_count=Count("receipts"))
-    )
-    submissions_by_user = {submission.user_id: submission for submission in submissions}
-    rows = []
-    for user in users:
-        submission = submissions_by_user.get(user.id)
-        if submission is None:
-            status = "未着手"
-            receipt_count = 0
-            available_file_count = 0
-            purged_file_count = 0
-        elif submission.status == SubmissionStatus.SUBMITTED:
-            status = "提出済み"
-            receipt_count = submission.receipt_count
-            available_file_count = sum(1 for receipt in submission.receipts.all() if receipt.file_available)
-            purged_file_count = sum(1 for receipt in submission.receipts.all() if receipt.file_deleted_at)
-        else:
-            status = "下書き"
-            receipt_count = submission.receipt_count
-            available_file_count = sum(1 for receipt in submission.receipts.all() if receipt.file_available)
-            purged_file_count = sum(1 for receipt in submission.receipts.all() if receipt.file_deleted_at)
-        rows.append(
-            {
-                "user": user,
-                "submission": submission,
-                "status": status,
-                "receipt_count": receipt_count,
-                "available_file_count": available_file_count,
-                "purged_file_count": purged_file_count,
-                "active_service_count": user.active_service_count,
-                "user_registered_count": user.user_registered_count,
-                "user_stopped_count": user.user_stopped_count,
-            }
-        )
-
-    stats = {
-        "total_users": users.count(),
-        "submitted": sum(1 for row in rows if row["status"] == "提出済み"),
-        "draft": sum(1 for row in rows if row["status"] == "下書き"),
-        "not_started": sum(1 for row in rows if row["status"] == "未着手"),
-        "receipt_count": sum(row["receipt_count"] for row in rows),
-        "available_file_count": sum(row["available_file_count"] for row in rows),
-        "active_service_count": sum(row["active_service_count"] for row in rows),
-        "user_registered_count": sum(row["user_registered_count"] for row in rows),
-        "user_stopped_count": sum(row["user_stopped_count"] for row in rows),
-    }
-    return render(
-        request,
-        "receipts/staff_dashboard.html",
-        {
-            "rows": rows,
-            "stats": stats,
-            "month_form": month_form,
-            "selected_month": selected_month,
-        },
-    )
+    query_string = request.META.get("QUERY_STRING", "")
+    url = reverse("history")
+    if query_string:
+        url = f"{url}?{query_string}"
+    return redirect(url)
 
 
 @staff_member_required
