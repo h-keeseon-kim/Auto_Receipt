@@ -1342,7 +1342,9 @@ class TutorialTests(TestCase):
         self.assertContains(response, 'data-auto-start="true"')
         self.assertContains(response, 'data-tutorial-target="user-services-nav"')
         self.assertContains(response, 'data-tutorial-target="service-registration-button"')
-        self.assertContains(response, "完了後も右上の「?」からいつでも再表示できます。")
+        self.assertNotContains(response, "完了後も右上の「?」からいつでも再表示できます。")
+        self.assertNotContains(response, "data-tutorial-hint")
+        self.assertNotContains(response, "tutorial-note")
 
         complete_response = self.client.post(reverse("tutorial_complete"), HTTP_X_REQUESTED_WITH="XMLHttpRequest")
 
@@ -1376,6 +1378,9 @@ class TutorialTests(TestCase):
         self.assertContains(response, f'data-history-url="{reverse("history")}"')
         self.assertContains(response, 'data-tutorial-target="service-stop-button"')
 
+        upload_response = self.client.get(reverse("dashboard"))
+        self.assertContains(upload_response, 'data-tutorial-target="upload-page"')
+
     def test_tutorial_script_forces_page_steps_and_returns_to_start_page(self):
         script = Path("static/js/tutorial.js").read_text()
 
@@ -1383,6 +1388,11 @@ class TutorialTests(TestCase):
         self.assertIn('pageName: "dashboard"', script)
         self.assertIn('pageName: "history"', script)
         self.assertIn("使わなくなったサービスを停止します", script)
+        self.assertIn("領収書アップロードページです。", script)
+        self.assertIn("提出履歴ページです。", script)
+        self.assertNotIn("提出履歴ページへ移動します", script)
+        self.assertNotIn("hint:", script)
+        self.assertNotIn("data-tutorial-hint", script)
         self.assertIn("returnUrl", script)
         self.assertIn("window.location.assign(url)", script)
 

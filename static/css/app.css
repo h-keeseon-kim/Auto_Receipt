@@ -410,11 +410,6 @@ tr:last-child td { border-bottom: 0; }
     padding-right: 2.4rem;
     margin-bottom: 0.65rem;
 }
-.tutorial-hint {
-    color: var(--muted);
-    font-size: 0.9rem;
-    margin-bottom: 1rem;
-}
 .tutorial-footer {
     display: flex;
     align-items: center;
@@ -432,7 +427,6 @@ tr:last-child td { border-bottom: 0; }
     opacity: 0.45;
     cursor: not-allowed;
 }
-.tutorial-note { margin: 0.85rem 0 0; }
 .tutorial-source-active {
     scroll-margin: 5rem;
 }

@@ -10,7 +10,6 @@
             selector: "[data-tutorial-target='user-services-page']",
             title: "利用サービスページから始めます",
             body: "ReceiptHubでは、まず自分が使っているサービスを確認します。チュートリアル中は、この説明に必要なページへ自動で移動します。",
-            hint: "チュートリアルを終える、または途中で閉じると、開始前に見ていたページへ戻ります。",
             placement: "below",
         },
         {
@@ -18,7 +17,6 @@
             selector: "[data-tutorial-target='service-registration-button']",
             title: "新しい利用サービスを登録します",
             body: "新しく使い始めたサービスがある場合は「サービス利用登録」を押します。管理者が登録したサービスマスターから選択するため、サービス名の表記ゆれを防げます。",
-            hint: "同じサービスでも ChatGPT（サブスク）と ChatGPT（従量課金 / API）のように種類別で管理します。",
             placement: "left",
         },
         {
@@ -26,7 +24,6 @@
             selector: "[data-tutorial-target='active-services-section']",
             title: "利用中サービスを確認します",
             body: "領収書アップロード時に選べるサービスは、ここに表示される利用中サービスです。管理者登録とユーザー登録のどちらで追加されたかも確認できます。",
-            hint: "ここにないサービスは、アップロード画面のサービス選択には表示されません。",
             placement: "above",
             scrollBlock: "nearest",
         },
@@ -35,16 +32,21 @@
             selector: "[data-tutorial-target='service-stop-button'], [data-tutorial-target='stopped-services-section']",
             title: "使わなくなったサービスを停止します",
             body: "使わなくなったサービスは「利用停止」から停止します。停止時には、最後にアップロードすべき領収書月を選択します。",
-            hint: "停止したサービスは通常の選択肢から外れますが、最終領収書月まではアップロード画面に残ります。",
             placement: "above",
             scrollBlock: "nearest",
         },
         {
             pageName: "dashboard",
+            selector: "[data-tutorial-target='upload-page']",
+            title: "領収書アップロードページです。",
+            body: "ここからは、利用サービスで登録したサービスを使って領収書をアップロードする画面を説明します。",
+            placement: "below",
+        },
+        {
+            pageName: "dashboard",
             selector: "[data-tutorial-target='upload-month-form']",
             title: "提出月を選びます",
-            body: "アップロードページでは、まず対象となる提出月を選びます。月を変更して「表示」を押すと、その月の提出画面に切り替わります。",
-            hint: "チュートリアル中は、アップロードの説明に入るタイミングで自動的にアップロードページへ移動します。",
+            body: "まず対象となる提出月を選びます。月を変更して「表示」を押すと、その月の提出画面に切り替わります。",
             placement: "left",
         },
         {
@@ -52,7 +54,6 @@
             selector: "[data-tutorial-target='receipt-add-form']",
             title: "サービスを選んでファイルを追加します",
             body: "領収書を追加する時は、登録済みサービスを選択します。サービスを選ぶとファイルアップロード欄が表示され、ファイルを選ぶと自動でアップロードされます。",
-            hint: "アップロードボタンはありません。ファイル選択後、自動で下の一覧に追加されます。",
             placement: "above",
             scrollBlock: "center",
         },
@@ -61,16 +62,14 @@
             selector: "[data-tutorial-target='uploaded-receipts-section']",
             title: "アップロード済み領収書を確認して提出します",
             body: "アップロードした領収書はここに追加されます。内容を確認し、月内の領収書が揃ったら「提出する」を押します。提出後も、間違えたファイルは修正できます。",
-            hint: "AI確認は裏側で実行されます。問題がある可能性がある場合は管理者側にメモとして表示されます。",
             placement: "above",
             scrollBlock: "nearest",
         },
         {
             pageName: "history",
             selector: "[data-tutorial-target='history-page']",
-            title: "提出履歴ページへ移動します",
-            body: "提出履歴では、提出済み・下書きの月別状況を確認できます。チュートリアル中は、この説明に合わせて提出履歴ページへ自動移動します。",
-            hint: "管理者から再提出依頼がある場合は、対象月のアップロード画面で確認して再度アップロードします。",
+            title: "提出履歴ページです。",
+            body: "ここでは、提出済み・下書きの月別状況を確認できます。",
             placement: "below",
         },
         {
@@ -78,14 +77,12 @@
             selector: "[data-tutorial-target='history-table']",
             title: "月ごとの提出状況を確認します",
             body: "この一覧から、対象月のステータス、領収書数、提出日時を確認できます。詳細ボタンを押すと、その月の提出内容を確認できます。",
-            hint: "提出後にファイル修正が必要な場合は、詳細画面または対象月のアップロード画面から対応します。",
             placement: "above",
         },
         {
             selector: "[data-tutorial-target='tutorial-help-button']",
             title: "チュートリアルはいつでも再表示できます",
             body: "一度完了した後も、右上の「？」を押すとこのチュートリアルを再度確認できます。",
-            hint: "これで一般ユーザー向けの基本操作説明は完了です。",
             placement: "left",
         },
     ];
@@ -96,7 +93,6 @@
             selector: "[data-tutorial-target='staff-history-nav']",
             title: "提出履歴で全体を確認します",
             body: "管理者は提出履歴を起点に、対象月の提出状況とアップロード済み領収書を確認します。提出状況はユーザー名順、領収書はアップロード日の新しい順で表示されます。",
-            hint: "チュートリアル中は、説明対象の管理者ページへ自動で移動します。終えると開始前のページへ戻ります。",
             placement: "below",
         },
         {
@@ -104,7 +100,6 @@
             selector: "[data-tutorial-target='staff-status-table']",
             title: "ユーザー別の提出状況を見ます",
             body: "この表では、ユーザーごとの提出ステータス、領収書数、保存中ファイル数、再提出待ちなどを確認できます。",
-            hint: "件数が増えても縦横スクロールで確認できます。",
             placement: "above",
         },
         {
@@ -112,7 +107,6 @@
             selector: "[data-tutorial-target='staff-receipt-table']",
             title: "アップロード済み領収書を確認します",
             body: "領収書ごとに、AI確認チェック、管理者用メモ、ダウンロード、削除、再提出指示を確認できます。",
-            hint: "問題が確定した領収書は再提出指示を出すと、ユーザー側からも該当項目が削除されます。",
             placement: "above",
         },
         {
@@ -120,7 +114,6 @@
             selector: "[data-tutorial-target='staff-services-nav']",
             title: "利用サービス管理を行います",
             body: "サービスマスターの登録、ユーザー別の登録状況、登録サービス一覧、新規登録/停止の確認を行います。",
-            hint: "サービスマスターは件数が増えてもページ式で確認できます。",
             placement: "below",
         },
         {
@@ -128,7 +121,6 @@
             selector: "[data-tutorial-target='staff-service-catalog-section']",
             title: "サービスマスターを管理します",
             body: "ここでユーザーが選択できるサービスマスターを登録します。同じサービス名でも、サブスクや従量課金 / APIなど種別ごとに分けられます。",
-            hint: "件数が多くなってもページ式で確認できます。",
             placement: "above",
             scrollBlock: "nearest",
         },
@@ -137,14 +129,12 @@
             selector: "[data-tutorial-target='staff-user-create-nav']",
             title: "ユーザーを発行します",
             body: "新しい一般ユーザーは管理者がメールアドレス形式で発行します。初期パスワードはランダム生成され、初回ログイン時に変更が必須になります。",
-            hint: "初期パスワードは作成直後の画面でのみ表示されます。",
             placement: "below",
         },
         {
             selector: "[data-tutorial-target='tutorial-help-button']",
             title: "チュートリアルはいつでも再表示できます",
             body: "右上の「？」を押すと、管理者向けチュートリアルを再度確認できます。",
-            hint: "これで管理者向けの基本操作説明は完了です。",
             placement: "left",
         },
     ];
@@ -234,7 +224,6 @@
         const card = root.querySelector(".tutorial-card");
         const title = root.querySelector("[data-tutorial-title]");
         const body = root.querySelector("[data-tutorial-body]");
-        const hint = root.querySelector("[data-tutorial-hint]");
         const count = root.querySelector("[data-tutorial-step-count]");
         const prevButton = root.querySelector("[data-tutorial-prev]");
         const nextButton = root.querySelector("[data-tutorial-next]");
@@ -455,7 +444,6 @@
             if (target) target.classList.add("tutorial-source-active");
             title.textContent = step.title;
             body.textContent = step.body;
-            hint.textContent = step.hint || (target ? "" : "対象の機能がこのページにない場合は、上部メニューから該当ページへ移動してください。");
             count.textContent = `${currentIndex + 1} / ${steps.length}`;
             prevButton.disabled = currentIndex === 0;
             nextButton.textContent = currentIndex === steps.length - 1 ? "完了する" : "次へ";
