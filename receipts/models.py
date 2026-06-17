@@ -63,6 +63,8 @@ class SubmissionStatus(models.TextChoices):
 
 class ReceiptFilenameStatus(models.TextChoices):
     NOT_PROCESSED = "not_processed", "未確認"
+    QUEUED = "queued", "AI待機中"
+    PROCESSING = "processing", "AI抽出中"
     GENERATED = "generated", "作成済み"
     NEEDS_REVIEW = "needs_review", "要確認"
     FAILED = "failed", "失敗"
@@ -486,6 +488,8 @@ class Receipt(models.Model):
     def ai_filename_badge_class(self) -> str:
         if self.ai_filename_status == ReceiptFilenameStatus.GENERATED:
             return "submitted"
+        if self.ai_filename_status in {ReceiptFilenameStatus.QUEUED, ReceiptFilenameStatus.PROCESSING}:
+            return "processing"
         if self.ai_filename_status in {ReceiptFilenameStatus.NEEDS_REVIEW, ReceiptFilenameStatus.FAILED}:
             return "draft"
         return "neutral"
@@ -523,8 +527,22 @@ class Receipt(models.Model):
         return all(checked for _label, checked in self.ai_check_items)
 
     @property
+    def is_ai_processing(self) -> bool:
+        return self.ai_filename_status == ReceiptFilenameStatus.PROCESSING
+
+    @property
+    def ai_is_queued(self) -> bool:
+        return self.ai_filename_status == ReceiptFilenameStatus.QUEUED
+
+    @property
     def ai_has_check_result(self) -> bool:
-        return bool(self.ai_filename_checked_at) or self.ai_filename_status != ReceiptFilenameStatus.NOT_PROCESSED
+        completed_statuses = {
+            ReceiptFilenameStatus.GENERATED,
+            ReceiptFilenameStatus.NEEDS_REVIEW,
+            ReceiptFilenameStatus.FAILED,
+            ReceiptFilenameStatus.SKIPPED,
+        }
+        return bool(self.ai_filename_checked_at) or self.ai_filename_status in completed_statuses
 
     @property
     def ai_requires_manual_review(self) -> bool:
@@ -536,9 +554,23 @@ class Receipt(models.Model):
 
     @property
     def manual_review_badge_class(self) -> str:
+        if self.ai_is_queued or self.is_ai_processing:
+            return "processing"
         if not self.ai_has_check_result:
             return "neutral"
         return "draft" if self.ai_requires_manual_review else "submitted"
+
+    @property
+    def manual_review_label(self) -> str:
+        if self.ai_is_queued:
+            return "AI待機中"
+        if self.is_ai_processing:
+            return "AI抽出中"
+        if not self.ai_has_check_result:
+            return "チェック待ち"
+        if self.needs_manual_review:
+            return "手動確認"
+        return "確認OK"
 
     @property
     def ai_unchecked_labels(self) -> list[str]:

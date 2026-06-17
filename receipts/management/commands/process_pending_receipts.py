@@ -1,10 +1,9 @@
 from __future__ import annotations
 
 from django.core.management.base import BaseCommand
-from django.db.models import Q
 
-from receipts.ai_processing import apply_ai_filename_to_receipt
-from receipts.models import Receipt, ReceiptFilenameStatus, ReceiptPeriodCheckStatus
+from receipts.ai_processing import claim_pending_receipts_for_ai_processing, process_claimed_receipts
+from receipts.models import Receipt, ReceiptFilenameStatus
 
 
 class Command(BaseCommand):
@@ -20,7 +19,7 @@ class Command(BaseCommand):
         parser.add_argument(
             "--retry-failed",
             action="store_true",
-            help="失敗・要確認の領収書も再処理対象に含めます。",
+            help="失敗・要確認の領収書も再処理対象に含めます。手動運用では通常使いません。",
         )
         parser.add_argument(
             "--receipt-id",
@@ -35,61 +34,27 @@ class Command(BaseCommand):
         receipt_ids = options.get("receipt_ids") or []
         retry_failed = bool(options["retry_failed"])
 
-        filters = Q(ai_filename_status=ReceiptFilenameStatus.NOT_PROCESSED) | Q(
-            ai_period_check_status=ReceiptPeriodCheckStatus.NOT_CHECKED
-        )
-        if retry_failed:
-            filters |= Q(ai_filename_status__in=[ReceiptFilenameStatus.FAILED, ReceiptFilenameStatus.NEEDS_REVIEW])
-
-        queryset = (
-            Receipt.objects.available_files()
-            .select_related("submission", "submission__user", "service")
-            .filter(filters)
-            .order_by("uploaded_at", "pk")
-        )
+        queryset = Receipt.objects.available_files().select_related("submission", "submission__user", "service")
         if receipt_ids:
             queryset = queryset.filter(pk__in=receipt_ids)
+        if retry_failed:
+            retry_queryset = queryset.filter(ai_filename_status__in=[ReceiptFilenameStatus.FAILED, ReceiptFilenameStatus.NEEDS_REVIEW])
+            retry_queryset.update(ai_filename_status=ReceiptFilenameStatus.NOT_PROCESSED, ai_filename_checked_at=None)
 
-        receipts = list(queryset[:limit])
-        if not receipts:
+        claimed_ids = claim_pending_receipts_for_ai_processing(queryset, limit=limit)
+        if not claimed_ids:
             self.stdout.write(self.style.SUCCESS("AI処理待ちの領収書はありません。"))
             return
 
-        processed = 0
-        failed = 0
-        needs_review = 0
-        generated = 0
-        skipped = 0
-        mismatched = 0
-
-        for receipt in receipts:
-            try:
-                result = apply_ai_filename_to_receipt(receipt)
-                receipt.refresh_from_db(fields=["ai_filename_status", "ai_period_check_status"])
-            except Exception as exc:  # apply_ai_filename_to_receipt内でも通常は失敗保存するが、想定外エラーを隔離する。
-                failed += 1
-                self.stderr.write(f"Receipt {receipt.pk}: AI処理に失敗しました: {exc.__class__.__name__}: {exc}")
-                continue
-
-            processed += 1
-            if receipt.ai_filename_status == ReceiptFilenameStatus.GENERATED:
-                generated += 1
-            elif receipt.ai_filename_status == ReceiptFilenameStatus.NEEDS_REVIEW:
-                needs_review += 1
-            elif receipt.ai_filename_status == ReceiptFilenameStatus.FAILED:
-                failed += 1
-            elif receipt.ai_filename_status == ReceiptFilenameStatus.SKIPPED:
-                skipped += 1
-            if receipt.ai_period_check_status == ReceiptPeriodCheckStatus.MISMATCHED:
-                mismatched += 1
-
-            result_status = getattr(result, "status", receipt.ai_filename_status) if result is not None else receipt.ai_filename_status
-            self.stdout.write(f"Receipt {receipt.pk}: {result_status} / period={receipt.ai_period_check_status}")
+        summary = process_claimed_receipts(claimed_ids)
+        for receipt_id in claimed_ids:
+            self.stdout.write(f"Receipt {receipt_id}: processed")
 
         self.stdout.write(
             self.style.SUCCESS(
                 "AI領収書処理が完了しました: "
-                f"processed={processed}, generated={generated}, needs_review={needs_review}, "
-                f"mismatched={mismatched}, skipped={skipped}, failed={failed}"
+                f"processed={summary['processed']}, generated={summary['generated']}, "
+                f"needs_review={summary['needs_review']}, mismatched={summary['mismatched']}, "
+                f"skipped={summary['skipped']}, failed={summary['failed']}"
             )
         )

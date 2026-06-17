@@ -186,7 +186,7 @@ class ReceiptFlowTests(TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(Receipt.objects.count(), 1)
         self.assertNotContains(response, "提出月（2026年06月）ではなく 2026年05月")
-        self.assertContains(response, "AI確認は裏側で実行")
+        self.assertContains(response, "AIによるファイル名修正・検査は、管理者が実行")
 
         call_command("process_pending_receipts", "--limit", "10")
         receipt = Receipt.objects.get()
@@ -981,6 +981,99 @@ class StaffServiceAssignmentTests(TestCase):
         content = response.content.decode()
         self.assertLess(content.index("登録状況"), content.index("登録サービス一覧"))
         self.assertLess(content.index("登録サービス一覧"), content.index("新規登録/停止"))
+
+    def test_staff_can_start_ai_processing_manually_and_processed_items_are_skipped(self):
+        service = RegisteredService.objects.create(
+            user=self.user,
+            catalog_service=self.catalog,
+            name=self.catalog.name,
+            billing_type=self.catalog.billing_type,
+        )
+        submission = Submission.objects.create(user=self.user, period_month=date(2026, 6, 1))
+        pending_receipt = Receipt.objects.create(
+            submission=submission,
+            service=service,
+            service_name_snapshot=service.name,
+            billing_type_snapshot=service.billing_type,
+            original_filename="pending.pdf",
+            file=SimpleUploadedFile("pending.pdf", b"%PDF-1.4 pending", content_type="application/pdf"),
+            expires_at=timezone.now() + timedelta(days=30),
+        )
+        processed_receipt = Receipt.objects.create(
+            submission=submission,
+            service=service,
+            service_name_snapshot=service.name,
+            billing_type_snapshot=service.billing_type,
+            original_filename="done.pdf",
+            generated_filename="260619_金_OpenAI_220_USD.pdf",
+            ai_filename_status=ReceiptFilenameStatus.GENERATED,
+            ai_filename_checked_at=timezone.now(),
+            file=SimpleUploadedFile("done.pdf", b"%PDF-1.4 done", content_type="application/pdf"),
+            expires_at=timezone.now() + timedelta(days=30),
+        )
+        self.client.login(username="admin", password="admin-password-123")
+
+        with mock.patch("receipts.views.start_background_ai_processing") as mocked_start:
+            response = self.client.post(
+                reverse("staff_start_ai_processing"),
+                {"month": "2026-06", "limit": "50"},
+                HTTP_X_REQUESTED_WITH="XMLHttpRequest",
+            )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["started_count"], 1)
+        mocked_start.assert_called_once_with([pending_receipt.pk])
+        pending_receipt.refresh_from_db()
+        processed_receipt.refresh_from_db()
+        self.assertEqual(pending_receipt.ai_filename_status, ReceiptFilenameStatus.PROCESSING)
+        self.assertEqual(processed_receipt.ai_filename_status, ReceiptFilenameStatus.GENERATED)
+
+        response = self.client.get(reverse("history") + "?month=2026-06")
+        self.assertContains(response, "AIでファイル名を修正")
+        self.assertContains(response, "AI抽出中")
+
+        with mock.patch("receipts.views.start_background_ai_processing") as mocked_start_again:
+            response = self.client.post(
+                reverse("staff_start_ai_processing"),
+                {"month": "2026-06", "limit": "50"},
+                HTTP_X_REQUESTED_WITH="XMLHttpRequest",
+            )
+        self.assertEqual(response.json()["started_count"], 0)
+        mocked_start_again.assert_not_called()
+
+    def test_staff_ai_status_endpoint_returns_rendered_rows_for_realtime_refresh(self):
+        service = RegisteredService.objects.create(
+            user=self.user,
+            catalog_service=self.catalog,
+            name=self.catalog.name,
+            billing_type=self.catalog.billing_type,
+        )
+        submission = Submission.objects.create(user=self.user, period_month=date(2026, 6, 1))
+        Receipt.objects.create(
+            submission=submission,
+            service=service,
+            service_name_snapshot=service.name,
+            billing_type_snapshot=service.billing_type,
+            original_filename="processing.pdf",
+            ai_filename_status=ReceiptFilenameStatus.PROCESSING,
+            file=SimpleUploadedFile("processing.pdf", b"%PDF-1.4 processing", content_type="application/pdf"),
+            expires_at=timezone.now() + timedelta(days=30),
+        )
+        self.client.login(username="admin", password="admin-password-123")
+
+        response = self.client.get(
+            reverse("staff_ai_processing_status") + "?month=2026-06",
+            HTTP_X_REQUESTED_WITH="XMLHttpRequest",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["processing_count"], 1)
+        self.assertIn("processing.pdf", payload["receipts_html"])
+        self.assertIn("AI抽出中", payload["receipts_html"])
 
     def test_staff_services_action_buttons_are_placed_inside_relevant_sections(self):
         RegisteredService.objects.create(

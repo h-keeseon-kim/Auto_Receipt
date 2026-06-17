@@ -14,7 +14,7 @@
         </thead>
         <tbody>
             {% for receipt in receipts %}
-                <tr class="{% if user.is_staff and receipt.needs_manual_review %}manual-review-row{% endif %}">
+                <tr class="{% if user.is_staff and receipt.is_ai_processing %}ai-processing-row{% elif user.is_staff and receipt.needs_manual_review %}manual-review-row{% endif %}">
                     <td>
                         <strong>{{ receipt.service_display_name_snapshot }}</strong>
                         {% if receipt.memo %}<div class="muted small">{{ receipt.memo|linebreaksbr }}</div>{% endif %}
@@ -33,7 +33,7 @@
                                 <div class="ai-check-status">
                                     <span class="badge {{ receipt.ai_filename_badge_class }}">AI: {{ receipt.get_ai_filename_status_display }}</span>
                                     <span class="badge {{ receipt.ai_period_check_badge_class }}">提出月: {{ receipt.get_ai_period_check_status_display }}</span>
-                                    <span class="badge {{ receipt.manual_review_badge_class }}">{% if not receipt.ai_has_check_result %}チェック待ち{% elif receipt.needs_manual_review %}手動確認{% else %}確認OK{% endif %}</span>
+                                    <span class="badge {{ receipt.manual_review_badge_class }}">{{ receipt.manual_review_label }}</span>
                                 </div>
                                 <div class="ai-checklist" aria-label="AI確認項目">
                                     {% for label, checked in receipt.ai_check_items %}

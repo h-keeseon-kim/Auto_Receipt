@@ -1,11 +1,19 @@
 from __future__ import annotations
 
+import logging
+import threading
+from collections.abc import Iterable
+from datetime import timedelta
 from pathlib import Path
 
+from django.db import close_old_connections, transaction
+from django.db.models import QuerySet
 from django.utils import timezone
 
 from .ai_filename import generate_ai_receipt_filename, target_card_last4
 from .models import Receipt, ReceiptFilenameStatus, ReceiptPeriodCheckStatus
+
+logger = logging.getLogger(__name__)
 
 AI_CHECK_FIELDS = [
     "ai_check_card_last4",
@@ -32,6 +40,7 @@ AI_RESET_FIELDS = [
 ]
 
 AI_EXTRACTED_VALUE_FIELDS = ["amount", "currency", "issued_on"]
+PROCESSING_MEMO = "AIで情報を抽出中です。完了した領収書から管理者画面に反映されます。"
 
 
 def reset_ai_processing_state(receipt: Receipt, *, save: bool = False, clear_extracted_values: bool = False) -> list[str]:
@@ -139,28 +148,50 @@ def apply_period_check_to_receipt(receipt: Receipt, result) -> list[str]:
     return ["ai_receipt_month", "ai_period_check_status", "ai_period_check_memo", "ai_check_period_match"]
 
 
+def mark_receipt_ai_failed(receipt: Receipt, message: str):
+    receipt.generated_filename = ""
+    receipt.ai_filename_status = ReceiptFilenameStatus.FAILED
+    receipt.ai_filename_admin_memo = message[:2000]
+    receipt.ai_filename_checked_at = timezone.now()
+    update_fields = [
+        "generated_filename",
+        "ai_filename_status",
+        "ai_filename_admin_memo",
+        "ai_filename_checked_at",
+        *apply_ai_checklist_to_receipt(receipt, None),
+        *apply_period_check_to_receipt(receipt, None),
+        "updated_at",
+    ]
+    receipt.save(update_fields=list(dict.fromkeys(update_fields)))
+
+
+def mark_receipt_ai_skipped(receipt: Receipt, message: str):
+    receipt.generated_filename = ""
+    receipt.ai_filename_status = ReceiptFilenameStatus.SKIPPED
+    receipt.ai_filename_admin_memo = message[:2000]
+    receipt.ai_filename_checked_at = timezone.now()
+    update_fields = [
+        "generated_filename",
+        "ai_filename_status",
+        "ai_filename_admin_memo",
+        "ai_filename_checked_at",
+        *apply_ai_checklist_to_receipt(receipt, None),
+        *apply_period_check_to_receipt(receipt, None),
+        "updated_at",
+    ]
+    receipt.save(update_fields=list(dict.fromkeys(update_fields)))
+
+
 def apply_ai_filename_to_receipt(receipt: Receipt):
     if not receipt.file_available:
+        mark_receipt_ai_skipped(receipt, "領収書ファイルが保存されていないため、AI確認をスキップしました。")
         return None
 
     try:
         with receipt.file.open("rb") as file_obj:
             file_bytes = file_obj.read()
     except Exception as exc:
-        receipt.generated_filename = ""
-        receipt.ai_filename_status = ReceiptFilenameStatus.FAILED
-        receipt.ai_filename_admin_memo = f"AIファイル名作成前にファイルを読み込めませんでした: {exc}"
-        receipt.ai_filename_checked_at = timezone.now()
-        update_fields = [
-            "generated_filename",
-            "ai_filename_status",
-            "ai_filename_admin_memo",
-            "ai_filename_checked_at",
-            *apply_ai_checklist_to_receipt(receipt, None),
-            *apply_period_check_to_receipt(receipt, None),
-            "updated_at",
-        ]
-        receipt.save(update_fields=list(dict.fromkeys(update_fields)))
+        mark_receipt_ai_failed(receipt, f"AIファイル名作成前にファイルを読み込めませんでした: {exc}")
         return None
 
     result = generate_ai_receipt_filename(
@@ -199,5 +230,131 @@ def apply_ai_filename_to_receipt(receipt: Receipt):
             receipt.currency = result.currency
             update_fields.append("currency")
 
-    receipt.save(update_fields=update_fields)
+    receipt.save(update_fields=list(dict.fromkeys(update_fields)))
     return result
+
+
+def reset_stale_ai_processing_receipts(queryset: QuerySet | None = None, *, stale_after_minutes: int = 30) -> int:
+    """途中で中断されたAI抽出中レコードを未確認へ戻す。
+
+    Webプロセス再起動などでバックグラウンドスレッドが終了した場合に、
+    管理者が次回ボタンを押したタイミングで再実行できるようにする。
+    """
+
+    base = queryset if queryset is not None else Receipt.objects.all()
+    cutoff = timezone.now() - timedelta(minutes=max(int(stale_after_minutes), 1))
+    return (
+        base.available_files()
+        .filter(ai_filename_status=ReceiptFilenameStatus.PROCESSING, updated_at__lt=cutoff)
+        .update(
+            ai_filename_status=ReceiptFilenameStatus.NOT_PROCESSED,
+            ai_filename_admin_memo="前回のAI抽出が中断されたため、再実行可能に戻しました。",
+            ai_filename_checked_at=None,
+            updated_at=timezone.now(),
+        )
+    )
+
+
+def pending_ai_receipts_queryset(queryset: QuerySet | None = None) -> QuerySet:
+    """管理者の手動AI処理ボタンで対象にする領収書。
+
+    既に生成済み・要確認・失敗・スキップ済みの領収書は再検査しない。
+    """
+
+    base = queryset if queryset is not None else Receipt.objects.all()
+    return base.available_files().filter(ai_filename_status=ReceiptFilenameStatus.NOT_PROCESSED)
+
+
+def claim_pending_receipts_for_ai_processing(queryset: QuerySet, *, limit: int | None = None) -> list[int]:
+    """未処理の領収書だけをAI抽出中として確保し、処理対象IDを返す。"""
+
+    reset_stale_ai_processing_receipts(queryset)
+    queryset = pending_ai_receipts_queryset(queryset).order_by("uploaded_at", "pk")
+    if limit is not None:
+        queryset = queryset[: max(int(limit), 0)]
+
+    with transaction.atomic():
+        ids = list(queryset.values_list("pk", flat=True))
+        if not ids:
+            return []
+        now = timezone.now()
+        Receipt.objects.filter(pk__in=ids, ai_filename_status=ReceiptFilenameStatus.NOT_PROCESSED).update(
+            generated_filename="",
+            ai_filename_status=ReceiptFilenameStatus.PROCESSING,
+            ai_filename_admin_memo=PROCESSING_MEMO,
+            ai_filename_checked_at=None,
+            ai_extracted_payee="",
+            ai_extracted_card_last4="",
+            ai_receipt_month="",
+            ai_period_check_status=ReceiptPeriodCheckStatus.NOT_CHECKED,
+            ai_period_check_memo="",
+            ai_check_card_last4=False,
+            ai_check_payee=False,
+            ai_check_service_payee_related=False,
+            ai_service_payee_check_memo="",
+            ai_check_date=False,
+            ai_check_amount=False,
+            ai_check_currency=False,
+            ai_check_period_match=False,
+            updated_at=now,
+        )
+        return list(
+            Receipt.objects.filter(pk__in=ids, ai_filename_status=ReceiptFilenameStatus.PROCESSING)
+            .order_by("uploaded_at", "pk")
+            .values_list("pk", flat=True)
+        )
+
+
+def process_claimed_receipt(receipt_id: int):
+    receipt = Receipt.objects.select_related("submission", "submission__user", "service").get(pk=receipt_id)
+    if receipt.ai_filename_status != ReceiptFilenameStatus.PROCESSING:
+        return None
+    return apply_ai_filename_to_receipt(receipt)
+
+
+def process_claimed_receipts(receipt_ids: Iterable[int]) -> dict[str, int]:
+    summary = {"processed": 0, "generated": 0, "needs_review": 0, "failed": 0, "skipped": 0, "mismatched": 0}
+    for receipt_id in receipt_ids:
+        try:
+            result = process_claimed_receipt(int(receipt_id))
+            receipt = Receipt.objects.only("ai_filename_status", "ai_period_check_status").get(pk=receipt_id)
+        except Exception as exc:  # pragma: no cover - スレッド内の最終防衛。
+            logger.exception("Receipt %s AI processing failed unexpectedly", receipt_id)
+            try:
+                receipt = Receipt.objects.select_related("submission").get(pk=receipt_id)
+                mark_receipt_ai_failed(receipt, f"AI処理中に予期しないエラーが発生しました: {exc.__class__.__name__}: {exc}")
+            except Exception:
+                logger.exception("Receipt %s could not be marked as failed", receipt_id)
+            summary["failed"] += 1
+            continue
+
+        summary["processed"] += 1
+        if receipt.ai_filename_status == ReceiptFilenameStatus.GENERATED:
+            summary["generated"] += 1
+        elif receipt.ai_filename_status == ReceiptFilenameStatus.NEEDS_REVIEW:
+            summary["needs_review"] += 1
+        elif receipt.ai_filename_status == ReceiptFilenameStatus.FAILED:
+            summary["failed"] += 1
+        elif receipt.ai_filename_status == ReceiptFilenameStatus.SKIPPED:
+            summary["skipped"] += 1
+        if receipt.ai_period_check_status == ReceiptPeriodCheckStatus.MISMATCHED:
+            summary["mismatched"] += 1
+        _ = result
+    return summary
+
+
+def start_background_ai_processing(receipt_ids: Iterable[int]) -> threading.Thread | None:
+    ids = [int(receipt_id) for receipt_id in receipt_ids]
+    if not ids:
+        return None
+
+    def worker():
+        close_old_connections()
+        try:
+            process_claimed_receipts(ids)
+        finally:
+            close_old_connections()
+
+    thread = threading.Thread(target=worker, name="receipt-ai-manual-processing", daemon=True)
+    thread.start()
+    return thread
