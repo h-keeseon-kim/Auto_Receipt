@@ -344,15 +344,16 @@ class UserServiceStopForm(forms.Form):
 class ReceiptUploadForm(forms.ModelForm):
     class Meta:
         model = Receipt
-        fields = ["service", "amount", "currency", "issued_on", "memo", "file"]
+        fields = ["service", "file"]
         widgets = {
-            "issued_on": forms.DateInput(attrs={"type": "date"}),
-            "memo": forms.Textarea(attrs={"rows": 3, "placeholder": "任意: 請求期間、補足など"}),
             "file": forms.ClearableFileInput(attrs={"accept": ".pdf,.png,.jpg,.jpeg,.webp"}),
         }
+        labels = {
+            "service": "サービス選択（登録サービス）",
+            "file": "領収書ファイルアップロード",
+        }
         help_texts = {
-            "service": "利用中サービス、または最終領収書月までの停止済みサービスから選択します。",
-            "amount": "任意。確認用に税込金額などを入力できます。",
+            "service": "登録済みサービスから選択します。利用停止済みサービスは最終領収書月まで選択できます。",
             "file": "PDF / PNG / JPG / JPEG / WEBP。最大10MB。ファイル本体は最大3ヶ月保存されます。",
         }
 
@@ -360,8 +361,9 @@ class ReceiptUploadForm(forms.ModelForm):
         super().__init__(*args, **kwargs)
         if user is not None:
             self.fields["service"].queryset = RegisteredService.objects.uploadable_for(user, period_month).order_by("-is_active", "name", "billing_type")
-        self.fields["service"].empty_label = "利用サービスを選択"
+        self.fields["service"].empty_label = "登録サービスを選択"
         self.fields["service"].label_from_instance = self.service_label
+        self.fields["file"].required = True
         apply_design_classes(self)
 
     @staticmethod
@@ -371,10 +373,6 @@ class ReceiptUploadForm(forms.ModelForm):
         if service.final_receipt_month:
             return f"{service.display_name}（停止済み・最終 {service.final_receipt_month:%Y-%m}）"
         return f"{service.display_name}（停止済み）"
-
-    def clean_currency(self):
-        currency = self.cleaned_data.get("currency", "JPY")
-        return currency.upper()
 
     def clean_file(self):
         uploaded_file = self.cleaned_data.get("file")

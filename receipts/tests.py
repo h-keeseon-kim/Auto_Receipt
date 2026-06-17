@@ -50,19 +50,29 @@ class ReceiptFlowTests(TestCase):
             {
                 "action": "add_receipt",
                 "service": self.service.id,
-                "amount": "1200",
-                "currency": "JPY",
                 "file": upload,
             },
         )
         self.assertEqual(response.status_code, 302)
         submission = Submission.objects.get(user=self.user, period_month=date(2026, 6, 1))
         self.assertEqual(submission.receipts.count(), 1)
+        receipt = submission.receipts.get()
+        self.assertIsNone(receipt.amount)
+        self.assertIsNone(receipt.issued_on)
+        self.assertEqual(receipt.memo, "")
 
         response = self.client.post(reverse("dashboard") + "?month=2026-06", {"action": "submit"})
         self.assertEqual(response.status_code, 302)
         submission.refresh_from_db()
         self.assertTrue(submission.is_submitted)
+
+    def test_receipt_upload_form_has_only_service_and_file_fields(self):
+        form = ReceiptUploadForm(user=self.user, period_month=date(2026, 6, 1))
+
+        self.assertEqual(list(form.fields), ["service", "file"])
+        self.assertEqual(form.fields["service"].label, "サービス選択（登録サービス）")
+        self.assertEqual(form.fields["file"].label, "領収書ファイルアップロード")
+        self.assertTrue(form.fields["file"].required)
 
     def test_purge_expired_receipts_deletes_file_but_keeps_metadata(self):
         submission = Submission.objects.create(user=self.user, period_month=date(2026, 6, 1))
@@ -265,7 +275,8 @@ class StaffServiceAssignmentTests(TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertContains(response, "OpenAI API")
-        self.assertContains(response, "利用サービス管理")
+        self.assertContains(response, "領収書を追加")
+        self.assertNotContains(response, "<h2>利用サービス</h2>", html=True)
         self.assertNotContains(response, "サービス編集")
 
     def test_user_cannot_upload_receipt_for_another_users_service(self):
@@ -328,7 +339,7 @@ class StaffServiceAssignmentTests(TestCase):
         self.client.login(username="user@example.com", password="password123")
         response = self.client.get(reverse("dashboard"))
         self.assertNotContains(response, "AWS")
-        self.assertContains(response, "利用中サービスがまだ登録されていません")
+        self.assertContains(response, "領収書をアップロードするには、利用サービス登録が必要です")
 
         self.client.logout()
         self.client.login(username="admin", password="admin-password-123")
@@ -454,6 +465,15 @@ class UserServiceRegistrationTests(TestCase):
         self.assertContains(response, "Slack（サブスク）")
         self.assertContains(response, "ユーザー登録")
 
+    def test_user_services_page_places_registration_button_in_active_services_section(self):
+        self.client.login(username="user@example.com", password="password123")
+        response = self.client.get(reverse("user_services"))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "サービス利用登録")
+        self.assertNotContains(response, "アップロードへ")
+        self.assertContains(response, "<h2>利用中サービス</h2>", html=True)
+
     def test_user_can_register_same_name_with_different_billing_type(self):
         subscription = ServiceCatalog.objects.create(name="ChatGPT", billing_type=BillingType.SUBSCRIPTION, created_by=self.admin)
         metered = ServiceCatalog.objects.create(name="ChatGPT", billing_type=BillingType.METERED, created_by=self.admin)
@@ -480,6 +500,7 @@ class UserServiceRegistrationTests(TestCase):
         response = self.client.get(reverse("dashboard"))
         self.assertContains(response, "ChatGPT（サブスク）")
         self.assertContains(response, "ChatGPT（従量課金 / API）")
+        self.assertNotContains(response, "<h2>利用サービス</h2>", html=True)
 
     def test_user_can_stop_service_with_final_receipt_month_and_staff_can_see_it(self):
         service = RegisteredService.objects.create(

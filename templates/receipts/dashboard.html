@@ -32,61 +32,6 @@
     </div>
 </section>
 
-<section class="card section">
-    <div class="section-header">
-        <div>
-            <h2>利用サービス</h2>
-            <p class="muted">管理者が登録したサービスマスターから、自分で利用登録したサービスも表示されます。新しく使い始めた場合は「利用サービス管理」から追加してください。</p>
-        </div>
-        <div class="actions">
-            <a class="button" href="{% url 'user_services' %}">利用サービス管理</a>
-        </div>
-    </div>
-    <div class="table-wrap">
-        <table>
-            <thead><tr><th>サービス</th><th>種別</th><th>登録元</th><th>今月の領収書</th></tr></thead>
-            <tbody>
-            {% for row in service_rows %}
-                <tr>
-                    <td><strong>{{ row.service.display_name }}</strong>{% if row.service.memo %}<div class="muted small">{{ row.service.memo|truncatechars:80 }}</div>{% endif %}</td>
-                    <td>{{ row.service.get_billing_type_display }}</td>
-                    <td><span class="badge {{ row.service.source_badge_class }}">{{ row.service.get_registration_source_display }}</span></td>
-                    <td>{% if row.uploaded %}<span class="badge submitted">アップロード済み</span>{% else %}<span class="badge draft">未アップロード</span>{% endif %}</td>
-                </tr>
-            {% empty %}
-                <tr><td colspan="4" class="muted center">利用中サービスがまだ登録されていません。「利用サービス管理」から追加するか、管理者に登録を依頼してください。</td></tr>
-            {% endfor %}
-            </tbody>
-        </table>
-    </div>
-</section>
-
-{% if stopped_rows %}
-<section class="card section">
-    <div class="section-header">
-        <div>
-            <h2>利用停止済みサービス</h2>
-            <p class="muted">利用停止済みサービスは通常の項目から外れます。最終領収書月までの提出月では、領収書アップロード時の選択肢に表示されます。</p>
-        </div>
-    </div>
-    <div class="table-wrap">
-        <table>
-            <thead><tr><th>サービス</th><th>最終領収書月</th><th>停止元</th><th>この提出月での選択</th></tr></thead>
-            <tbody>
-            {% for row in stopped_rows %}
-                <tr>
-                    <td><strong>{{ row.service.display_name }}</strong></td>
-                    <td>{% if row.service.final_receipt_month %}{{ row.service.final_receipt_month|date:"Y年m月" }}{% else %}-{% endif %}</td>
-                    <td>{% if row.service.deactivation_source %}<span class="badge {{ row.service.stop_badge_class }}">{{ row.service.get_deactivation_source_display }}</span>{% else %}-{% endif %}</td>
-                    <td>{% if row.uploadable %}<span class="badge draft">選択可</span>{% else %}<span class="badge neutral">選択不可</span>{% endif %}</td>
-                </tr>
-            {% endfor %}
-            </tbody>
-        </table>
-    </div>
-</section>
-{% endif %}
-
 {% if submission.is_submitted %}
     <section class="card section notice">
         <h2>提出済みです</h2>

@@ -118,9 +118,7 @@ def register(request):
 def dashboard(request):
     selected_month, month_form = parse_month_from_request(request)
     submission, _ = Submission.objects.get_or_create(user=request.user, period_month=selected_month)
-    active_services = RegisteredService.objects.filter(user=request.user, is_active=True).order_by("name", "billing_type")
     uploadable_services = RegisteredService.objects.uploadable_for(request.user, selected_month)
-    stopped_services = RegisteredService.objects.filter(user=request.user, is_active=False).order_by("-deactivated_at", "name", "billing_type")
     receipts = submission.receipts.select_related("service").all()
 
     if request.method == "POST":
@@ -163,15 +161,6 @@ def dashboard(request):
     else:
         receipt_form = ReceiptUploadForm(user=request.user, period_month=selected_month)
 
-    uploaded_service_ids = set(receipts.values_list("service_id", flat=True))
-    service_rows = [
-        {"service": service, "uploaded": service.id in uploaded_service_ids}
-        for service in active_services
-    ]
-    stopped_rows = [
-        {"service": service, "uploadable": service.is_uploadable_for(selected_month)}
-        for service in stopped_services
-    ]
     return render(
         request,
         "receipts/dashboard.html",
@@ -180,11 +169,7 @@ def dashboard(request):
             "receipt_form": receipt_form,
             "submission": submission,
             "receipts": receipts,
-            "active_services": active_services,
             "uploadable_services": uploadable_services,
-            "stopped_services": stopped_services,
-            "service_rows": service_rows,
-            "stopped_rows": stopped_rows,
             "selected_month": selected_month,
             "retention_months": settings.RECEIPT_RETENTION_MONTHS,
         },
