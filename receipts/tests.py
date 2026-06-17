@@ -433,6 +433,26 @@ class StaffServiceAssignmentTests(TestCase):
         self.assertLess(content.index("登録状況"), content.index("登録サービス一覧"))
         self.assertLess(content.index("登録サービス一覧"), content.index("新規登録/停止"))
 
+    def test_staff_services_action_buttons_are_placed_inside_relevant_sections(self):
+        RegisteredService.objects.create(
+            user=self.user,
+            catalog_service=self.catalog,
+            name=self.catalog.name,
+            billing_type=self.catalog.billing_type,
+        )
+        self.client.login(username="admin", password="admin-password-123")
+
+        response = self.client.get(reverse("staff_services") + f"?user={self.user.pk}")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertNotContains(response, "提出履歴へ")
+        content = response.content.decode()
+        self.assertEqual(content.count("サービスマスター登録"), 1)
+        self.assertEqual(content.count("このユーザーへサービス登録"), 1)
+        self.assertLess(content.index("<h2>サービスマスター</h2>"), content.index("サービスマスター登録"))
+        self.assertLess(content.index("<h2>ユーザー別サービス状況</h2>"), content.index("このユーザーへサービス登録"))
+        self.assertNotContains(response, ">サービスを登録</a>")
+
     def test_staff_registers_service_for_user_and_user_sees_it(self):
         self.client.login(username="admin", password="admin-password-123")
         response = self.client.post(

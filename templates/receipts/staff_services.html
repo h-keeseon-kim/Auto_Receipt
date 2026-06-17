@@ -6,11 +6,6 @@
         <h1>利用サービス管理</h1>
         <p class="muted">サービスマスターと、ユーザー別の利用サービス状況を管理します。</p>
     </div>
-    <div class="actions">
-        <a class="button" href="{% url 'history' %}">提出履歴へ</a>
-        <a class="button" href="{% url 'staff_catalog_create' %}">サービスマスター登録</a>
-        {% if selected_user %}<a class="button primary" href="{% url 'staff_user_services' selected_user.pk %}">このユーザーへサービス登録</a>{% endif %}
-    </div>
 </div>
 
 <section class="card section">
@@ -19,6 +14,7 @@
             <h2>サービスマスター</h2>
             <p class="muted">一般ユーザーは、この選択可能なマスター一覧から新しい利用サービスを登録できます。</p>
         </div>
+        <a class="button" href="{% url 'staff_catalog_create' %}">サービスマスター登録</a>
     </div>
     <div class="table-wrap">
         <table>
@@ -74,6 +70,9 @@
             <h2>ユーザー別サービス状況</h2>
             <p class="muted">ユーザーを選択して、登録状況、登録サービス一覧、新規登録/停止を確認します。</p>
         </div>
+        {% if selected_user %}
+            <a class="button primary" href="{% url 'staff_user_services' selected_user.pk %}">このユーザーへサービス登録</a>
+        {% endif %}
     </div>
     <form method="get" class="filter-form">
         <label for="staff-service-user">対象ユーザー</label>
@@ -93,7 +92,6 @@
                     <h3>登録状況</h3>
                     <p class="muted">{{ selected_user.username }} の利用サービス集計です。</p>
                 </div>
-                <a class="button primary" href="{% url 'staff_user_services' selected_user.pk %}">サービスを登録</a>
             </div>
             <section class="status-grid compact-grid">
                 <div class="card"><span class="label">ユーザー</span><strong>{{ selected_user.username }}</strong></div>
