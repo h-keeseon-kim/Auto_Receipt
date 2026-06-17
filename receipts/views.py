@@ -751,7 +751,7 @@ def staff_history(request):
     receipts = (
         Receipt.objects.filter(submission__period_month=selected_month, submission__user_id__in=user_ids)
         .select_related("submission", "submission__user", "service")
-        .order_by("submission__user__username", "service_name_snapshot", "uploaded_at")
+        .order_by("-uploaded_at", "-pk")
     )
     ai_pending_count = receipts.filter(
         Q(ai_filename_status=ReceiptFilenameStatus.NOT_PROCESSED) | Q(ai_period_check_status=ReceiptPeriodCheckStatus.NOT_CHECKED)
@@ -999,16 +999,12 @@ def build_receipts_zip(submissions, zip_label: str) -> HttpResponse:
 @staff_member_required
 def staff_download_month(request):
     selected_month, _ = parse_month_from_request(request)
-    include_drafts = request.GET.get("include_drafts") == "1"
     queryset = (
-        Submission.objects.filter(period_month=selected_month)
+        Submission.objects.filter(period_month=selected_month, status=SubmissionStatus.SUBMITTED)
         .select_related("user")
         .prefetch_related(Prefetch("receipts", queryset=Receipt.objects.select_related("service")))
     )
-    if not include_drafts:
-        queryset = queryset.filter(status=SubmissionStatus.SUBMITTED)
-    label_suffix = "all" if include_drafts else "submitted"
-    return build_receipts_zip(queryset, f"receipts_{selected_month:%Y-%m}_{label_suffix}")
+    return build_receipts_zip(queryset, f"receipts_{selected_month:%Y-%m}_submitted")
 
 
 @staff_member_required

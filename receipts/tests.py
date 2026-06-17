@@ -882,8 +882,9 @@ class StaffServiceAssignmentTests(TestCase):
         self.assertContains(response, "提出履歴")
         self.assertNotContains(response, ">アップロード</a>")
         self.assertNotContains(response, ">管理者</a>")
+        self.assertNotContains(response, "下書き含むZIP")
 
-    def test_staff_history_lists_receipts_by_username_and_delete_removes_user_history(self):
+    def test_staff_history_lists_receipts_by_upload_date_and_delete_removes_user_history(self):
         user_service = RegisteredService.objects.create(
             user=self.user,
             catalog_service=self.catalog,
@@ -917,13 +918,23 @@ class StaffServiceAssignmentTests(TestCase):
         )
         user_receipt_path = Path(user_receipt.file.path)
         self.assertTrue(user_receipt_path.exists())
+        older_uploaded_at = timezone.now() - timedelta(days=2)
+        newer_uploaded_at = timezone.now() - timedelta(hours=1)
+        Receipt.objects.filter(pk=user_receipt.pk).update(uploaded_at=older_uploaded_at)
+        Receipt.objects.filter(pk=other_receipt.pk).update(uploaded_at=newer_uploaded_at)
 
         self.client.login(username="admin", password="admin-password-123")
         response = self.client.get(reverse("history") + "?month=2026-06")
 
         self.assertContains(response, "アップロード済み領収書")
+        self.assertContains(response, "アップロード日時の新しい順")
+        self.assertContains(response, "receipt-history-table")
+        self.assertContains(response, "table-scroll-wide")
         content = response.content.decode()
-        self.assertLess(content.index("other@example.com"), content.index("user@example.com"))
+        upload_section = content[content.index("アップロード済み領収書"):]
+        self.assertLess(upload_section.index("other.pdf"), upload_section.index("user.pdf"))
+        status_section = content[content.index("提出状況"):content.index("アップロード済み領収書")]
+        self.assertLess(status_section.index("other@example.com"), status_section.index("user@example.com"))
         self.assertContains(response, "other.pdf")
         self.assertContains(response, "user.pdf")
 

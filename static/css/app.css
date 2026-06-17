@@ -252,3 +252,68 @@ tr:last-child td { border-bottom: 0; }
     width: auto;
     margin: 0;
 }
+
+/* Staff history tables: keep dense admin tables readable with vertical and horizontal scrolling. */
+.table-scroll-wide,
+.horizontal-scroll {
+    overflow: auto;
+    -webkit-overflow-scrolling: touch;
+}
+.table-scroll-wide table,
+.horizontal-scroll table {
+    table-layout: auto;
+    width: max-content;
+    min-width: 100%;
+}
+.staff-status-table {
+    min-width: 1180px;
+}
+.receipt-history-table {
+    min-width: 1860px;
+}
+.status-table {
+    min-width: 980px;
+}
+.staff-status-table td,
+.receipt-history-table td {
+    vertical-align: top;
+}
+.staff-status-table th:last-child,
+.staff-status-table td:last-child {
+    min-width: 13rem;
+}
+.receipt-history-table th:nth-child(5),
+.receipt-history-table td:nth-child(5) {
+    min-width: 18rem;
+}
+.receipt-history-table th:nth-child(6),
+.receipt-history-table td:nth-child(6) {
+    min-width: 30rem;
+}
+.receipt-history-table th:last-child,
+.receipt-history-table td:last-child {
+    min-width: 20rem;
+    position: sticky;
+    right: 0;
+    background: var(--card);
+    box-shadow: -8px 0 16px rgba(16, 24, 40, 0.06);
+}
+.receipt-history-table tr.manual-review-row td:last-child {
+    background: #fff8e6;
+}
+.table-actions {
+    display: flex;
+    align-items: center;
+    gap: 0.35rem;
+    flex-wrap: nowrap;
+    min-width: max-content;
+}
+.table-actions form {
+    display: inline-flex;
+    margin: 0;
+}
+.table-actions .button,
+.actions.nowrap .button {
+    white-space: nowrap;
+    flex: 0 0 auto;
+}

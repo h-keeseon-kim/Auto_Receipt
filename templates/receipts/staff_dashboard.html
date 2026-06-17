@@ -32,7 +32,6 @@
         <h2>提出状況</h2>
         <div class="actions">
             <a class="button primary" href="{% url 'staff_download_month' %}?month={{ selected_month|date:'Y-m' }}">提出済みZIP</a>
-            <a class="button" href="{% url 'staff_download_month' %}?month={{ selected_month|date:'Y-m' }}&include_drafts=1">下書き含むZIP</a>
         </div>
     </div>
     <div class="table-wrap">

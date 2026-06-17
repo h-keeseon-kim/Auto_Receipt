@@ -39,13 +39,12 @@
             <h2>提出状況</h2>
             <p class="muted">ユーザー名順に、対象月の提出状況を表示します。</p>
         </div>
-        <div class="actions">
+        <div class="actions nowrap">
             <a class="button primary" href="{% url 'staff_download_month' %}?month={{ selected_month|date:'Y-m' }}">提出済みZIP</a>
-            <a class="button" href="{% url 'staff_download_month' %}?month={{ selected_month|date:'Y-m' }}&include_drafts=1">下書き含むZIP</a>
         </div>
     </div>
-    <div class="table-wrap scroll-box medium">
-        <table>
+    <div class="table-wrap scroll-box medium table-scroll-wide" aria-label="提出状況テーブル">
+        <table class="staff-status-table">
             <thead><tr><th>ユーザー</th><th>メール</th><th>利用中サービス</th><th>ユーザー登録</th><th>ユーザー停止</th><th>ステータス</th><th>領収書数</th><th>保存中</th><th>削除済み</th><th>操作</th></tr></thead>
             <tbody>
                 {% for row in rows %}
@@ -59,14 +58,16 @@
                         <td>{{ row.receipt_count }}</td>
                         <td>{{ row.available_file_count }}</td>
                         <td>{{ row.purged_file_count }}</td>
-                        <td class="actions">
-                            <a class="button small" href="{% url 'staff_services' %}?user={{ row.user.pk }}">サービス</a>
+                        <td>
+                            <div class="table-actions">
+                                <a class="button small" href="{% url 'staff_services' %}?user={{ row.user.pk }}">サービス</a>
                             {% if row.submission %}
                                 <a class="button small" href="{% url 'staff_submission_detail' row.submission.pk %}">詳細</a>
                                 <a class="button small" href="{% url 'staff_download_submission' row.submission.pk %}">ZIP</a>
                             {% else %}
                                 <span class="muted">提出なし</span>
                             {% endif %}
+                            </div>
                         </td>
                     </tr>
                 {% empty %}
@@ -85,8 +86,8 @@
             <p class="muted">管理者が再提出を指示し、ユーザーの再アップロードを待っている項目です。</p>
         </div>
     </div>
-    <div class="table-wrap scroll-box medium">
-        <table>
+    <div class="table-wrap scroll-box medium horizontal-scroll">
+        <table class="wide-table status-table">
             <thead><tr><th>ユーザー</th><th>対象サービス</th><th>元ファイル</th><th>依頼日時</th><th>内容</th></tr></thead>
             <tbody>
                 {% for request_item in open_resubmission_requests %}
@@ -108,11 +109,11 @@
     <div class="section-header">
         <div>
             <h2>アップロード済み領収書</h2>
-            <p class="muted">対象月にアップロードされた領収書ファイルをユーザー名順に表示します。削除すると、該当ユーザー側の提出履歴からも削除されます。</p>
+            <p class="muted">対象月にアップロードされた領収書ファイルをアップロード日時の新しい順にまとめて表示します。削除すると、該当ユーザー側の提出履歴からも削除されます。</p>
         </div>
     </div>
-    <div class="table-wrap scroll-box large">
-        <table>
+    <div class="table-wrap scroll-box large table-scroll-wide" aria-label="アップロード済み領収書テーブル">
+        <table class="receipt-history-table">
             <thead><tr><th>ユーザー</th><th>提出月</th><th>ステータス</th><th>サービス</th><th>ファイル</th><th>AI確認 / 提出月</th><th>保存状態</th><th>アップロード日時</th><th>操作</th></tr></thead>
             <tbody>
                 {% for receipt in receipts %}
@@ -152,8 +153,9 @@
                             {% if receipt.file_deleted_at %}<div class="danger small">削除: {{ receipt.file_deleted_at|date:"Y-m-d H:i" }}</div>{% endif %}
                         </td>
                         <td>{{ receipt.uploaded_at|date:"Y-m-d H:i" }}</td>
-                        <td class="actions">
-                            <a class="button small" href="{% url 'staff_submission_detail' receipt.submission.pk %}">詳細</a>
+                        <td>
+                            <div class="table-actions receipt-table-actions">
+                                <a class="button small" href="{% url 'staff_submission_detail' receipt.submission.pk %}">詳細</a>
                             {% if receipt.file_available %}
                                 <a class="button small" href="{% url 'download_receipt' receipt.pk %}">DL</a>
                             {% endif %}
@@ -169,6 +171,7 @@
                                 <input type="hidden" name="next" value="{{ request.get_full_path }}">
                                 <button type="submit" class="button small danger-outline">削除</button>
                             </form>
+                            </div>
                         </td>
                     </tr>
                 {% empty %}
