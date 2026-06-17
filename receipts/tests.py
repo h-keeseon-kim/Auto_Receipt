@@ -103,3 +103,93 @@ class SignupSettingsTests(TestCase):
         self.assertRedirects(response, reverse("login"))
         self.assertContains(response, "ユーザー登録は現在無効です")
         self.assertContains(response, "管理者に作成を依頼")
+
+
+class StaffUserProvisioningTests(TestCase):
+    def setUp(self):
+        self.admin = User.objects.create_superuser(
+            username="admin",
+            email="admin@example.com",
+            password="admin-password-123",
+        )
+        self.client.login(username="admin", password="admin-password-123")
+
+    def test_staff_can_create_email_user_with_random_initial_password(self):
+        response = self.client.post(reverse("staff_user_create"), {"email": "NEW.USER@example.COM"})
+
+        self.assertEqual(response.status_code, 200)
+        user = User.objects.get(username="new.user@example.com")
+        self.assertEqual(user.email, "new.user@example.com")
+        self.assertFalse(user.is_staff)
+        self.assertFalse(user.is_superuser)
+        self.assertTrue(user.profile.must_change_password)
+        self.assertEqual(user.profile.created_by, self.admin)
+
+        generated_password = response.context["generated_password"]
+        self.assertIsNotNone(generated_password)
+        self.assertGreaterEqual(len(generated_password), 16)
+        self.assertTrue(user.check_password(generated_password))
+        self.assertContains(response, "new.user@example.com")
+        self.assertContains(response, generated_password)
+
+    def test_staff_user_create_rejects_duplicate_email(self):
+        User.objects.create_user(username="existing@example.com", email="existing@example.com", password="password123")
+        response = self.client.post(reverse("staff_user_create"), {"email": "EXISTING@example.com"})
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "このメールアドレスはすでに登録されています")
+        self.assertEqual(User.objects.filter(username__iexact="existing@example.com").count(), 1)
+
+    def test_non_staff_cannot_access_staff_user_create(self):
+        self.client.logout()
+        user = User.objects.create_user(username="user@example.com", email="user@example.com", password="password123")
+        self.client.login(username=user.username, password="password123")
+
+        response = self.client.get(reverse("staff_user_create"))
+
+        self.assertEqual(response.status_code, 302)
+        self.assertIn("/admin/login/", response["Location"])
+
+
+class ForcedPasswordChangeTests(TestCase):
+    def setUp(self):
+        self.user = User.objects.create_user(
+            username="user@example.com",
+            email="user@example.com",
+            password="InitialPassword123",
+        )
+        self.user.profile.must_change_password = True
+        self.user.profile.save(update_fields=["must_change_password", "updated_at"])
+
+    def test_user_must_change_initial_password_before_using_app(self):
+        self.client.login(username="user@example.com", password="InitialPassword123")
+
+        response = self.client.get(reverse("dashboard"))
+        self.assertRedirects(response, reverse("password_change"))
+
+        response = self.client.post(
+            reverse("password_change"),
+            {
+                "old_password": "InitialPassword123",
+                "new_password1": "ChangedPassword12345",
+                "new_password2": "ChangedPassword12345",
+            },
+        )
+        self.assertRedirects(response, reverse("password_change_done"))
+
+        self.user.refresh_from_db()
+        self.user.profile.refresh_from_db()
+        self.assertFalse(self.user.profile.must_change_password)
+        self.assertTrue(self.user.check_password("ChangedPassword12345"))
+
+        response = self.client.get(reverse("dashboard"))
+        self.assertEqual(response.status_code, 200)
+
+    def test_email_login_is_case_insensitive_for_email_accounts(self):
+        response = self.client.post(
+            reverse("login"),
+            {"username": "USER@EXAMPLE.COM", "password": "InitialPassword123"},
+        )
+
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(response["Location"], reverse("dashboard"))

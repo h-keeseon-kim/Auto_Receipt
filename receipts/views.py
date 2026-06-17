@@ -8,19 +8,29 @@ from pathlib import Path
 from django.conf import settings
 from django.contrib import messages
 from django.contrib.admin.views.decorators import staff_member_required
+from django.contrib.auth.views import PasswordChangeView
 from django.contrib.auth import login
 from django.contrib.auth.decorators import login_required
+from django.contrib.auth.mixins import LoginRequiredMixin
 from django.contrib.auth.models import User
 from django.core.exceptions import PermissionDenied, ValidationError
 from django.db.models import Count, Prefetch
 from django.http import FileResponse, Http404, HttpResponse
 from django.shortcuts import get_object_or_404, redirect, render
-from django.urls import reverse
+from django.urls import reverse, reverse_lazy
 from django.utils import timezone
 from django.utils.text import slugify
 
-from .forms import MonthSelectForm, ReceiptUploadForm, RegisterForm, RegisteredServiceForm, current_month
-from .models import Receipt, RegisteredService, Submission, SubmissionStatus, receipt_expiry_from
+from .forms import (
+    MonthSelectForm,
+    ReceiptUploadForm,
+    RegisterForm,
+    RegisteredServiceForm,
+    StaffUserCreateForm,
+    StyledPasswordChangeForm,
+    current_month,
+)
+from .models import Receipt, RegisteredService, Submission, SubmissionStatus, UserProfile, receipt_expiry_from
 
 
 def safe_part(value: str, fallback: str = "item") -> str:
@@ -49,6 +59,20 @@ def add_validation_errors(form, exc: ValidationError):
     else:
         for error in getattr(exc, "messages", [str(exc)]):
             form.add_error(None, error)
+
+
+class ForcedPasswordChangeView(LoginRequiredMixin, PasswordChangeView):
+    form_class = StyledPasswordChangeForm
+    template_name = "registration/password_change_form.html"
+    success_url = reverse_lazy("password_change_done")
+
+    def form_valid(self, form):
+        response = super().form_valid(form)
+        profile, _ = UserProfile.objects.get_or_create(user=self.request.user)
+        profile.mark_password_changed()
+        self.request.session.pop("password_change_notice_shown", None)
+        messages.success(self.request, "パスワードを変更しました。続けて機能をご利用ください。")
+        return response
 
 
 def register(request):
@@ -236,6 +260,36 @@ def download_receipt(request, pk: int):
         raise Http404("保存期限が過ぎたか、ファイルが削除済みです。")
     filename = receipt.original_filename or Path(receipt.file.name).name
     return FileResponse(receipt.file.open("rb"), as_attachment=True, filename=filename)
+
+
+@staff_member_required
+def staff_user_create(request):
+    generated_user = None
+    generated_password = None
+    if request.method == "POST":
+        form = StaffUserCreateForm(request.POST)
+        if form.is_valid():
+            generated_user, generated_password = form.save(created_by=request.user)
+            messages.success(request, f"{generated_user.username} のアカウントを作成しました。初期パスワードを対象ユーザーへ安全に伝えてください。")
+            form = StaffUserCreateForm()
+    else:
+        form = StaffUserCreateForm()
+
+    recent_users = (
+        User.objects.filter(is_staff=False, is_superuser=False)
+        .select_related("profile")
+        .order_by("-date_joined")[:10]
+    )
+    return render(
+        request,
+        "receipts/staff_user_create.html",
+        {
+            "form": form,
+            "generated_user": generated_user,
+            "generated_password": generated_password,
+            "recent_users": recent_users,
+        },
+    )
 
 
 @staff_member_required

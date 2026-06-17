@@ -8,7 +8,7 @@ from django.conf import settings
 from django.core.exceptions import ValidationError
 from django.core.validators import FileExtensionValidator, MinValueValidator
 from django.db import models
-from django.db.models.signals import post_delete
+from django.db.models.signals import post_delete, post_save
 from django.dispatch import receiver
 from django.urls import reverse
 from django.utils import timezone
@@ -134,6 +134,40 @@ class Submission(models.Model):
         return f"{self.user} / {self.period_month:%Y-%m} / {self.get_status_display()}"
 
 
+class UserProfile(models.Model):
+    user = models.OneToOneField(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="profile")
+    must_change_password = models.BooleanField("次回ログイン時にパスワード変更を必須にする", default=False)
+    initial_password_generated_at = models.DateTimeField("初期パスワード生成日時", null=True, blank=True)
+    password_changed_at = models.DateTimeField("初回パスワード変更日時", null=True, blank=True)
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="created_user_profiles",
+        verbose_name="作成管理者",
+    )
+    created_at = models.DateTimeField("作成日時", auto_now_add=True)
+    updated_at = models.DateTimeField("更新日時", auto_now=True)
+
+    class Meta:
+        verbose_name = "ユーザープロファイル"
+        verbose_name_plural = "ユーザープロファイル"
+
+    def mark_initial_password_generated(self):
+        self.initial_password_generated_at = timezone.now()
+        self.password_changed_at = None
+        self.save(update_fields=["must_change_password", "initial_password_generated_at", "password_changed_at", "created_by", "updated_at"])
+
+    def mark_password_changed(self):
+        self.must_change_password = False
+        self.password_changed_at = timezone.now()
+        self.save(update_fields=["must_change_password", "password_changed_at", "updated_at"])
+
+    def __str__(self) -> str:
+        return f"{self.user} / password_change_required={self.must_change_password}"
+
+
 class ReceiptQuerySet(models.QuerySet):
     def available_files(self):
         return self.filter(file_deleted_at__isnull=True).exclude(file="")
@@ -226,3 +260,9 @@ class Receipt(models.Model):
 def delete_receipt_file(sender, instance: Receipt, **kwargs):
     if instance.file:
         instance.file.delete(save=False)
+
+
+
+@receiver(post_save, sender=settings.AUTH_USER_MODEL)
+def ensure_user_profile(sender, instance, created, **kwargs):
+    UserProfile.objects.get_or_create(user=instance)

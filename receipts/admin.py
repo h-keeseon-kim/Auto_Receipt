@@ -1,6 +1,6 @@
 from django.contrib import admin
 
-from .models import Receipt, RegisteredService, Submission
+from .models import Receipt, RegisteredService, Submission, UserProfile
 
 
 class ReceiptInline(admin.TabularInline):
@@ -84,3 +84,11 @@ class ReceiptAdmin(admin.ModelAdmin):
     @admin.display(description="ファイル状態")
     def file_status(self, obj):
         return obj.file_status_label
+
+
+@admin.register(UserProfile)
+class UserProfileAdmin(admin.ModelAdmin):
+    list_display = ("user", "must_change_password", "initial_password_generated_at", "password_changed_at", "created_by")
+    list_filter = ("must_change_password", "initial_password_generated_at", "password_changed_at")
+    search_fields = ("user__username", "user__email", "created_by__username", "created_by__email")
+    readonly_fields = ("created_at", "updated_at", "initial_password_generated_at", "password_changed_at")

@@ -5,6 +5,7 @@
     <div>
         <h1>管理者ダッシュボード</h1>
         <p class="muted">ユーザー別の提出状況を確認し、領収書をまとめてダウンロードできます。</p>
+        <p><a class="button" href="{% url 'staff_user_create' %}">新規ユーザー発行</a></p>
     </div>
     <form method="get" class="month-form">
         {{ month_form.month.label_tag }}

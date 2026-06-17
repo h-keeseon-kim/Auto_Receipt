@@ -1,0 +1,73 @@
+{% extends "base.html" %}
+{% block title %}ユーザー発行 - Auto Receipt{% endblock %}
+{% block content %}
+<div class="page-title">
+    <div>
+        <h1>ユーザー発行</h1>
+        <p class="muted">一般ユーザーのアカウント名をメールアドレス形式で作成し、初期パスワードを生成します。</p>
+    </div>
+    <div class="actions">
+        <a class="button" href="{% url 'staff_dashboard' %}">提出状況へ戻る</a>
+    </div>
+</div>
+
+{% if generated_user and generated_password %}
+<section class="card section credential-card">
+    <h2>作成したアカウント</h2>
+    <p class="muted">初期パスワードはこの画面でのみ確認できます。対象ユーザーへ安全な方法で伝えてください。</p>
+    <div class="credential-grid">
+        <div>
+            <span class="label">アカウント名</span>
+            <code class="credential-value">{{ generated_user.username }}</code>
+        </div>
+        <div>
+            <span class="label">初期パスワード</span>
+            <code class="credential-value">{{ generated_password }}</code>
+        </div>
+    </div>
+    <div class="notice message">
+        ユーザーはこのアカウント名と初期パスワードでログイン後、最初に必ずパスワード変更ページへ移動します。
+    </div>
+</section>
+{% endif %}
+
+<section class="card section">
+    <h2>新規ユーザー作成</h2>
+    <form method="post" class="stack">
+        {% csrf_token %}
+        {{ form.as_p }}
+        <button type="submit" class="button primary">パスワード生成</button>
+    </form>
+</section>
+
+<section class="card section">
+    <div class="section-header">
+        <h2>最近作成された一般ユーザー</h2>
+    </div>
+    <div class="table-wrap">
+        <table>
+            <thead>
+                <tr><th>アカウント名</th><th>メール</th><th>初回変更</th><th>作成日時</th></tr>
+            </thead>
+            <tbody>
+                {% for account in recent_users %}
+                    <tr>
+                        <td><strong>{{ account.username }}</strong></td>
+                        <td>{{ account.email|default:"-" }}</td>
+                        <td>
+                            {% if account.profile.must_change_password %}
+                                <span class="badge draft">未変更</span>
+                            {% else %}
+                                <span class="badge submitted">変更済み</span>
+                            {% endif %}
+                        </td>
+                        <td>{{ account.date_joined|date:"Y-m-d H:i" }}</td>
+                    </tr>
+                {% empty %}
+                    <tr><td colspan="4" class="muted center">一般ユーザーはまだ作成されていません。</td></tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</section>
+{% endblock %}

@@ -1,11 +1,15 @@
 from __future__ import annotations
 
+import string
 from datetime import date
 
 from django import forms
 from django.conf import settings
-from django.contrib.auth.forms import UserCreationForm
+from django.contrib.auth.forms import AuthenticationForm, PasswordChangeForm, UserCreationForm
 from django.contrib.auth.models import User
+from django.contrib.auth.password_validation import validate_password
+from django.core.exceptions import ValidationError
+from django.utils.crypto import get_random_string
 
 from .models import Receipt, RegisteredService
 
@@ -21,6 +25,38 @@ def apply_design_classes(form):
             widget.attrs.setdefault("class", "form-select")
         else:
             widget.attrs.setdefault("class", "form-control")
+
+
+def normalize_account_email(value: str) -> str:
+    """このアプリでは一般ユーザーのアカウント名をメールアドレスとして扱う。"""
+    return (value or "").strip().lower()
+
+
+def ensure_unique_account_email(email: str):
+    if User.objects.filter(username__iexact=email).exists() or User.objects.filter(email__iexact=email).exists():
+        raise forms.ValidationError("このメールアドレスはすでに登録されています。")
+
+
+def generate_initial_password(user: User | None = None, length: int = 16) -> str:
+    """管理者が対象ユーザーへ一度だけ伝える初期パスワードを生成する。"""
+    alphabet = string.ascii_letters + string.digits
+    for _ in range(100):
+        password = get_random_string(length, allowed_chars=alphabet)
+        if not any(char.islower() for char in password):
+            continue
+        if not any(char.isupper() for char in password):
+            continue
+        if not any(char.isdigit() for char in password):
+            continue
+        try:
+            validate_password(password, user=user)
+        except ValidationError:
+            continue
+        return password
+    # 事実上到達しないが、パスワードバリデータが厳しい場合にも生成できるようにする。
+    password = f"{get_random_string(length, allowed_chars=alphabet)}Aa1"
+    validate_password(password, user=user)
+    return password
 
 
 class MonthInput(forms.DateInput):
@@ -108,20 +144,87 @@ class ReceiptUploadForm(forms.ModelForm):
 
 
 class RegisterForm(UserCreationForm):
-    email = forms.EmailField(label="メールアドレス", required=False)
+    username = forms.EmailField(
+        label="メールアドレス",
+        max_length=150,
+        widget=forms.EmailInput(attrs={"autocomplete": "email", "placeholder": "user@example.com"}),
+    )
 
     class Meta(UserCreationForm.Meta):
         model = User
-        fields = ("username", "email")
-        labels = {"username": "ユーザー名"}
+        fields = ("username",)
+        labels = {"username": "メールアドレス"}
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         apply_design_classes(self)
 
+    def clean_username(self):
+        email = normalize_account_email(self.cleaned_data["username"])
+        ensure_unique_account_email(email)
+        return email
+
     def save(self, commit=True):
         user = super().save(commit=False)
-        user.email = self.cleaned_data.get("email", "")
+        email = self.cleaned_data["username"]
+        user.username = email
+        user.email = email
         if commit:
             user.save()
         return user
+
+
+class StaffUserCreateForm(forms.Form):
+    email = forms.EmailField(
+        label="新しく登録するユーザー名（メールアドレス）",
+        max_length=150,
+        widget=forms.EmailInput(attrs={"autocomplete": "off", "placeholder": "user@example.com"}),
+        help_text="このメールアドレスをログイン時のアカウント名として使います。",
+    )
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        apply_design_classes(self)
+
+    def clean_email(self):
+        email = normalize_account_email(self.cleaned_data["email"])
+        ensure_unique_account_email(email)
+        return email
+
+    def save(self, *, created_by: User) -> tuple[User, str]:
+        email = self.cleaned_data["email"]
+        user = User(username=email, email=email, is_active=True, is_staff=False, is_superuser=False)
+        password = generate_initial_password(user=user)
+        user.set_password(password)
+        user.full_clean()
+        user.save()
+
+        profile = user.profile
+        profile.must_change_password = True
+        profile.created_by = created_by
+        profile.mark_initial_password_generated()
+        return user, password
+
+
+class EmailOrUsernameAuthenticationForm(AuthenticationForm):
+    username = forms.CharField(
+        label="メールアドレス / 管理者ユーザー名",
+        max_length=150,
+        widget=forms.TextInput(attrs={"autofocus": True, "autocomplete": "username"}),
+    )
+
+    def __init__(self, request=None, *args, **kwargs):
+        super().__init__(request, *args, **kwargs)
+        apply_design_classes(self)
+
+    def clean_username(self):
+        value = self.cleaned_data["username"].strip()
+        if "@" in value:
+            return normalize_account_email(value)
+        return value
+
+
+class StyledPasswordChangeForm(PasswordChangeForm):
+    def __init__(self, user, *args, **kwargs):
+        super().__init__(user, *args, **kwargs)
+        apply_design_classes(self)

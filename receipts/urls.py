@@ -13,6 +13,7 @@ urlpatterns = [
     path("receipts/<int:pk>/download/", views.download_receipt, name="download_receipt"),
     path("receipts/<int:pk>/delete/", views.delete_receipt, name="delete_receipt"),
     path("staff/", views.staff_dashboard, name="staff_dashboard"),
+    path("staff/users/new/", views.staff_user_create, name="staff_user_create"),
     path("staff/submissions/<int:pk>/", views.staff_submission_detail, name="staff_submission_detail"),
     path("staff/download/month/", views.staff_download_month, name="staff_download_month"),
     path("staff/download/submission/<int:pk>/", views.staff_download_submission, name="staff_download_submission"),
