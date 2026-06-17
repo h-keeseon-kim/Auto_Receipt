@@ -343,13 +343,34 @@ tr:last-child td { border-bottom: 0; }
 .tutorial-backdrop {
     position: fixed;
     inset: 0;
-    z-index: 1000;
+    z-index: 10000;
+    background: transparent;
+}
+.tutorial-backdrop.tutorial-no-target {
     background: rgba(15, 23, 42, 0.56);
+}
+.tutorial-spotlight {
+    position: fixed;
+    z-index: 10001;
+    pointer-events: none;
+    border-radius: 16px;
+    background: transparent;
+    box-shadow:
+        0 0 0 9999px rgba(15, 23, 42, 0.56),
+        0 0 0 4px #fff,
+        0 0 0 8px rgba(33, 84, 216, 0.78),
+        0 18px 40px rgba(15, 23, 42, 0.25);
+    transition: left 0.12s ease, top 0.12s ease, width 0.12s ease, height 0.12s ease;
 }
 .tutorial-card {
     position: fixed;
-    z-index: 1003;
-    width: min(92vw, 430px);
+    z-index: 10002;
+    display: flex;
+    flex-direction: column;
+    width: min(94vw, 540px);
+    max-height: calc(100vh - 2rem);
+    overflow-y: auto;
+    overscroll-behavior: contain;
     padding: 1.15rem;
     border-radius: 16px;
     border: 1px solid #bfcef7;
@@ -400,19 +421,20 @@ tr:last-child td { border-bottom: 0; }
     justify-content: flex-end;
     gap: 0.55rem;
     flex-wrap: wrap;
-    margin-top: 1rem;
+    position: sticky;
+    bottom: -1.15rem;
+    margin: 1rem -1.15rem 0;
+    padding: 0.85rem 1.15rem 1.15rem;
+    background: linear-gradient(180deg, rgba(255, 255, 255, 0.72), #fff 24%);
+    border-top: 1px solid rgba(216, 226, 239, 0.72);
 }
 .tutorial-footer .button[disabled] {
     opacity: 0.45;
     cursor: not-allowed;
 }
 .tutorial-note { margin: 0.85rem 0 0; }
-.tutorial-highlight {
-    position: relative;
-    z-index: 1002 !important;
-    border-radius: 12px;
-    box-shadow: 0 0 0 4px #fff, 0 0 0 8px rgba(33, 84, 216, 0.72), 0 18px 40px rgba(15, 23, 42, 0.25) !important;
-    background-color: #fff;
+.tutorial-source-active {
+    scroll-margin: 5rem;
 }
 body.tutorial-open { overflow-x: hidden; }
 
@@ -423,6 +445,7 @@ body.tutorial-open { overflow-x: hidden; }
         top: auto !important;
         bottom: 1rem !important;
         width: auto;
+        max-height: calc(100vh - 2rem);
         transform: none !important;
     }
     .tutorial-footer { justify-content: stretch; }
