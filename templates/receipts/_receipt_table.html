@@ -14,7 +14,7 @@
         </thead>
         <tbody>
             {% for receipt in receipts %}
-                <tr>
+                <tr class="{% if user.is_staff and receipt.needs_manual_review %}manual-review-row{% endif %}">
                     <td>
                         <strong>{{ receipt.service_display_name_snapshot }}</strong>
                         {% if receipt.memo %}<div class="muted small">{{ receipt.memo|linebreaksbr }}</div>{% endif %}
@@ -30,11 +30,22 @@
                         <div class="muted small">{{ receipt.file_size|filesize }} / {{ receipt.file_status_label }}</div>
                         {% if user.is_staff %}
                             <div class="small ai-file-meta">
-                                <span class="badge {{ receipt.ai_filename_badge_class }}">AI: {{ receipt.get_ai_filename_status_display }}</span>
-                                <span class="badge {{ receipt.ai_period_check_badge_class }}">提出月: {{ receipt.get_ai_period_check_status_display }}</span>
+                                <div class="ai-check-status">
+                                    <span class="badge {{ receipt.ai_filename_badge_class }}">AI: {{ receipt.get_ai_filename_status_display }}</span>
+                                    <span class="badge {{ receipt.ai_period_check_badge_class }}">提出月: {{ receipt.get_ai_period_check_status_display }}</span>
+                                    <span class="badge {{ receipt.manual_review_badge_class }}">{% if not receipt.ai_has_check_result %}チェック待ち{% elif receipt.needs_manual_review %}手動確認{% else %}確認OK{% endif %}</span>
+                                </div>
+                                <div class="ai-checklist" aria-label="AI確認項目">
+                                    {% for label, checked in receipt.ai_check_items %}
+                                        <label class="ai-check-item {% if not checked %}unchecked{% endif %}">
+                                            <input type="checkbox" disabled {% if checked %}checked{% endif %}> {{ label }}
+                                        </label>
+                                    {% endfor %}
+                                </div>
                                 {% if receipt.ai_receipt_month %}<div class="muted small">判定月: {{ receipt.ai_receipt_month }}</div>{% endif %}
                                 {% if receipt.ai_extracted_payee %}<div class="muted small">払先: {{ receipt.ai_extracted_payee }}</div>{% endif %}
                                 {% if receipt.ai_extracted_card_last4 %}<div class="muted small">カード下4桁: {{ receipt.ai_extracted_card_last4 }}</div>{% endif %}
+                                {% if receipt.ai_service_payee_check_memo %}<div class="danger small">{{ receipt.ai_service_payee_check_memo|linebreaksbr }}</div>{% endif %}
                                 {% if receipt.ai_filename_admin_memo %}<div class="danger small">{{ receipt.ai_filename_admin_memo|linebreaksbr }}</div>{% endif %}
                                 {% if receipt.ai_period_check_memo %}<div class="muted small">{{ receipt.ai_period_check_memo|linebreaksbr }}</div>{% endif %}
                             </div>
@@ -64,6 +75,13 @@
                             </form>
                         {% endif %}
                         {% if user.is_staff and receipt.submission.user != user %}
+                            {% if receipt.needs_manual_review %}
+                                <form method="post" action="{% url 'staff_request_receipt_resubmission' receipt.pk %}" onsubmit="return confirm('この領収書に再提出を指示しますか？対象ファイルと履歴は提出項目から削除され、ユーザーは再アップロードできます。');">
+                                    {% csrf_token %}
+                                    <input type="hidden" name="next" value="{{ request.get_full_path }}">
+                                    <button type="submit" class="button small danger-outline">再提出指示</button>
+                                </form>
+                            {% endif %}
                             <form method="post" action="{% url 'staff_delete_receipt' receipt.pk %}" onsubmit="return confirm('この領収書ファイルと履歴を削除しますか？該当ユーザーの画面からも削除されます。');">
                                 {% csrf_token %}
                                 <input type="hidden" name="next" value="{{ request.get_full_path }}">

@@ -32,6 +32,28 @@
     </div>
 </section>
 
+{% if open_resubmission_requests %}
+    <section class="card section notice resubmission-request-box">
+        <h2>再提出依頼があります</h2>
+        <p>管理者確認により、以下の領収書は提出項目から削除されています。正しいファイルを再度アップロードして、提出してください。</p>
+        <div class="table-wrap">
+            <table>
+                <thead><tr><th>対象サービス</th><th>元ファイル</th><th>依頼日時</th><th>内容</th></tr></thead>
+                <tbody>
+                    {% for request_item in open_resubmission_requests %}
+                        <tr>
+                            <td><strong>{{ request_item.service_display_name_snapshot }}</strong></td>
+                            <td>{{ request_item.display_filename|default:request_item.original_filename|default:"-" }}</td>
+                            <td>{{ request_item.created_at|date:"Y-m-d H:i" }}</td>
+                            <td>{{ request_item.message }}</td>
+                        </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+    </section>
+{% endif %}
+
 {% if submission.is_submitted %}
     <section class="card section notice">
         <h2>提出済みです</h2>

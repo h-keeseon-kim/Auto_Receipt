@@ -1,6 +1,6 @@
 from django.contrib import admin
 
-from .models import Receipt, RegisteredService, ServiceCatalog, Submission, UserProfile
+from .models import Receipt, ReceiptResubmissionRequest, RegisteredService, ServiceCatalog, Submission, UserProfile
 
 
 class ReceiptInline(admin.TabularInline):
@@ -19,6 +19,14 @@ class ReceiptInline(admin.TabularInline):
         "ai_receipt_month",
         "ai_period_check_status",
         "ai_period_check_memo",
+        "ai_check_card_last4",
+        "ai_check_payee",
+        "ai_check_service_payee_related",
+        "ai_service_payee_check_memo",
+        "ai_check_date",
+        "ai_check_amount",
+        "ai_check_currency",
+        "ai_check_period_match",
         "file_size",
         "content_type",
         "uploaded_at",
@@ -40,6 +48,14 @@ class ReceiptInline(admin.TabularInline):
         "ai_receipt_month",
         "ai_period_check_status",
         "ai_period_check_memo",
+        "ai_check_card_last4",
+        "ai_check_payee",
+        "ai_check_service_payee_related",
+        "ai_service_payee_check_memo",
+        "ai_check_date",
+        "ai_check_amount",
+        "ai_check_currency",
+        "ai_check_period_match",
         "expires_at",
         "file_deleted_at",
     )
@@ -100,10 +116,12 @@ class ReceiptAdmin(admin.ModelAdmin):
         "expires_at",
         "ai_filename_status",
         "ai_period_check_status",
+        "ai_check_service_payee_related",
+        "ai_check_period_match",
         "file_status",
     )
-    list_filter = ("billing_type_snapshot", "currency", "ai_filename_status", "ai_period_check_status", "submission__period_month", "file_deleted_at")
-    search_fields = ("service_name_snapshot", "submission__user__username", "original_filename", "generated_filename", "ai_extracted_payee", "ai_filename_admin_memo", "ai_period_check_memo")
+    list_filter = ("billing_type_snapshot", "currency", "ai_filename_status", "ai_period_check_status", "ai_check_service_payee_related", "ai_check_period_match", "submission__period_month", "file_deleted_at")
+    search_fields = ("service_name_snapshot", "submission__user__username", "original_filename", "generated_filename", "ai_extracted_payee", "ai_filename_admin_memo", "ai_period_check_memo", "ai_service_payee_check_memo")
     readonly_fields = (
         "service_name_snapshot",
         "billing_type_snapshot",
@@ -117,6 +135,14 @@ class ReceiptAdmin(admin.ModelAdmin):
         "ai_receipt_month",
         "ai_period_check_status",
         "ai_period_check_memo",
+        "ai_check_card_last4",
+        "ai_check_payee",
+        "ai_check_service_payee_related",
+        "ai_service_payee_check_memo",
+        "ai_check_date",
+        "ai_check_amount",
+        "ai_check_currency",
+        "ai_check_period_match",
         "file_size",
         "content_type",
         "uploaded_at",
@@ -136,3 +162,11 @@ class UserProfileAdmin(admin.ModelAdmin):
     list_filter = ("must_change_password", "initial_password_generated_at", "password_changed_at")
     search_fields = ("user__username", "user__email", "created_by__username", "created_by__email")
     readonly_fields = ("created_at", "updated_at", "initial_password_generated_at", "password_changed_at")
+
+
+@admin.register(ReceiptResubmissionRequest)
+class ReceiptResubmissionRequestAdmin(admin.ModelAdmin):
+    list_display = ("user", "period_month", "service_name_snapshot", "billing_type_snapshot", "status", "created_by", "created_at", "resolved_at")
+    list_filter = ("status", "period_month", "billing_type_snapshot", "created_at", "resolved_at")
+    search_fields = ("user__username", "user__email", "service_name_snapshot", "original_filename", "display_filename", "message")
+    readonly_fields = ("created_at", "resolved_at")

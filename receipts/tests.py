@@ -21,11 +21,14 @@ from .models import (
     Receipt,
     ReceiptFilenameStatus,
     ReceiptPeriodCheckStatus,
+    ReceiptResubmissionRequest,
     RegisteredService,
+    ResubmissionRequestStatus,
     ServiceCatalog,
     ServiceDeactivationSource,
     ServiceRegistrationSource,
     Submission,
+    SubmissionStatus,
 )
 
 
@@ -84,6 +87,30 @@ class ReceiptFlowTests(TestCase):
         self.assertEqual(result.status, ReceiptFilenameStatus.GENERATED)
         self.assertEqual(result.suggested_filename, "260619_金_OpenAI_220_USD.pdf")
         self.assertEqual(result.payee, "OpenAI")
+
+    def test_ai_payload_marks_unrelated_service_payee_for_review(self):
+        result = build_result_from_ai_payload(
+            {
+                "card_last4": "7210",
+                "card_last4_matches_target": True,
+                "payee": "Anthropic",
+                "service_payee_related": False,
+                "service_payee_relation_reason": "登録サービスはChatGPTだが、領収書の払先はAnthropic。",
+                "payment_date": "2026-06-19",
+                "amount": "220.00",
+                "currency": "USD",
+                "confidence": 0.96,
+                "can_create_filename": False,
+                "reason": "サービスと払先の組み合わせが不一致です。",
+            },
+            original_filename="chatgpt.pdf",
+        )
+
+        self.assertEqual(result.status, ReceiptFilenameStatus.NEEDS_REVIEW)
+        self.assertEqual(result.payee, "Anthropic")
+        self.assertIs(result.service_payee_related, False)
+        self.assertEqual(result.suggested_filename, "")
+        self.assertIn("関連していない可能性", result.admin_memo)
 
     @mock.patch("receipts.ai_processing.generate_ai_receipt_filename")
     def test_user_upload_saves_pending_ai_receipt_and_command_processes_later(self, mocked_generate):
@@ -212,6 +239,93 @@ class ReceiptFlowTests(TestCase):
         self.assertContains(staff_response, "AI要確認")
         self.assertContains(staff_response, "カード下4桁が7210として確認できませんでした")
         self.assertContains(staff_response, "OpenAI")
+
+    @mock.patch("receipts.ai_processing.generate_ai_receipt_filename")
+    def test_staff_can_request_resubmission_for_failed_checklist_item(self, mocked_generate):
+        self.service.name = "ChatGPT"
+        self.service.billing_type = BillingType.SUBSCRIPTION
+        self.service.save(update_fields=["name", "billing_type", "updated_at"])
+        mocked_generate.return_value = ReceiptFilenameResult(
+            status=ReceiptFilenameStatus.NEEDS_REVIEW,
+            admin_memo="登録サービス名と領収書の払先が関連していない可能性があります。",
+            payee="Anthropic",
+            payment_date=date(2026, 6, 19),
+            amount=Decimal("220.00"),
+            currency="USD",
+            card_last4="7210",
+            card_last4_matches_target=True,
+            service_payee_related=False,
+            service_payee_relation_reason="ChatGPTの想定払先はOpenAIだが、領収書の払先はAnthropic。",
+        )
+        self.client.login(username="alice", password="password123")
+        self.client.post(
+            reverse("dashboard") + "?month=2026-06",
+            {
+                "action": "add_receipt",
+                "service": self.service.id,
+                "file": SimpleUploadedFile("wrong-payee.pdf", b"%PDF-1.4 wrong", content_type="application/pdf"),
+            },
+        )
+        self.client.post(reverse("dashboard") + "?month=2026-06", {"action": "submit"})
+        submission = Submission.objects.get(user=self.user, period_month=date(2026, 6, 1))
+        self.assertTrue(submission.is_submitted)
+
+        call_command("process_pending_receipts", "--limit", "10")
+        receipt = Receipt.objects.get()
+        receipt_path = Path(receipt.file.path)
+        self.assertTrue(receipt_path.exists())
+        self.assertTrue(receipt.ai_check_card_last4)
+        self.assertTrue(receipt.ai_check_payee)
+        self.assertFalse(receipt.ai_check_service_payee_related)
+        self.assertTrue(receipt.ai_check_date)
+        self.assertTrue(receipt.ai_check_amount)
+        self.assertTrue(receipt.ai_check_currency)
+        self.assertTrue(receipt.ai_check_period_match)
+        self.assertTrue(receipt.needs_manual_review)
+
+        admin = User.objects.create_superuser(username="admin", email="admin@example.com", password="admin-password-123")
+        self.client.logout()
+        self.client.login(username="admin", password="admin-password-123")
+        staff_response = self.client.get(reverse("history") + "?month=2026-06")
+        self.assertContains(staff_response, "manual-review-row")
+        self.assertContains(staff_response, "サービス/払先要確認")
+        self.assertContains(staff_response, "再提出指示")
+        self.assertContains(staff_response, "Anthropic")
+
+        response = self.client.post(
+            reverse("staff_request_receipt_resubmission", args=[receipt.pk]),
+            {"next": reverse("history") + "?month=2026-06"},
+        )
+
+        self.assertRedirects(response, reverse("history") + "?month=2026-06")
+        self.assertFalse(Receipt.objects.filter(pk=receipt.pk).exists())
+        self.assertFalse(receipt_path.exists())
+        request_item = ReceiptResubmissionRequest.objects.get()
+        self.assertEqual(request_item.status, ResubmissionRequestStatus.OPEN)
+        self.assertEqual(request_item.user, self.user)
+        self.assertEqual(request_item.service_name_snapshot, "ChatGPT")
+        submission.refresh_from_db()
+        self.assertFalse(submission.is_submitted)
+
+        self.client.logout()
+        self.client.login(username="alice", password="password123")
+        response = self.client.get(reverse("dashboard") + "?month=2026-06")
+        self.assertContains(response, "再提出依頼があります")
+        self.assertContains(response, "ChatGPT")
+
+        response = self.client.post(
+            reverse("dashboard") + "?month=2026-06",
+            {
+                "action": "add_receipt",
+                "service": self.service.id,
+                "file": SimpleUploadedFile("correct.pdf", b"%PDF-1.4 correct", content_type="application/pdf"),
+            },
+        )
+        self.assertEqual(response.status_code, 302)
+        request_item.refresh_from_db()
+        self.assertEqual(request_item.status, ResubmissionRequestStatus.RESOLVED)
+        self.assertEqual(request_item.resolved_by, self.user)
+        self.assertEqual(Receipt.objects.count(), 1)
 
     @mock.patch("receipts.ai_processing.generate_ai_receipt_filename")
     def test_user_replace_receipt_file_marks_ai_pending_and_command_processes_later(self, mocked_generate):
@@ -343,6 +457,144 @@ class ReceiptFlowTests(TestCase):
         submission.submit()
         submission.refresh_from_db()
         self.assertTrue(submission.is_submitted)
+
+    def test_ai_payload_flags_service_payee_mismatch_for_staff_review(self):
+        result = build_result_from_ai_payload(
+            {
+                "card_last4": "7210",
+                "card_last4_matches_target": True,
+                "payee": "Anthropic",
+                "service_payee_related": False,
+                "service_payee_relation_reason": "登録サービス ChatGPT に対して払先が Anthropic です。",
+                "payment_date": "2026-06-19",
+                "amount": "220.00",
+                "currency": "USD",
+                "confidence": 0.95,
+                "can_create_filename": True,
+                "reason": "",
+            },
+            original_filename="chatgpt.pdf",
+        )
+
+        self.assertEqual(result.status, ReceiptFilenameStatus.NEEDS_REVIEW)
+        self.assertFalse(result.service_payee_related)
+        self.assertIn("払先が関連していない", result.admin_memo)
+        self.assertIn("Anthropic", result.admin_memo)
+
+    @mock.patch("receipts.ai_processing.generate_ai_receipt_filename")
+    def test_staff_history_shows_checkboxes_and_highlights_service_payee_mismatch(self, mocked_generate):
+        self.service.name = "ChatGPT"
+        self.service.billing_type = BillingType.SUBSCRIPTION
+        self.service.save(update_fields=["name", "billing_type", "updated_at"])
+        mocked_generate.return_value = ReceiptFilenameResult(
+            status=ReceiptFilenameStatus.NEEDS_REVIEW,
+            admin_memo="登録サービス名と払先の関連性を確認してください。",
+            payee="Anthropic",
+            payment_date=date(2026, 6, 19),
+            amount=Decimal("220.00"),
+            currency="USD",
+            card_last4="7210",
+            card_last4_matches_target=True,
+            payee_confirmed=True,
+            date_confirmed=True,
+            amount_confirmed=True,
+            currency_confirmed=True,
+            service_payee_related=False,
+            service_payee_relation_reason="ChatGPT の領収書として Anthropic は関連なしです。",
+        )
+        self.client.login(username="alice", password="password123")
+        self.client.post(
+            reverse("dashboard") + "?month=2026-06",
+            {
+                "action": "add_receipt",
+                "service": self.service.id,
+                "file": SimpleUploadedFile("chatgpt.pdf", b"%PDF-1.4 test", content_type="application/pdf"),
+            },
+        )
+        call_command("process_pending_receipts", "--limit", "10")
+        receipt = Receipt.objects.get()
+        self.assertTrue(receipt.ai_check_card_last4)
+        self.assertTrue(receipt.ai_check_payee)
+        self.assertFalse(receipt.ai_check_service_payee_related)
+        self.assertTrue(receipt.ai_check_date)
+        self.assertTrue(receipt.ai_check_amount)
+        self.assertTrue(receipt.ai_check_currency)
+        self.assertTrue(receipt.ai_check_period_match)
+        self.assertTrue(receipt.needs_manual_review)
+
+        admin = User.objects.create_superuser(username="admin", email="admin@example.com", password="admin-password-123")
+        self.client.logout()
+        self.client.login(username="admin", password="admin-password-123")
+        response = self.client.get(reverse("history") + "?month=2026-06")
+
+        self.assertContains(response, "manual-review-row")
+        self.assertContains(response, "サービス/払先関連")
+        self.assertContains(response, "再提出指示")
+        self.assertContains(response, "ChatGPT の領収書として Anthropic")
+
+    def test_staff_resubmission_request_deletes_receipt_keeps_draft_and_user_can_reupload(self):
+        admin = User.objects.create_superuser(username="admin", email="admin@example.com", password="admin-password-123")
+        submission = Submission.objects.create(
+            user=self.user,
+            period_month=date(2026, 6, 1),
+            status=SubmissionStatus.SUBMITTED,
+            submitted_at=timezone.now(),
+        )
+        receipt = Receipt.objects.create(
+            submission=submission,
+            service=self.service,
+            service_name_snapshot=self.service.name,
+            billing_type_snapshot=self.service.billing_type,
+            original_filename="wrong.pdf",
+            file=SimpleUploadedFile("wrong.pdf", b"%PDF-1.4 wrong", content_type="application/pdf"),
+            expires_at=timezone.now() + timedelta(days=30),
+            ai_filename_checked_at=timezone.now(),
+            ai_check_card_last4=True,
+            ai_check_payee=True,
+            ai_check_date=True,
+            ai_check_amount=True,
+            ai_check_currency=True,
+            ai_check_period_match=True,
+            ai_check_service_payee_related=False,
+            ai_service_payee_check_memo="サービスと払先が一致しません。",
+        )
+        receipt_path = Path(receipt.file.path)
+        self.assertTrue(receipt_path.exists())
+
+        self.client.login(username="admin", password="admin-password-123")
+        response = self.client.post(
+            reverse("staff_request_receipt_resubmission", args=[receipt.pk]),
+            {"next": reverse("history") + "?month=2026-06"},
+        )
+
+        self.assertRedirects(response, reverse("history") + "?month=2026-06")
+        self.assertFalse(Receipt.objects.filter(pk=receipt.pk).exists())
+        self.assertFalse(receipt_path.exists())
+        submission.refresh_from_db()
+        self.assertEqual(submission.status, SubmissionStatus.DRAFT)
+        self.assertIsNone(submission.submitted_at)
+        request_item = ReceiptResubmissionRequest.objects.get(user=self.user, period_month=date(2026, 6, 1))
+        self.assertEqual(request_item.status, ResubmissionRequestStatus.OPEN)
+        self.assertEqual(request_item.service_name_snapshot, self.service.name)
+
+        self.client.logout()
+        self.client.login(username="alice", password="password123")
+        dashboard_response = self.client.get(reverse("dashboard") + "?month=2026-06")
+        self.assertContains(dashboard_response, "再提出依頼があります")
+        self.assertContains(dashboard_response, self.service.display_name)
+
+        upload_response = self.client.post(
+            reverse("dashboard") + "?month=2026-06",
+            {
+                "action": "add_receipt",
+                "service": self.service.id,
+                "file": SimpleUploadedFile("correct.pdf", b"%PDF-1.4 correct", content_type="application/pdf"),
+            },
+        )
+        self.assertEqual(upload_response.status_code, 302)
+        request_item.refresh_from_db()
+        self.assertEqual(request_item.status, ResubmissionRequestStatus.RESOLVED)
+        self.assertEqual(Receipt.objects.count(), 1)
 
     def test_user_can_upload_and_submit(self):
         self.client.login(username="alice", password="password123")

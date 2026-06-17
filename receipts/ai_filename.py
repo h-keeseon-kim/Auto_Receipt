@@ -29,6 +29,14 @@ class ReceiptFilenameResult:
     amount: Decimal | None = None
     currency: str = ""
     card_last4: str = ""
+    card_last4_matches_target: bool | None = None
+    payee_confirmed: bool = False
+    date_confirmed: bool = False
+    amount_confirmed: bool = False
+    currency_confirmed: bool = False
+    service_payee_related: bool | None = None
+    service_payee_relation_reason: str = ""
+    confidence: float = 0.0
 
 
 def target_card_last4() -> str:
@@ -128,8 +136,13 @@ def build_openai_content(*, file_bytes: bytes, original_filename: str, content_t
                 f"登録サービス名は参考情報であり、ファイル名の払先としてそのまま使わない。"
                 f"例えば ChatGPT（サブスク）の払先は OpenAI、Claude（サブスク）の払先は Anthropic のように、"
                 f"領収書に表示された請求元を優先する。\n"
-                f"3. 支払日または領収書日付、合計金額、通貨を確認する。\n"
-                f"4. can_create_filename は、カード末尾が {target} と確認でき、払先・日付・金額・通貨のすべてを高い確度で読める場合だけ true にする。"
+                f"3. 対象の登録サービス名と領収書上の払先が同一または合理的に関連しているか確認する。"
+                f"完全一致だけで判定せず、ChatGPT と OpenAI、Claude と Anthropic のような運営会社・請求元の関係は関連ありとする。"
+                f"一方で ChatGPT の登録サービスなのに Anthropic の領収書、Claude の登録サービスなのに OpenAI の領収書のような組み合わせは関連なしとする。"
+                f"判断が曖昧、または払先やサービスとの関係を確認できない場合は service_payee_related を null にする。\n"
+                f"4. 支払日または領収書日付、合計金額、通貨を確認する。\n"
+                f"5. can_create_filename は、カード末尾が {target} と確認でき、払先・日付・金額・通貨のすべてを高い確度で読め、"
+                f"さらに登録サービス名と払先が関連すると確認できる場合だけ true にする。"
                 f"作成が難しい場合は false にし、reason に管理者が確認すべき理由を日本語で短く書く。"
             ),
         },
@@ -164,6 +177,8 @@ def receipt_filename_schema() -> dict[str, Any]:
                 "card_last4": {"type": ["string", "null"], "description": "領収書に表示された支払カード末尾4桁。読めない場合は null。"},
                 "card_last4_matches_target": {"type": ["boolean", "null"], "description": "カード末尾が指定された末尾4桁と一致するか。読めない場合は null。"},
                 "payee": {"type": ["string", "null"], "description": "実際の払先・販売者・請求元。登録サービス名ではなく領収書上の相手先。"},
+                "service_payee_related": {"type": ["boolean", "null"], "description": "対象の登録サービス名と領収書上の払先が同一または合理的に関連しているか。曖昧・確認不可の場合は null。"},
+                "service_payee_relation_reason": {"type": "string", "description": "サービス名と払先の関連性について、管理者が確認すべき理由や根拠。"},
                 "payment_date": {"type": ["string", "null"], "description": "支払日または領収書日付。YYYY-MM-DD。"},
                 "amount": {"type": ["number", "string", "null"], "description": "合計支払金額。"},
                 "currency": {"type": ["string", "null"], "description": "ISO 4217通貨コード。例: JPY, USD。"},
@@ -175,6 +190,8 @@ def receipt_filename_schema() -> dict[str, Any]:
                 "card_last4",
                 "card_last4_matches_target",
                 "payee",
+                "service_payee_related",
+                "service_payee_relation_reason",
                 "payment_date",
                 "amount",
                 "currency",
@@ -219,6 +236,13 @@ def build_result_from_payload(payload: dict[str, Any], *, original_filename: str
         card_matches = payload.get("card_ends_with_7210")
     if card_matches is not None:
         card_matches = bool(card_matches)
+
+    service_relation_supplied = "service_payee_related" in payload
+    service_payee_related = payload.get("service_payee_related")
+    if service_payee_related is not None:
+        service_payee_related = bool(service_payee_related)
+    service_relation_reason = str(payload.get("service_payee_relation_reason") or "").strip()
+
     payee = normalize_payee(payload.get("payee") or "")
     payment_date = parse_iso_date(payload.get("payment_date"))
     amount = parse_amount(payload.get("amount"))
@@ -235,44 +259,62 @@ def build_result_from_payload(payload: dict[str, Any], *, original_filename: str
             issues.append(f"カード末尾 {target} を確認できませんでした。")
     if not payee:
         issues.append("払先を確認できませんでした。")
+    if service_relation_supplied and service_payee_related is not True:
+        if service_payee_related is False:
+            issues.append("登録サービス名と領収書の払先が関連していない可能性があります。")
+        else:
+            issues.append("登録サービス名と領収書の払先の関連性を確認できませんでした。")
+        if service_relation_reason:
+            issues.append(service_relation_reason)
     if payment_date is None:
         issues.append("日付を確認できませんでした。")
     if amount is None:
         issues.append("金額を確認できませんでした。")
     if not currency:
         issues.append("通貨を確認できませんでした。")
-    if not can_create and model_reason:
-        issues.append(model_reason)
+    if not can_create:
+        issues.append(model_reason or "AIがファイル名作成に必要な項目を十分な確度で確認できませんでした。")
     if confidence < 0.65:
         issues.append(f"抽出信頼度が低いです（{confidence:.2f}）。")
 
-    if issues:
-        return ReceiptFilenameResult(
-            status=ReceiptFilenameStatus.NEEDS_REVIEW,
-            admin_memo="AIファイル名修正不可: " + " ".join(dict.fromkeys(issues)),
-            payee=payee,
+    suggested_filename = ""
+    if payee and payment_date is not None and amount is not None and currency:
+        suggested_filename = build_receipt_filename(
             payment_date=payment_date,
+            payee=payee,
             amount=amount,
             currency=currency,
-            card_last4=card_last4,
+            extension=Path(original_filename).suffix.lower() or ".pdf",
         )
 
-    filename = build_receipt_filename(
-        payment_date=payment_date,
-        payee=payee,
-        amount=amount,
-        currency=currency,
-        extension=Path(original_filename).suffix.lower() or ".pdf",
-    )
-    return ReceiptFilenameResult(
-        status=ReceiptFilenameStatus.GENERATED,
-        suggested_filename=filename,
-        admin_memo="",
+    result_kwargs = dict(
+        suggested_filename=suggested_filename if can_create and not issues else "",
         payee=payee,
         payment_date=payment_date,
         amount=amount,
         currency=currency,
         card_last4=card_last4,
+        card_last4_matches_target=card_matches,
+        payee_confirmed=bool(payee),
+        date_confirmed=payment_date is not None,
+        amount_confirmed=amount is not None,
+        currency_confirmed=bool(currency),
+        service_payee_related=service_payee_related if service_relation_supplied else None,
+        service_payee_relation_reason=service_relation_reason,
+        confidence=confidence,
+    )
+
+    if issues:
+        return ReceiptFilenameResult(
+            status=ReceiptFilenameStatus.NEEDS_REVIEW,
+            admin_memo="AIファイル名修正不可: " + " ".join(dict.fromkeys(issues)),
+            **result_kwargs,
+        )
+
+    return ReceiptFilenameResult(
+        status=ReceiptFilenameStatus.GENERATED,
+        admin_memo="",
+        **result_kwargs,
     )
 
 

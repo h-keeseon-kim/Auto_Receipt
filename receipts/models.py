@@ -76,6 +76,11 @@ class ReceiptPeriodCheckStatus(models.TextChoices):
     UNKNOWN = "unknown", "確認不可"
 
 
+class ResubmissionRequestStatus(models.TextChoices):
+    OPEN = "open", "再提出待ち"
+    RESOLVED = "resolved", "対応済み"
+
+
 class ServiceRegistrationSource(models.TextChoices):
     ADMIN = "admin", "管理者登録"
     USER = "user", "ユーザー登録"
@@ -416,6 +421,14 @@ class Receipt(models.Model):
         default=ReceiptPeriodCheckStatus.NOT_CHECKED,
     )
     ai_period_check_memo = models.TextField("AI提出月確認メモ", blank=True)
+    ai_check_card_last4 = models.BooleanField("AI確認: カード末尾", default=False)
+    ai_check_payee = models.BooleanField("AI確認: 払先", default=False)
+    ai_check_service_payee_related = models.BooleanField("AI確認: サービス名と払先の関連性", default=False)
+    ai_service_payee_check_memo = models.TextField("AIサービス名・払先確認メモ", blank=True)
+    ai_check_date = models.BooleanField("AI確認: 日付", default=False)
+    ai_check_amount = models.BooleanField("AI確認: 金額", default=False)
+    ai_check_currency = models.BooleanField("AI確認: 通貨", default=False)
+    ai_check_period_match = models.BooleanField("AI確認: 提出月一致", default=False)
     file_size = models.PositiveIntegerField("ファイルサイズ", null=True, blank=True)
     content_type = models.CharField("Content-Type", max_length=120, blank=True)
     uploaded_at = models.DateTimeField("アップロード日時", auto_now_add=True)
@@ -489,6 +502,49 @@ class Receipt(models.Model):
         return self.ai_period_check_status == ReceiptPeriodCheckStatus.MISMATCHED
 
     @property
+    def ai_check_items(self) -> list[tuple[str, bool]]:
+        return [
+            ("カード末尾7210", self.ai_check_card_last4),
+            ("払先", self.ai_check_payee),
+            ("サービス/払先関連", self.ai_check_service_payee_related),
+            ("日付", self.ai_check_date),
+            ("金額", self.ai_check_amount),
+            ("通貨", self.ai_check_currency),
+            ("提出月一致", self.ai_check_period_match),
+        ]
+
+    @property
+    def ai_all_checks_passed(self) -> bool:
+        return all(checked for _label, checked in self.ai_check_items)
+
+    @property
+    def ai_has_check_result(self) -> bool:
+        return bool(self.ai_filename_checked_at) or self.ai_filename_status != ReceiptFilenameStatus.NOT_PROCESSED
+
+    @property
+    def ai_requires_manual_review(self) -> bool:
+        return self.file_available and self.ai_has_check_result and not self.ai_all_checks_passed
+
+    @property
+    def needs_manual_review(self) -> bool:
+        return self.ai_requires_manual_review
+
+    @property
+    def manual_review_badge_class(self) -> str:
+        if not self.ai_has_check_result:
+            return "neutral"
+        return "draft" if self.ai_requires_manual_review else "submitted"
+
+    @property
+    def ai_unchecked_labels(self) -> list[str]:
+        return [label for label, checked in self.ai_check_items if not checked]
+
+    @property
+    def ai_unchecked_summary(self) -> str:
+        labels = self.ai_unchecked_labels
+        return "、".join(labels) if labels else "なし"
+
+    @property
     def file_available(self) -> bool:
         return bool(self.file) and self.file_deleted_at is None
 
@@ -515,6 +571,76 @@ class Receipt(models.Model):
 
     def __str__(self) -> str:
         return f"{self.service_name_snapshot} ({self.submission})"
+
+
+class ReceiptResubmissionRequest(models.Model):
+    """管理者が領収書単位で再提出を依頼した記録。
+
+    元のReceiptは削除されるため、ユーザーへ表示するために提出月・サービス・ファイル名をスナップショットとして保持する。
+    """
+
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="receipt_resubmission_requests")
+    period_month = models.DateField("提出月")
+    service_name_snapshot = models.CharField("対象サービス名", max_length=120)
+    billing_type_snapshot = models.CharField("対象支払い種別", max_length=20, choices=BillingType.choices)
+    original_receipt_id = models.PositiveIntegerField("元領収書ID", null=True, blank=True)
+    original_filename = models.CharField("元ファイル名", max_length=255, blank=True)
+    display_filename = models.CharField("表示ファイル名", max_length=255, blank=True)
+    message = models.TextField("ユーザー向けメッセージ", blank=True)
+    status = models.CharField("ステータス", max_length=20, choices=ResubmissionRequestStatus.choices, default=ResubmissionRequestStatus.OPEN)
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="created_receipt_resubmission_requests",
+        verbose_name="依頼管理者",
+    )
+    created_at = models.DateTimeField("依頼日時", auto_now_add=True)
+    resolved_at = models.DateTimeField("対応日時", null=True, blank=True)
+    resolved_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="resolved_receipt_resubmission_requests",
+        verbose_name="対応ユーザー",
+    )
+
+    class Meta:
+        ordering = ["-created_at"]
+        indexes = [
+            models.Index(fields=["user", "period_month", "status"]),
+            models.Index(fields=["service_name_snapshot", "billing_type_snapshot"]),
+        ]
+        verbose_name = "領収書再提出依頼"
+        verbose_name_plural = "領収書再提出依頼"
+
+    def clean(self):
+        if self.period_month:
+            self.period_month = month_start(self.period_month)
+
+    def save(self, *args, **kwargs):
+        if self.period_month:
+            self.period_month = month_start(self.period_month)
+        super().save(*args, **kwargs)
+
+    @property
+    def service_display_name_snapshot(self) -> str:
+        return f"{self.service_name_snapshot}（{self.get_billing_type_snapshot_display()}）"
+
+    @property
+    def is_open(self) -> bool:
+        return self.status == ResubmissionRequestStatus.OPEN
+
+    def mark_resolved(self, *, by):
+        self.status = ResubmissionRequestStatus.RESOLVED
+        self.resolved_by = by
+        self.resolved_at = timezone.now()
+        self.save(update_fields=["status", "resolved_by", "resolved_at"])
+
+    def __str__(self) -> str:
+        return f"{self.user} / {self.period_month:%Y-%m} / {self.service_display_name_snapshot} / {self.get_status_display()}"
 
 
 @receiver(post_delete, sender=Receipt)

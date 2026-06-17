@@ -29,6 +29,7 @@ urlpatterns = [
     path("staff/services/<int:pk>/archive/", views.staff_service_archive, name="staff_service_archive"),
     path("staff/services/<int:pk>/activate/", views.staff_service_activate, name="staff_service_activate"),
     path("staff/receipts/<int:pk>/delete/", views.staff_delete_receipt, name="staff_delete_receipt"),
+    path("staff/receipts/<int:pk>/request-resubmission/", views.staff_request_receipt_resubmission, name="staff_request_receipt_resubmission"),
     path("staff/users/<int:user_id>/services/", views.staff_user_services, name="staff_user_services"),
     path("staff/submissions/<int:pk>/", views.staff_submission_detail, name="staff_submission_detail"),
     path("staff/download/month/", views.staff_download_month, name="staff_download_month"),

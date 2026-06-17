@@ -15,6 +15,7 @@ from django.contrib.auth.models import User
 from django.contrib.auth.views import PasswordChangeView
 from django.core.exceptions import PermissionDenied, ValidationError
 from django.core.paginator import Paginator
+from django.db import transaction
 from django.db.models import Count, Prefetch, Q
 from django.http import FileResponse, Http404, HttpResponse
 from django.utils.http import url_has_allowed_host_and_scheme
@@ -41,7 +42,9 @@ from .models import (
     Receipt,
     ReceiptFilenameStatus,
     ReceiptPeriodCheckStatus,
+    ReceiptResubmissionRequest,
     RegisteredService,
+    ResubmissionRequestStatus,
     ServiceCatalog,
     ServiceDeactivationSource,
     ServiceRegistrationSource,
@@ -82,6 +85,22 @@ def add_validation_errors(form, exc: ValidationError):
 
 def month_label(value) -> str:
     return value.strftime("%Y年%m月")
+
+
+def resolve_matching_resubmission_requests(receipt: Receipt, *, by) -> int:
+    """再提出依頼と同じ月・サービスの領収書が再アップロードされたら対応済みにする。"""
+
+    now = timezone.now()
+    return (
+        ReceiptResubmissionRequest.objects.filter(
+            user=receipt.submission.user,
+            period_month=receipt.submission.period_month,
+            service_name_snapshot=receipt.service_name_snapshot,
+            billing_type_snapshot=receipt.billing_type_snapshot,
+            status=ResubmissionRequestStatus.OPEN,
+        )
+        .update(status=ResubmissionRequestStatus.RESOLVED, resolved_at=now, resolved_by=by)
+    )
 
 
 def managed_users_queryset():
@@ -140,6 +159,11 @@ def dashboard(request):
     submission, _ = Submission.objects.get_or_create(user=request.user, period_month=selected_month)
     uploadable_services = RegisteredService.objects.uploadable_for(request.user, selected_month)
     receipts = submission.receipts.select_related("service").all()
+    open_resubmission_requests = ReceiptResubmissionRequest.objects.filter(
+        user=request.user,
+        period_month=selected_month,
+        status=ResubmissionRequestStatus.OPEN,
+    ).order_by("service_name_snapshot", "created_at")
 
     if request.method == "POST":
         action = request.POST.get("action")
@@ -165,6 +189,9 @@ def dashboard(request):
                 except ValidationError as exc:
                     add_validation_errors(receipt_form, exc)
                 else:
+                    resolved_count = resolve_matching_resubmission_requests(receipt, by=request.user)
+                    if resolved_count:
+                        messages.success(request, f"{receipt.service_display_name_snapshot} の再提出依頼を対応済みにしました。")
                     messages.success(
                         request,
                         f"{receipt.service_display_name_snapshot} の領収書を追加しました。AI確認は裏側で実行され、必要な確認事項は管理者画面に表示されます。",
@@ -193,6 +220,7 @@ def dashboard(request):
             "submission": submission,
             "receipts": receipts,
             "uploadable_services": uploadable_services,
+            "open_resubmission_requests": open_resubmission_requests,
             "selected_month": selected_month,
             "retention_months": settings.RECEIPT_RETENTION_MONTHS,
         },
@@ -612,6 +640,52 @@ def staff_delete_receipt(request, pk: int):
     return redirect_back_or(request, fallback_url)
 
 
+@staff_member_required
+def staff_request_receipt_resubmission(request, pk: int):
+    receipt = get_object_or_404(
+        Receipt.objects.select_related("submission", "submission__user"),
+        pk=pk,
+        submission__user__is_staff=False,
+        submission__user__is_superuser=False,
+    )
+    if request.method != "POST":
+        raise Http404
+
+    fallback_url = f"{reverse('history')}?month={month_query(receipt.submission.period_month)}"
+    with transaction.atomic():
+        submission = receipt.submission
+        selected_month = submission.period_month
+        username = submission.user.get_username()
+        service_name = receipt.service_display_name_snapshot
+        display_filename = receipt.display_filename
+        message = (
+            f"管理者確認の結果、{selected_month:%Y年%m月}分の {service_name} の領収書について再提出が必要になりました。"
+            "該当ファイルは提出項目から削除済みです。正しい領収書ファイルを再度アップロードして、提出してください。"
+        )
+        ReceiptResubmissionRequest.objects.create(
+            user=submission.user,
+            period_month=selected_month,
+            service_name_snapshot=receipt.service_name_snapshot,
+            billing_type_snapshot=receipt.billing_type_snapshot,
+            original_receipt_id=receipt.pk,
+            original_filename=receipt.original_filename,
+            display_filename=display_filename,
+            message=message,
+            created_by=request.user,
+        )
+        receipt.delete()
+        if submission.status == SubmissionStatus.SUBMITTED:
+            submission.status = SubmissionStatus.DRAFT
+            submission.submitted_at = None
+            submission.save(update_fields=["status", "submitted_at", "updated_at"])
+
+    messages.success(
+        request,
+        f"{username} / {service_name} に再提出を指示しました。対象領収書は提出項目から削除され、ユーザーは該当月で再アップロードできます。",
+    )
+    return redirect_back_or(request, fallback_url)
+
+
 def staff_history(request):
     selected_month, month_form = parse_month_from_request(request)
     users = list(
@@ -684,6 +758,25 @@ def staff_history(request):
     ).count()
     ai_review_count = receipts.filter(ai_filename_status__in=[ReceiptFilenameStatus.NEEDS_REVIEW, ReceiptFilenameStatus.FAILED]).count()
     period_mismatch_count = receipts.filter(ai_period_check_status=ReceiptPeriodCheckStatus.MISMATCHED).count()
+    manual_review_count = receipts.available_files().filter(ai_filename_checked_at__isnull=False).filter(
+        Q(ai_check_card_last4=False)
+        | Q(ai_check_payee=False)
+        | Q(ai_check_service_payee_related=False)
+        | Q(ai_check_date=False)
+        | Q(ai_check_amount=False)
+        | Q(ai_check_currency=False)
+        | Q(ai_check_period_match=False)
+    ).count()
+    service_payee_review_count = receipts.available_files().filter(ai_filename_checked_at__isnull=False, ai_check_service_payee_related=False).count()
+    open_resubmission_requests = (
+        ReceiptResubmissionRequest.objects.filter(
+            period_month=selected_month,
+            user_id__in=user_ids,
+            status=ResubmissionRequestStatus.OPEN,
+        )
+        .select_related("user", "created_by")
+        .order_by("user__username", "service_name_snapshot", "created_at")
+    )
     stats = {
         "total_users": len(users),
         "submitted": sum(1 for row in rows if row["status"] == "提出済み"),
@@ -697,6 +790,9 @@ def staff_history(request):
         "ai_pending_count": ai_pending_count,
         "ai_review_count": ai_review_count,
         "period_mismatch_count": period_mismatch_count,
+        "manual_review_count": manual_review_count,
+        "service_payee_review_count": service_payee_review_count,
+        "open_resubmission_request_count": open_resubmission_requests.count(),
     }
     return render(
         request,
@@ -707,6 +803,7 @@ def staff_history(request):
             "month_form": month_form,
             "selected_month": selected_month,
             "receipts": receipts,
+            "open_resubmission_requests": open_resubmission_requests,
         },
     )
 
@@ -820,6 +917,14 @@ def receipt_manifest_csv(submissions) -> str:
         "ai_receipt_month",
         "ai_period_check_status",
         "ai_period_check_memo",
+        "ai_check_card_last4",
+        "ai_check_payee",
+        "ai_check_service_payee_related",
+        "ai_service_payee_check_memo",
+        "ai_check_date",
+        "ai_check_amount",
+        "ai_check_currency",
+        "ai_check_period_match",
         "file_size",
         "memo",
     ])
@@ -848,6 +953,14 @@ def receipt_manifest_csv(submissions) -> str:
                 receipt.ai_receipt_month,
                 receipt.get_ai_period_check_status_display(),
                 receipt.ai_period_check_memo,
+                "yes" if receipt.ai_check_card_last4 else "no",
+                "yes" if receipt.ai_check_payee else "no",
+                "yes" if receipt.ai_check_service_payee_related else "no",
+                receipt.ai_service_payee_check_memo,
+                "yes" if receipt.ai_check_date else "no",
+                "yes" if receipt.ai_check_amount else "no",
+                "yes" if receipt.ai_check_currency else "no",
+                "yes" if receipt.ai_check_period_match else "no",
                 receipt.file_size or "",
                 receipt.memo,
             ])
