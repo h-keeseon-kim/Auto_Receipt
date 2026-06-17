@@ -4,7 +4,7 @@
 <div class="page-title">
     <div>
         <h1>{{ managed_user.username }} の利用サービス</h1>
-        <p class="muted">このユーザーが領収書アップロード時に選択できるサービスを管理します。</p>
+        <p class="muted">このユーザーが領収書アップロード時に選択できるサービスを管理します。ユーザー自身の利用登録・停止も確認できます。</p>
     </div>
     <div class="actions">
         <a class="button" href="{% url 'staff_services' %}">サービス管理一覧へ</a>
@@ -20,7 +20,7 @@
 
 <section class="card section">
     <h2>サービスを登録</h2>
-    <p class="muted">登録後、ユーザーのアップロード画面に「利用中」のサービスとして表示されます。</p>
+    <p class="muted">サービスマスターから選択して登録します。サービスマスターがない場合は、先にサービス管理一覧で作成してください。</p>
     <form method="post" class="stack">
         {% csrf_token %}
         {{ form.as_p }}
@@ -32,24 +32,27 @@
     <div class="section-header">
         <div>
             <h2>登録済みサービス</h2>
-            <p class="muted">停止中のサービスは新規アップロードでは選択できません。過去の提出履歴は残ります。</p>
+            <p class="muted">停止中のサービスは通常の利用サービス一覧から外れます。ユーザー停止の場合は最終領収書月が表示されます。</p>
         </div>
     </div>
     <div class="table-wrap">
         <table>
-            <thead><tr><th>サービス</th><th>種別</th><th>状態</th><th>メモ</th><th>更新日時</th><th>操作</th></tr></thead>
+            <thead><tr><th>サービス</th><th>種別</th><th>状態</th><th>登録元</th><th>停止元</th><th>最終領収書月</th><th>メモ</th><th>更新日時</th><th>操作</th></tr></thead>
             <tbody>
                 {% for service in services %}
                     <tr>
                         <td><strong>{{ service.name }}</strong></td>
                         <td>{{ service.get_billing_type_display }}</td>
                         <td>{% if service.is_active %}<span class="badge submitted">利用中</span>{% else %}<span class="badge neutral">停止中</span>{% endif %}</td>
-                        <td>{{ service.memo|default:"-"|truncatechars:80 }}</td>
+                        <td><span class="badge {{ service.source_badge_class }}">{{ service.get_registration_source_display }}</span></td>
+                        <td>{% if service.deactivation_source %}<span class="badge {{ service.stop_badge_class }}">{{ service.get_deactivation_source_display }}</span>{% else %}-{% endif %}</td>
+                        <td>{% if service.final_receipt_month %}{{ service.final_receipt_month|date:"Y年m月" }}{% else %}-{% endif %}</td>
+                        <td>{{ service.memo|default:service.stop_note|default:"-"|truncatechars:80 }}</td>
                         <td>{{ service.updated_at|date:"Y-m-d H:i" }}</td>
                         <td class="actions">
                             <a class="button small" href="{% url 'staff_service_update' service.pk %}">編集</a>
                             {% if service.is_active %}
-                                <form method="post" action="{% url 'staff_service_archive' service.pk %}" onsubmit="return confirm('このサービスを停止しますか？ユーザーの選択肢から外れます。');">
+                                <form method="post" action="{% url 'staff_service_archive' service.pk %}" onsubmit="return confirm('このサービスを停止しますか？ユーザーの通常選択肢から外れます。');">
                                     {% csrf_token %}
                                     <button class="button small danger-outline" type="submit">停止</button>
                                 </form>
@@ -62,7 +65,7 @@
                         </td>
                     </tr>
                 {% empty %}
-                    <tr><td colspan="6" class="muted center">このユーザーにはサービスがまだ登録されていません。</td></tr>
+                    <tr><td colspan="9" class="muted center">このユーザーにはサービスがまだ登録されていません。</td></tr>
                 {% endfor %}
             </tbody>
         </table>

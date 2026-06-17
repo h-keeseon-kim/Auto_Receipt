@@ -13,7 +13,15 @@ from django.urls import reverse
 from django.utils import timezone
 
 from .forms import ReceiptUploadForm
-from .models import BillingType, Receipt, RegisteredService, Submission
+from .models import (
+    BillingType,
+    Receipt,
+    RegisteredService,
+    ServiceCatalog,
+    ServiceDeactivationSource,
+    ServiceRegistrationSource,
+    Submission,
+)
 
 
 FAST_PASSWORD_HASHERS = ["django.contrib.auth.hashers.MD5PasswordHasher"]
@@ -227,14 +235,18 @@ class StaffServiceAssignmentTests(TestCase):
             email="other@example.com",
             password="password123",
         )
+        self.catalog = ServiceCatalog.objects.create(
+            name="OpenAI API",
+            billing_type=BillingType.METERED,
+            created_by=self.admin,
+        )
 
     def test_staff_registers_service_for_user_and_user_sees_it(self):
         self.client.login(username="admin", password="admin-password-123")
         response = self.client.post(
             reverse("staff_user_services", args=[self.user.pk]),
             {
-                "name": "OpenAI API",
-                "billing_type": BillingType.METERED,
+                "catalog_service": self.catalog.pk,
                 "is_active": "on",
                 "memo": "API利用料",
             },
@@ -243,6 +255,8 @@ class StaffServiceAssignmentTests(TestCase):
         self.assertRedirects(response, reverse("staff_user_services", args=[self.user.pk]))
         service = RegisteredService.objects.get(name="OpenAI API")
         self.assertEqual(service.user, self.user)
+        self.assertEqual(service.catalog_service, self.catalog)
+        self.assertEqual(service.registration_source, ServiceRegistrationSource.ADMIN)
         self.assertTrue(service.is_active)
 
         self.client.logout()
@@ -251,8 +265,7 @@ class StaffServiceAssignmentTests(TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertContains(response, "OpenAI API")
-        self.assertContains(response, "管理者があなたに登録したサービス")
-        self.assertNotContains(response, "サービス追加")
+        self.assertContains(response, "利用サービス管理")
         self.assertNotContains(response, "サービス編集")
 
     def test_user_cannot_upload_receipt_for_another_users_service(self):
@@ -267,7 +280,7 @@ class StaffServiceAssignmentTests(TestCase):
             billing_type=BillingType.METERED,
         )
 
-        form = ReceiptUploadForm(user=self.user)
+        form = ReceiptUploadForm(user=self.user, period_month=date(2026, 6, 1))
         service_ids = set(form.fields["service"].queryset.values_list("id", flat=True))
         self.assertIn(own_service.id, service_ids)
         self.assertNotIn(other_service.id, service_ids)
@@ -299,8 +312,9 @@ class StaffServiceAssignmentTests(TestCase):
     def test_staff_can_archive_and_reactivate_user_service(self):
         service = RegisteredService.objects.create(
             user=self.user,
-            name="AWS",
-            billing_type=BillingType.METERED,
+            catalog_service=self.catalog,
+            name=self.catalog.name,
+            billing_type=self.catalog.billing_type,
         )
         self.client.login(username="admin", password="admin-password-123")
 
@@ -308,12 +322,13 @@ class StaffServiceAssignmentTests(TestCase):
         self.assertRedirects(response, reverse("staff_user_services", args=[self.user.pk]))
         service.refresh_from_db()
         self.assertFalse(service.is_active)
+        self.assertEqual(service.deactivation_source, ServiceDeactivationSource.ADMIN)
 
         self.client.logout()
         self.client.login(username="user@example.com", password="password123")
         response = self.client.get(reverse("dashboard"))
         self.assertNotContains(response, "AWS")
-        self.assertContains(response, "利用サービスがまだ登録されていません")
+        self.assertContains(response, "利用中サービスがまだ登録されていません")
 
         self.client.logout()
         self.client.login(username="admin", password="admin-password-123")
@@ -321,3 +336,128 @@ class StaffServiceAssignmentTests(TestCase):
         self.assertRedirects(response, reverse("staff_user_services", args=[self.user.pk]))
         service.refresh_from_db()
         self.assertTrue(service.is_active)
+        self.assertEqual(service.deactivation_source, "")
+
+    def test_staff_can_create_catalog_service(self):
+        self.client.login(username="admin", password="admin-password-123")
+        response = self.client.post(
+            reverse("staff_catalog_create"),
+            {
+                "name": "Notion",
+                "billing_type": BillingType.SUBSCRIPTION,
+                "is_active": "on",
+                "memo": "ドキュメント管理",
+            },
+        )
+
+        self.assertRedirects(response, reverse("staff_services"))
+        catalog = ServiceCatalog.objects.get(name="Notion")
+        self.assertEqual(catalog.billing_type, BillingType.SUBSCRIPTION)
+        self.assertEqual(catalog.created_by, self.admin)
+
+
+@override_settings(PASSWORD_HASHERS=FAST_PASSWORD_HASHERS)
+class UserServiceRegistrationTests(TestCase):
+    def setUp(self):
+        self.media_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.media_dir.cleanup)
+        self.override = override_settings(MEDIA_ROOT=self.media_dir.name)
+        self.override.enable()
+        self.addCleanup(self.override.disable)
+        self.admin = User.objects.create_superuser(username="admin", email="admin@example.com", password="admin-password-123")
+        self.user = User.objects.create_user(username="user@example.com", email="user@example.com", password="password123")
+        self.catalog = ServiceCatalog.objects.create(name="Slack", billing_type=BillingType.SUBSCRIPTION, created_by=self.admin)
+
+    def test_user_registers_service_from_admin_catalog_and_staff_can_see_it(self):
+        self.client.login(username="user@example.com", password="password123")
+        response = self.client.post(
+            reverse("user_service_create"),
+            {"catalog_service": self.catalog.pk, "memo": "チーム連絡"},
+        )
+
+        self.assertRedirects(response, reverse("user_services"))
+        service = RegisteredService.objects.get(user=self.user, name="Slack")
+        self.assertEqual(service.catalog_service, self.catalog)
+        self.assertEqual(service.registration_source, ServiceRegistrationSource.USER)
+        self.assertEqual(service.registered_by, self.user)
+        self.assertTrue(service.is_active)
+
+        self.client.logout()
+        self.client.login(username="admin", password="admin-password-123")
+        response = self.client.get(reverse("staff_services"))
+        self.assertContains(response, "ユーザー操作の通知")
+        self.assertContains(response, "Slack")
+        self.assertContains(response, "ユーザー登録")
+
+    def test_user_can_stop_service_with_final_receipt_month_and_staff_can_see_it(self):
+        service = RegisteredService.objects.create(
+            user=self.user,
+            catalog_service=self.catalog,
+            name=self.catalog.name,
+            billing_type=self.catalog.billing_type,
+            registration_source=ServiceRegistrationSource.USER,
+            registered_by=self.user,
+        )
+        self.client.login(username="user@example.com", password="password123")
+        response = self.client.post(
+            reverse("user_service_stop", args=[service.pk]),
+            {"final_receipt_month": "2026-06", "stop_note": "解約済み"},
+        )
+
+        self.assertRedirects(response, reverse("user_services"))
+        service.refresh_from_db()
+        self.assertFalse(service.is_active)
+        self.assertEqual(service.deactivation_source, ServiceDeactivationSource.USER)
+        self.assertEqual(service.deactivated_by, self.user)
+        self.assertEqual(service.final_receipt_month, date(2026, 6, 1))
+        self.assertEqual(service.stop_note, "解約済み")
+
+        response = self.client.get(reverse("dashboard") + "?month=2026-06")
+        self.assertContains(response, "停止済み・最終 2026-06")
+        form = response.context["receipt_form"]
+        self.assertIn(service.id, set(form.fields["service"].queryset.values_list("id", flat=True)))
+
+        response = self.client.get(reverse("dashboard") + "?month=2026-07")
+        form = response.context["receipt_form"]
+        self.assertNotIn(service.id, set(form.fields["service"].queryset.values_list("id", flat=True)))
+
+        self.client.logout()
+        self.client.login(username="admin", password="admin-password-123")
+        response = self.client.get(reverse("staff_services"))
+        self.assertContains(response, "ユーザー停止")
+        self.assertContains(response, "2026年06月")
+        self.assertContains(response, "解約済み")
+
+    def test_user_cannot_register_service_that_is_not_in_catalog(self):
+        inactive_catalog = ServiceCatalog.objects.create(name="Old Service", billing_type=BillingType.OTHER, is_active=False)
+        self.client.login(username="user@example.com", password="password123")
+        response = self.client.get(reverse("user_service_create"))
+
+        form = response.context["form"]
+        catalog_ids = set(form.fields["catalog_service"].queryset.values_list("id", flat=True))
+        self.assertIn(self.catalog.id, catalog_ids)
+        self.assertNotIn(inactive_catalog.id, catalog_ids)
+
+    def test_stopped_service_cannot_be_used_after_final_receipt_month(self):
+        service = RegisteredService.objects.create(
+            user=self.user,
+            catalog_service=self.catalog,
+            name=self.catalog.name,
+            billing_type=self.catalog.billing_type,
+            is_active=False,
+            deactivation_source=ServiceDeactivationSource.USER,
+            deactivated_by=self.user,
+            final_receipt_month=date(2026, 6, 1),
+        )
+        submission = Submission.objects.create(user=self.user, period_month=date(2026, 7, 1))
+        receipt = Receipt(
+            submission=submission,
+            service=service,
+            service_name_snapshot=service.name,
+            billing_type_snapshot=service.billing_type,
+            original_filename="receipt.pdf",
+            file=SimpleUploadedFile("receipt.pdf", b"%PDF-1.4 test", content_type="application/pdf"),
+        )
+
+        with self.assertRaises(ValidationError):
+            receipt.full_clean()

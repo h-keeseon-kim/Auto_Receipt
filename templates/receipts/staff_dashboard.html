@@ -4,7 +4,7 @@
 <div class="page-title">
     <div>
         <h1>管理者ダッシュボード</h1>
-        <p class="muted">ユーザー別の提出状況を確認し、領収書をまとめてダウンロードできます。</p>
+        <p class="muted">ユーザー別の提出状況、利用サービス変更、領収書ダウンロードを確認できます。</p>
         <div class="actions">
             <a class="button" href="{% url 'staff_user_create' %}">新規ユーザー発行</a>
             <a class="button" href="{% url 'staff_services' %}">利用サービス管理</a>
@@ -23,6 +23,8 @@
     <div class="card"><span class="label">下書き</span><strong>{{ stats.draft }}</strong></div>
     <div class="card"><span class="label">未着手</span><strong>{{ stats.not_started }}</strong></div>
     <div class="card"><span class="label">利用中サービス</span><strong>{{ stats.active_service_count }}</strong></div>
+    <div class="card"><span class="label">ユーザー登録</span><strong>{{ stats.user_registered_count }}</strong></div>
+    <div class="card"><span class="label">ユーザー停止</span><strong>{{ stats.user_stopped_count }}</strong></div>
     <div class="card"><span class="label">保存中ファイル</span><strong>{{ stats.available_file_count }}</strong></div>
 </section>
 <section class="card section">
@@ -35,13 +37,15 @@
     </div>
     <div class="table-wrap">
         <table>
-            <thead><tr><th>ユーザー</th><th>メール</th><th>利用中サービス</th><th>ステータス</th><th>領収書数</th><th>保存中</th><th>削除済み</th><th>操作</th></tr></thead>
+            <thead><tr><th>ユーザー</th><th>メール</th><th>利用中サービス</th><th>ユーザー登録</th><th>ユーザー停止</th><th>ステータス</th><th>領収書数</th><th>保存中</th><th>削除済み</th><th>操作</th></tr></thead>
             <tbody>
                 {% for row in rows %}
                     <tr>
                         <td><strong>{{ row.user.username }}</strong></td>
                         <td>{{ row.user.email|default:"-" }}</td>
                         <td>{{ row.active_service_count }}</td>
+                        <td>{% if row.user_registered_count %}<span class="badge draft">{{ row.user_registered_count }}</span>{% else %}0{% endif %}</td>
+                        <td>{% if row.user_stopped_count %}<span class="badge draft">{{ row.user_stopped_count }}</span>{% else %}0{% endif %}</td>
                         <td><span class="badge {% if row.status == '提出済み' %}submitted{% elif row.status == '下書き' %}draft{% else %}neutral{% endif %}">{{ row.status }}</span></td>
                         <td>{{ row.receipt_count }}</td>
                         <td>{{ row.available_file_count }}</td>
@@ -57,7 +61,7 @@
                         </td>
                     </tr>
                 {% empty %}
-                    <tr><td colspan="8" class="muted center">対象ユーザーがいません。</td></tr>
+                    <tr><td colspan="10" class="muted center">対象ユーザーがいません。</td></tr>
                 {% endfor %}
             </tbody>
         </table>

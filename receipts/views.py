@@ -25,12 +25,25 @@ from .forms import (
     MonthSelectForm,
     ReceiptUploadForm,
     RegisterForm,
+    ServiceCatalogForm,
     StaffServiceForm,
     StaffUserCreateForm,
     StyledPasswordChangeForm,
+    UserServiceRegistrationForm,
+    UserServiceStopForm,
     current_month,
 )
-from .models import Receipt, RegisteredService, Submission, SubmissionStatus, UserProfile, receipt_expiry_from
+from .models import (
+    Receipt,
+    RegisteredService,
+    ServiceCatalog,
+    ServiceDeactivationSource,
+    ServiceRegistrationSource,
+    Submission,
+    SubmissionStatus,
+    UserProfile,
+    receipt_expiry_from,
+)
 
 
 def safe_part(value: str, fallback: str = "item") -> str:
@@ -106,6 +119,8 @@ def dashboard(request):
     selected_month, month_form = parse_month_from_request(request)
     submission, _ = Submission.objects.get_or_create(user=request.user, period_month=selected_month)
     active_services = RegisteredService.objects.filter(user=request.user, is_active=True).order_by("name")
+    uploadable_services = RegisteredService.objects.uploadable_for(request.user, selected_month)
+    stopped_services = RegisteredService.objects.filter(user=request.user, is_active=False).order_by("-deactivated_at", "name")
     receipts = submission.receipts.select_related("service").all()
 
     if request.method == "POST":
@@ -115,7 +130,7 @@ def dashboard(request):
             return redirect(submission.get_absolute_url())
 
         if action == "add_receipt":
-            receipt_form = ReceiptUploadForm(request.POST, request.FILES, user=request.user)
+            receipt_form = ReceiptUploadForm(request.POST, request.FILES, user=request.user, period_month=selected_month)
             if receipt_form.is_valid():
                 upload = request.FILES["file"]
                 receipt = receipt_form.save(commit=False)
@@ -141,17 +156,21 @@ def dashboard(request):
                 return redirect(submission.get_absolute_url())
             except ValidationError as exc:
                 messages.error(request, exc.message if hasattr(exc, "message") else exc.messages[0])
-            receipt_form = ReceiptUploadForm(user=request.user)
+            receipt_form = ReceiptUploadForm(user=request.user, period_month=selected_month)
         else:
             messages.error(request, "不明な操作です。")
-            receipt_form = ReceiptUploadForm(user=request.user)
+            receipt_form = ReceiptUploadForm(user=request.user, period_month=selected_month)
     else:
-        receipt_form = ReceiptUploadForm(user=request.user)
+        receipt_form = ReceiptUploadForm(user=request.user, period_month=selected_month)
 
     uploaded_service_ids = set(receipts.values_list("service_id", flat=True))
     service_rows = [
         {"service": service, "uploaded": service.id in uploaded_service_ids}
         for service in active_services
+    ]
+    stopped_rows = [
+        {"service": service, "uploadable": service.is_uploadable_for(selected_month)}
+        for service in stopped_services
     ]
     return render(
         request,
@@ -162,9 +181,77 @@ def dashboard(request):
             "submission": submission,
             "receipts": receipts,
             "active_services": active_services,
+            "uploadable_services": uploadable_services,
+            "stopped_services": stopped_services,
             "service_rows": service_rows,
+            "stopped_rows": stopped_rows,
             "selected_month": selected_month,
             "retention_months": settings.RECEIPT_RETENTION_MONTHS,
+        },
+    )
+
+
+@login_required
+def user_services(request):
+    services = RegisteredService.objects.filter(user=request.user).select_related("catalog_service", "registered_by", "deactivated_by").order_by("-is_active", "name")
+    active_services = [service for service in services if service.is_active]
+    stopped_services = [service for service in services if not service.is_active]
+    available_catalog_count = ServiceCatalog.objects.filter(is_active=True).count()
+    return render(
+        request,
+        "receipts/user_services.html",
+        {
+            "services": services,
+            "active_services": active_services,
+            "stopped_services": stopped_services,
+            "available_catalog_count": available_catalog_count,
+        },
+    )
+
+
+@login_required
+def user_service_create(request):
+    if request.method == "POST":
+        form = UserServiceRegistrationForm(request.POST, user=request.user)
+        if form.is_valid():
+            service = form.save()
+            messages.success(request, f"{service.name} を利用サービスとして登録しました。管理者画面にもユーザー登録として記録されます。")
+            return redirect("user_services")
+    else:
+        form = UserServiceRegistrationForm(user=request.user)
+    return render(
+        request,
+        "receipts/user_service_form.html",
+        {
+            "title": "サービス利用登録",
+            "form": form,
+            "submit_label": "登録する",
+            "back_url": reverse("user_services"),
+        },
+    )
+
+
+@login_required
+def user_service_stop(request, pk: int):
+    service = get_object_or_404(RegisteredService, pk=pk, user=request.user, is_active=True)
+    if request.method == "POST":
+        form = UserServiceStopForm(request.POST, service=service)
+        if form.is_valid():
+            form.save(stopped_by=request.user)
+            messages.success(
+                request,
+                f"{service.name} を利用停止にしました。最後にアップロードすべき領収書月は {service.final_receipt_month:%Y年%m月} として管理者画面にも記録されます。",
+            )
+            return redirect("user_services")
+    else:
+        form = UserServiceStopForm(service=service)
+    return render(
+        request,
+        "receipts/user_service_stop.html",
+        {
+            "service": service,
+            "form": form,
+            "back_url": reverse("user_services"),
         },
     )
 
@@ -178,14 +265,37 @@ def staff_services(request):
             filter=Q(registered_services__is_active=True),
             distinct=True,
         ),
+        user_registered_count=Count(
+            "registered_services",
+            filter=Q(registered_services__registration_source=ServiceRegistrationSource.USER),
+            distinct=True,
+        ),
+        user_stopped_count=Count(
+            "registered_services",
+            filter=Q(registered_services__deactivation_source=ServiceDeactivationSource.USER),
+            distinct=True,
+        ),
     )
     selected_user = None
-    services = RegisteredService.objects.select_related("user").filter(user__is_staff=False, user__is_superuser=False)
+    services = RegisteredService.objects.select_related(
+        "user", "catalog_service", "registered_by", "deactivated_by"
+    ).filter(user__is_staff=False, user__is_superuser=False)
     user_id = request.GET.get("user")
     if user_id:
         selected_user = get_managed_user(user_id)
         services = services.filter(user=selected_user)
-    services = services.order_by("user__username", "name")
+    services = services.order_by("user__username", "-is_active", "name")
+
+    catalog_services = ServiceCatalog.objects.annotate(
+        assigned_count=Count("registered_services", distinct=True),
+        active_user_count=Count("registered_services", filter=Q(registered_services__is_active=True), distinct=True),
+    ).order_by("name")
+
+    user_change_services = (
+        RegisteredService.objects.select_related("user", "catalog_service", "registered_by", "deactivated_by")
+        .filter(Q(registration_source=ServiceRegistrationSource.USER) | Q(deactivation_source=ServiceDeactivationSource.USER))
+        .order_by("-updated_at")[:25]
+    )
     return render(
         request,
         "receipts/staff_services.html",
@@ -193,6 +303,8 @@ def staff_services(request):
             "users": users,
             "services": services,
             "selected_user": selected_user,
+            "catalog_services": catalog_services,
+            "user_change_services": user_change_services,
         },
     )
 
@@ -201,14 +313,14 @@ def staff_services(request):
 def staff_user_services(request, user_id: int):
     managed_user = get_managed_user(user_id)
     if request.method == "POST":
-        form = StaffServiceForm(request.POST, fixed_user=managed_user)
+        form = StaffServiceForm(request.POST, fixed_user=managed_user, registered_by=request.user)
         if form.is_valid():
             service = form.save()
             messages.success(request, f"{managed_user.username} に {service.name} を登録しました。")
             return redirect("staff_user_services", user_id=managed_user.pk)
     else:
-        form = StaffServiceForm(fixed_user=managed_user)
-    services = RegisteredService.objects.filter(user=managed_user).order_by("-is_active", "name")
+        form = StaffServiceForm(fixed_user=managed_user, registered_by=request.user)
+    services = RegisteredService.objects.select_related("catalog_service", "registered_by", "deactivated_by").filter(user=managed_user).order_by("-is_active", "name")
     return render(
         request,
         "receipts/staff_user_services.html",
@@ -227,13 +339,13 @@ def staff_service_create(request):
     if requested_user_id:
         initial["user"] = get_managed_user(requested_user_id).pk
     if request.method == "POST":
-        form = StaffServiceForm(request.POST)
+        form = StaffServiceForm(request.POST, registered_by=request.user)
         if form.is_valid():
             service = form.save()
             messages.success(request, f"{service.user.username} に {service.name} を登録しました。")
             return redirect("staff_user_services", user_id=service.user_id)
     else:
-        form = StaffServiceForm(initial=initial)
+        form = StaffServiceForm(initial=initial, registered_by=request.user)
     return render(
         request,
         "receipts/staff_service_form.html",
@@ -250,13 +362,13 @@ def staff_service_create(request):
 def staff_service_update(request, pk: int):
     service = get_object_or_404(RegisteredService.objects.select_related("user"), pk=pk, user__is_staff=False, user__is_superuser=False)
     if request.method == "POST":
-        form = StaffServiceForm(request.POST, instance=service, fixed_user=service.user)
+        form = StaffServiceForm(request.POST, instance=service, fixed_user=service.user, registered_by=request.user)
         if form.is_valid():
             service = form.save()
             messages.success(request, f"{service.user.username} の {service.name} を更新しました。")
             return redirect("staff_user_services", user_id=service.user_id)
     else:
-        form = StaffServiceForm(instance=service, fixed_user=service.user)
+        form = StaffServiceForm(instance=service, fixed_user=service.user, registered_by=request.user)
     return render(
         request,
         "receipts/staff_service_form.html",
@@ -276,8 +388,7 @@ def staff_service_archive(request, pk: int):
     service = get_object_or_404(RegisteredService.objects.select_related("user"), pk=pk, user__is_staff=False, user__is_superuser=False)
     if request.method != "POST":
         raise Http404
-    service.is_active = False
-    service.save(update_fields=["is_active", "updated_at"])
+    service.deactivate(by=request.user, source=ServiceDeactivationSource.ADMIN)
     messages.success(request, f"{service.user.username} の {service.name} を利用停止にしました。過去の提出履歴は残ります。")
     return redirect("staff_user_services", user_id=service.user_id)
 
@@ -287,10 +398,81 @@ def staff_service_activate(request, pk: int):
     service = get_object_or_404(RegisteredService.objects.select_related("user"), pk=pk, user__is_staff=False, user__is_superuser=False)
     if request.method != "POST":
         raise Http404
-    service.is_active = True
-    service.save(update_fields=["is_active", "updated_at"])
+    service.activate()
     messages.success(request, f"{service.user.username} の {service.name} を利用中に戻しました。")
     return redirect("staff_user_services", user_id=service.user_id)
+
+
+@staff_member_required
+def staff_catalog_create(request):
+    if request.method == "POST":
+        form = ServiceCatalogForm(request.POST)
+        if form.is_valid():
+            catalog = form.save(commit=False)
+            catalog.created_by = request.user
+            catalog.save()
+            messages.success(request, f"サービスマスター {catalog.name} を登録しました。")
+            return redirect("staff_services")
+    else:
+        form = ServiceCatalogForm()
+    return render(
+        request,
+        "receipts/staff_catalog_form.html",
+        {
+            "title": "サービスマスター登録",
+            "form": form,
+            "back_url": reverse("staff_services"),
+            "submit_label": "登録する",
+        },
+    )
+
+
+@staff_member_required
+def staff_catalog_update(request, pk: int):
+    catalog = get_object_or_404(ServiceCatalog, pk=pk)
+    if request.method == "POST":
+        form = ServiceCatalogForm(request.POST, instance=catalog)
+        if form.is_valid():
+            catalog = form.save()
+            # マスター名や支払い種別を変更した場合、未提出のユーザー別登録にも同期する。
+            RegisteredService.objects.filter(catalog_service=catalog).update(name=catalog.name, billing_type=catalog.billing_type)
+            messages.success(request, f"サービスマスター {catalog.name} を更新しました。")
+            return redirect("staff_services")
+    else:
+        form = ServiceCatalogForm(instance=catalog)
+    return render(
+        request,
+        "receipts/staff_catalog_form.html",
+        {
+            "title": "サービスマスター編集",
+            "form": form,
+            "catalog": catalog,
+            "back_url": reverse("staff_services"),
+            "submit_label": "保存する",
+        },
+    )
+
+
+@staff_member_required
+def staff_catalog_archive(request, pk: int):
+    catalog = get_object_or_404(ServiceCatalog, pk=pk)
+    if request.method != "POST":
+        raise Http404
+    catalog.is_active = False
+    catalog.save(update_fields=["is_active", "updated_at"])
+    messages.success(request, f"サービスマスター {catalog.name} を新規選択不可にしました。既存のユーザー別利用登録は維持されます。")
+    return redirect("staff_services")
+
+
+@staff_member_required
+def staff_catalog_activate(request, pk: int):
+    catalog = get_object_or_404(ServiceCatalog, pk=pk)
+    if request.method != "POST":
+        raise Http404
+    catalog.is_active = True
+    catalog.save(update_fields=["is_active", "updated_at"])
+    messages.success(request, f"サービスマスター {catalog.name} を選択可能に戻しました。")
+    return redirect("staff_services")
 
 
 # 旧URL互換: 一般ユーザーには表示せず、管理者専用のサービス管理へ移行する。
@@ -387,7 +569,17 @@ def staff_dashboard(request):
             "registered_services",
             filter=Q(registered_services__is_active=True),
             distinct=True,
-        )
+        ),
+        user_registered_count=Count(
+            "registered_services",
+            filter=Q(registered_services__registration_source=ServiceRegistrationSource.USER),
+            distinct=True,
+        ),
+        user_stopped_count=Count(
+            "registered_services",
+            filter=Q(registered_services__deactivation_source=ServiceDeactivationSource.USER),
+            distinct=True,
+        ),
     )
     receipt_prefetch = Prefetch("receipts", queryset=Receipt.objects.select_related("service"))
     submissions = (
@@ -424,6 +616,8 @@ def staff_dashboard(request):
                 "available_file_count": available_file_count,
                 "purged_file_count": purged_file_count,
                 "active_service_count": user.active_service_count,
+                "user_registered_count": user.user_registered_count,
+                "user_stopped_count": user.user_stopped_count,
             }
         )
 
@@ -435,6 +629,8 @@ def staff_dashboard(request):
         "receipt_count": sum(row["receipt_count"] for row in rows),
         "available_file_count": sum(row["available_file_count"] for row in rows),
         "active_service_count": sum(row["active_service_count"] for row in rows),
+        "user_registered_count": sum(row["user_registered_count"] for row in rows),
+        "user_stopped_count": sum(row["user_stopped_count"] for row in rows),
     }
     return render(
         request,

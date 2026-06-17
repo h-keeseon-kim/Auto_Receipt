@@ -8,6 +8,7 @@ from django.conf import settings
 from django.core.exceptions import ValidationError
 from django.core.validators import FileExtensionValidator, MinValueValidator
 from django.db import models
+from django.db.models import Q
 from django.db.models.signals import post_delete, post_save
 from django.dispatch import receiver
 from django.urls import reverse
@@ -59,28 +60,197 @@ class SubmissionStatus(models.TextChoices):
     SUBMITTED = "submitted", "提出済み"
 
 
-class RegisteredService(models.Model):
-    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="registered_services")
-    name = models.CharField("サービス名", max_length=120)
+class ServiceRegistrationSource(models.TextChoices):
+    ADMIN = "admin", "管理者登録"
+    USER = "user", "ユーザー登録"
+
+
+class ServiceDeactivationSource(models.TextChoices):
+    ADMIN = "admin", "管理者停止"
+    USER = "user", "ユーザー停止"
+
+
+class ServiceCatalog(models.Model):
+    """管理者が登録するサービスマスター。ユーザーはこの一覧から利用登録する。"""
+
+    name = models.CharField("サービス名", max_length=120, unique=True)
     billing_type = models.CharField("支払い種別", max_length=20, choices=BillingType.choices)
-    is_active = models.BooleanField("利用中", default=True)
+    is_active = models.BooleanField("選択可能", default=True)
     memo = models.TextField("メモ", blank=True)
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="created_service_catalogs",
+        verbose_name="作成管理者",
+    )
     created_at = models.DateTimeField("作成日時", auto_now_add=True)
     updated_at = models.DateTimeField("更新日時", auto_now=True)
 
     class Meta:
-        constraints = [
-            models.UniqueConstraint(fields=["user", "name"], name="unique_registered_service_per_user"),
-        ]
         ordering = ["name"]
-        verbose_name = "登録サービス"
-        verbose_name_plural = "登録サービス"
+        verbose_name = "サービスマスター"
+        verbose_name_plural = "サービスマスター"
 
     def clean(self):
         if self.name:
             self.name = " ".join(self.name.strip().split())
         if not self.name:
             raise ValidationError({"name": "サービス名を入力してください。"})
+
+    def __str__(self) -> str:
+        return self.name
+
+
+class RegisteredServiceQuerySet(models.QuerySet):
+    def active(self):
+        return self.filter(is_active=True)
+
+    def uploadable_for(self, user, period_month=None):
+        queryset = self.filter(user=user)
+        if period_month is None:
+            return queryset.filter(is_active=True).order_by("name")
+        period_month = month_start(period_month)
+        return queryset.filter(
+            Q(is_active=True) | Q(is_active=False, final_receipt_month__gte=period_month)
+        ).order_by("-is_active", "name")
+
+
+class RegisteredService(models.Model):
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="registered_services")
+    catalog_service = models.ForeignKey(
+        ServiceCatalog,
+        on_delete=models.PROTECT,
+        null=True,
+        blank=True,
+        related_name="registered_services",
+        verbose_name="サービスマスター",
+    )
+    name = models.CharField("サービス名", max_length=120)
+    billing_type = models.CharField("支払い種別", max_length=20, choices=BillingType.choices)
+    is_active = models.BooleanField("利用中", default=True)
+    memo = models.TextField("メモ", blank=True)
+    registration_source = models.CharField(
+        "登録元",
+        max_length=20,
+        choices=ServiceRegistrationSource.choices,
+        default=ServiceRegistrationSource.ADMIN,
+    )
+    registered_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="service_registrations_created",
+        verbose_name="登録者",
+    )
+    deactivation_source = models.CharField(
+        "停止元",
+        max_length=20,
+        choices=ServiceDeactivationSource.choices,
+        blank=True,
+    )
+    deactivated_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="service_registrations_deactivated",
+        verbose_name="停止者",
+    )
+    deactivated_at = models.DateTimeField("停止日時", null=True, blank=True)
+    final_receipt_month = models.DateField("最後にアップロードすべき領収書月", null=True, blank=True)
+    stop_note = models.TextField("利用停止メモ", blank=True)
+    created_at = models.DateTimeField("作成日時", auto_now_add=True)
+    updated_at = models.DateTimeField("更新日時", auto_now=True)
+
+    objects = RegisteredServiceQuerySet.as_manager()
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(fields=["user", "name"], name="unique_registered_service_per_user"),
+        ]
+        ordering = ["-is_active", "name"]
+        verbose_name = "登録サービス"
+        verbose_name_plural = "登録サービス"
+
+    def clean(self):
+        if self.catalog_service_id:
+            self.name = self.catalog_service.name
+            self.billing_type = self.catalog_service.billing_type
+            if self.catalog_service and not self.catalog_service.is_active and self.is_active and self.pk is None:
+                raise ValidationError({"catalog_service": "停止中のサービスマスターは新規登録できません。"})
+        if self.name:
+            self.name = " ".join(self.name.strip().split())
+        if not self.name:
+            raise ValidationError({"name": "サービス名を入力してください。"})
+        if self.final_receipt_month:
+            self.final_receipt_month = month_start(self.final_receipt_month)
+        if self.is_active and self.deactivation_source:
+            raise ValidationError("利用中サービスには停止元を設定できません。")
+        if not self.is_active and self.deactivation_source == ServiceDeactivationSource.USER and not self.final_receipt_month:
+            raise ValidationError({"final_receipt_month": "ユーザー停止の場合は最後にアップロードすべき領収書月を選択してください。"})
+
+    def save(self, *args, **kwargs):
+        if self.catalog_service_id:
+            self.name = self.catalog_service.name
+            self.billing_type = self.catalog_service.billing_type
+        if self.name:
+            self.name = " ".join(self.name.strip().split())
+        if self.final_receipt_month:
+            self.final_receipt_month = month_start(self.final_receipt_month)
+        super().save(*args, **kwargs)
+
+    def is_uploadable_for(self, period_month) -> bool:
+        period_month = month_start(period_month)
+        return self.is_active or bool(self.final_receipt_month and period_month <= self.final_receipt_month)
+
+    @property
+    def source_badge_class(self) -> str:
+        return "draft" if self.registration_source == ServiceRegistrationSource.USER else "neutral"
+
+    @property
+    def stop_badge_class(self) -> str:
+        return "draft" if self.deactivation_source == ServiceDeactivationSource.USER else "neutral"
+
+    def deactivate(self, *, by, source: str, final_receipt_month=None, note: str = ""):
+        self.is_active = False
+        self.deactivation_source = source
+        self.deactivated_by = by
+        self.deactivated_at = timezone.now()
+        self.final_receipt_month = month_start(final_receipt_month) if final_receipt_month else None
+        self.stop_note = note or ""
+        self.save(
+            update_fields=[
+                "is_active",
+                "deactivation_source",
+                "deactivated_by",
+                "deactivated_at",
+                "final_receipt_month",
+                "stop_note",
+                "updated_at",
+            ]
+        )
+
+    def activate(self):
+        self.is_active = True
+        self.deactivation_source = ""
+        self.deactivated_by = None
+        self.deactivated_at = None
+        self.final_receipt_month = None
+        self.stop_note = ""
+        self.save(
+            update_fields=[
+                "is_active",
+                "deactivation_source",
+                "deactivated_by",
+                "deactivated_at",
+                "final_receipt_month",
+                "stop_note",
+                "updated_at",
+            ]
+        )
 
     def __str__(self) -> str:
         return f"{self.name} / {self.user}"
@@ -215,9 +385,9 @@ class Receipt(models.Model):
         if self.submission_id and self.submission.is_submitted:
             raise ValidationError("提出済みの領収書は変更できません。")
         if self.service_id and self.submission_id and self.service.user_id != self.submission.user_id:
-            raise ValidationError("管理者が割り当てた自分の利用サービスだけを選択できます。")
-        if self.service_id and not self.service.is_active:
-            raise ValidationError("利用中のサービスだけを選択できます。")
+            raise ValidationError("自分の利用サービスだけを選択できます。")
+        if self.service_id and self.submission_id and not self.service.is_uploadable_for(self.submission.period_month):
+            raise ValidationError("この提出月では選択できないサービスです。利用停止済みの場合は、最終領収書月までしか選択できません。")
 
     def save(self, *args, **kwargs):
         if self.service_id:
@@ -262,7 +432,6 @@ class Receipt(models.Model):
 def delete_receipt_file(sender, instance: Receipt, **kwargs):
     if instance.file:
         instance.file.delete(save=False)
-
 
 
 @receiver(post_save, sender=settings.AUTH_USER_MODEL)

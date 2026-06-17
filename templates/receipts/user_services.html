@@ -1,0 +1,77 @@
+{% extends "base.html" %}
+{% block title %}利用サービス管理 - Auto Receipt{% endblock %}
+{% block content %}
+<div class="page-title">
+    <div>
+        <h1>利用サービス管理</h1>
+        <p class="muted">新しく使い始めたサービスを自分で登録し、使わなくなったサービスは最終領収書月を指定して停止できます。</p>
+    </div>
+    <div class="actions">
+        <a class="button" href="{% url 'dashboard' %}">アップロードへ</a>
+        <a class="button primary" href="{% url 'user_service_create' %}">サービス利用登録</a>
+    </div>
+</div>
+
+<section class="status-grid">
+    <div class="card"><span class="label">利用中サービス</span><strong>{{ active_services|length }}</strong></div>
+    <div class="card"><span class="label">停止済みサービス</span><strong>{{ stopped_services|length }}</strong></div>
+    <div class="card"><span class="label">選択可能なサービスマスター</span><strong>{{ available_catalog_count }}</strong></div>
+</section>
+
+<section class="card section">
+    <div class="section-header">
+        <div>
+            <h2>利用中サービス</h2>
+            <p class="muted">領収書アップロード時に通常表示されるサービスです。</p>
+        </div>
+    </div>
+    <div class="table-wrap">
+        <table>
+            <thead><tr><th>サービス</th><th>種別</th><th>登録元</th><th>メモ</th><th>操作</th></tr></thead>
+            <tbody>
+                {% for service in active_services %}
+                    <tr>
+                        <td><strong>{{ service.name }}</strong></td>
+                        <td>{{ service.get_billing_type_display }}</td>
+                        <td><span class="badge {{ service.source_badge_class }}">{{ service.get_registration_source_display }}</span></td>
+                        <td>{{ service.memo|default:"-"|truncatechars:80 }}</td>
+                        <td class="actions">
+                            <a class="button small danger-outline" href="{% url 'user_service_stop' service.pk %}">利用停止</a>
+                        </td>
+                    </tr>
+                {% empty %}
+                    <tr><td colspan="5" class="muted center">利用中サービスはありません。</td></tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</section>
+
+<section class="card section">
+    <div class="section-header">
+        <div>
+            <h2>停止済みサービス</h2>
+            <p class="muted">停止済みサービスは通常の項目から外れます。最終領収書月までの提出では、領収書アップロード画面の選択肢に残ります。</p>
+        </div>
+    </div>
+    <div class="table-wrap">
+        <table>
+            <thead><tr><th>サービス</th><th>種別</th><th>停止元</th><th>最終領収書月</th><th>停止日時</th><th>メモ</th></tr></thead>
+            <tbody>
+                {% for service in stopped_services %}
+                    <tr>
+                        <td><strong>{{ service.name }}</strong></td>
+                        <td>{{ service.get_billing_type_display }}</td>
+                        <td>{% if service.deactivation_source %}<span class="badge {{ service.stop_badge_class }}">{{ service.get_deactivation_source_display }}</span>{% else %}-{% endif %}</td>
+                        <td>{% if service.final_receipt_month %}{{ service.final_receipt_month|date:"Y年m月" }}{% else %}-{% endif %}</td>
+                        <td>{{ service.deactivated_at|date:"Y-m-d H:i"|default:"-" }}</td>
+                        <td>{{ service.stop_note|default:"-"|truncatechars:80 }}</td>
+                    </tr>
+                {% empty %}
+                    <tr><td colspan="6" class="muted center">停止済みサービスはありません。</td></tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</section>
+{% endblock %}

@@ -1,0 +1,16 @@
+{% extends "base.html" %}
+{% block title %}{{ title }} - Auto Receipt{% endblock %}
+{% block content %}
+<section class="auth-card wide">
+    <h1>{{ title }}</h1>
+    <p class="muted">管理者が登録したサービスマスターから、新しく利用するサービスを選択します。登録内容は管理者画面にも「ユーザー登録」として表示されます。</p>
+    <form method="post" class="stack">
+        {% csrf_token %}
+        {{ form.as_p }}
+        <div class="actions">
+            <button type="submit" class="button primary">{{ submit_label|default:"登録する" }}</button>
+            <a href="{{ back_url }}" class="button">戻る</a>
+        </div>
+    </form>
+</section>
+{% endblock %}

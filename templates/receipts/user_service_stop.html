@@ -1,0 +1,17 @@
+{% extends "base.html" %}
+{% block title %}利用停止 - Auto Receipt{% endblock %}
+{% block content %}
+<section class="auth-card wide">
+    <h1>利用停止</h1>
+    <p class="muted">対象サービス: <strong>{{ service.name }}</strong></p>
+    <p class="muted">利用停止後、このサービスは通常の利用サービス項目から外れます。最後に提出が必要な領収書月を選択してください。</p>
+    <form method="post" class="stack" onsubmit="return confirm('このサービスを利用停止にしますか？');">
+        {% csrf_token %}
+        {{ form.as_p }}
+        <div class="actions">
+            <button type="submit" class="button primary">利用停止する</button>
+            <a href="{{ back_url }}" class="button">戻る</a>
+        </div>
+    </form>
+</section>
+{% endblock %}

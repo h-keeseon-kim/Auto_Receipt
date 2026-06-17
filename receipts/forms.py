@@ -9,9 +9,17 @@ from django.contrib.auth.forms import AuthenticationForm, PasswordChangeForm, Us
 from django.contrib.auth.models import User
 from django.contrib.auth.password_validation import validate_password
 from django.core.exceptions import ValidationError
+from django.db.models import Q
+from django.utils import timezone
 from django.utils.crypto import get_random_string
 
-from .models import Receipt, RegisteredService
+from .models import (
+    Receipt,
+    RegisteredService,
+    ServiceCatalog,
+    ServiceDeactivationSource,
+    ServiceRegistrationSource,
+)
 
 
 def apply_design_classes(form):
@@ -81,6 +89,8 @@ class MonthField(forms.DateField):
 
     def clean(self, value):
         cleaned = super().clean(value)
+        if cleaned is None:
+            return None
         return cleaned.replace(day=1)
 
 
@@ -97,26 +107,58 @@ class MonthSelectForm(forms.Form):
         apply_design_classes(self)
 
 
+class ServiceCatalogForm(forms.ModelForm):
+    """管理者がユーザーに公開するサービスマスターを登録するフォーム。"""
+
+    class Meta:
+        model = ServiceCatalog
+        fields = ["name", "billing_type", "is_active", "memo"]
+        widgets = {
+            "name": forms.TextInput(attrs={"placeholder": "例: OpenAI API / Notion / AWS"}),
+            "memo": forms.Textarea(attrs={"rows": 3, "placeholder": "任意: ユーザー向け補足、契約メモなど"}),
+        }
+        help_texts = {
+            "is_active": "OFFにすると、ユーザーの新規利用登録画面と管理者の割り当て画面から外れます。既存の利用履歴は残ります。",
+        }
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        apply_design_classes(self)
+
+    def clean_name(self):
+        name = " ".join((self.cleaned_data.get("name") or "").strip().split())
+        if not name:
+            raise forms.ValidationError("サービス名を入力してください。")
+        duplicate = ServiceCatalog.objects.filter(name__iexact=name).exclude(pk=self.instance.pk)
+        if duplicate.exists():
+            raise forms.ValidationError("同じサービス名のマスターがすでに登録されています。")
+        return name
+
+
 class StaffServiceForm(forms.ModelForm):
-    """管理者が一般ユーザーへ利用サービスを割り当てるためのフォーム。"""
+    """管理者が一般ユーザーへサービスマスターを割り当てるためのフォーム。"""
+
+    final_receipt_month = MonthField(label="最後にアップロードすべき領収書月", required=False)
 
     class Meta:
         model = RegisteredService
-        fields = ["user", "name", "billing_type", "is_active", "memo"]
+        fields = ["user", "catalog_service", "is_active", "memo", "final_receipt_month"]
         widgets = {
-            "name": forms.TextInput(attrs={"placeholder": "例: OpenAI API / Notion / AWS"}),
             "memo": forms.Textarea(attrs={"rows": 3, "placeholder": "任意: 用途、担当、契約メモなど"}),
         }
         labels = {
             "user": "対象ユーザー",
+            "catalog_service": "サービス名",
         }
         help_texts = {
             "user": "このサービスを利用できる一般ユーザーを選択します。",
-            "is_active": "停止すると、ユーザーのアップロード画面の選択肢から外れます。過去の提出履歴は残ります。",
+            "catalog_service": "管理者が登録したサービスマスターから選択します。先にサービスマスターを登録してください。",
+            "is_active": "停止すると、通常の利用サービス一覧から外れます。最終領収書月を指定すると、その月まではアップロード選択肢に残せます。",
         }
 
-    def __init__(self, *args, fixed_user: User | None = None, **kwargs):
+    def __init__(self, *args, fixed_user: User | None = None, registered_by: User | None = None, **kwargs):
         self.fixed_user = fixed_user
+        self.registered_by = registered_by
         super().__init__(*args, **kwargs)
         user_queryset = User.objects.filter(is_active=True, is_staff=False, is_superuser=False).order_by("username")
         if self.instance.pk and self.instance.user_id:
@@ -127,13 +169,13 @@ class StaffServiceForm(forms.ModelForm):
             self.fields["user"].initial = fixed_user.pk
             self.fields["user"].widget = forms.HiddenInput()
             self.fields["user"].required = False
-        apply_design_classes(self)
 
-    def clean_name(self):
-        name = " ".join((self.cleaned_data.get("name") or "").strip().split())
-        if not name:
-            raise forms.ValidationError("サービス名を入力してください。")
-        return name
+        catalog_queryset = ServiceCatalog.objects.filter(is_active=True).order_by("name")
+        if self.instance.pk and self.instance.catalog_service_id:
+            catalog_queryset = (catalog_queryset | ServiceCatalog.objects.filter(pk=self.instance.catalog_service_id)).distinct().order_by("name")
+        self.fields["catalog_service"].queryset = catalog_queryset
+        self.fields["catalog_service"].empty_label = "サービスマスターを選択"
+        apply_design_classes(self)
 
     def clean_user(self):
         if self.fixed_user is not None:
@@ -148,16 +190,128 @@ class StaffServiceForm(forms.ModelForm):
     def clean(self):
         cleaned = super().clean()
         user = cleaned.get("user")
-        name = cleaned.get("name")
-        if user and name:
-            duplicate = RegisteredService.objects.filter(user=user, name__iexact=name).exclude(pk=self.instance.pk)
+        catalog = cleaned.get("catalog_service")
+        is_active = cleaned.get("is_active")
+        final_receipt_month = cleaned.get("final_receipt_month")
+        if user and catalog:
+            duplicate = RegisteredService.objects.filter(user=user, name__iexact=catalog.name).exclude(pk=self.instance.pk)
             if duplicate.exists():
-                self.add_error("name", "このユーザーには同じサービス名がすでに登録されています。")
+                self.add_error("catalog_service", "このユーザーには同じサービスがすでに登録されています。停止中の場合は再開してください。")
+        if not is_active and final_receipt_month is None and self.instance.deactivation_source == ServiceDeactivationSource.USER:
+            self.add_error("final_receipt_month", "ユーザー停止の記録には最終領収書月が必要です。")
         return cleaned
+
+    def save(self, commit=True):
+        service = super().save(commit=False)
+        if self.fixed_user is not None:
+            service.user = self.fixed_user
+        catalog = self.cleaned_data["catalog_service"]
+        service.catalog_service = catalog
+        service.name = catalog.name
+        service.billing_type = catalog.billing_type
+        if not service.pk:
+            service.registration_source = ServiceRegistrationSource.ADMIN
+            service.registered_by = self.registered_by
+        if service.is_active:
+            service.deactivation_source = ""
+            service.deactivated_by = None
+            service.deactivated_at = None
+            service.final_receipt_month = None
+            service.stop_note = ""
+        elif not service.deactivation_source:
+            service.deactivation_source = ServiceDeactivationSource.ADMIN
+            service.deactivated_by = self.registered_by
+            service.deactivated_at = timezone.now()
+        if commit:
+            service.save()
+        return service
 
 
 # 旧バージョンから参照される可能性があるため、互換用に残す。
 RegisteredServiceForm = StaffServiceForm
+
+
+class UserServiceRegistrationForm(forms.Form):
+    catalog_service = forms.ModelChoiceField(
+        label="新しく利用するサービス",
+        queryset=ServiceCatalog.objects.none(),
+        empty_label="サービスを選択",
+        help_text="管理者が登録したサービスマスターから選択します。一覧にない場合は管理者へ追加を依頼してください。",
+    )
+    memo = forms.CharField(
+        label="メモ",
+        required=False,
+        widget=forms.Textarea(attrs={"rows": 3, "placeholder": "任意: 用途、補足など"}),
+    )
+
+    def __init__(self, *args, user: User, **kwargs):
+        self.user = user
+        super().__init__(*args, **kwargs)
+        active_service_names = RegisteredService.objects.filter(user=user, is_active=True).values_list("name", flat=True)
+        self.fields["catalog_service"].queryset = ServiceCatalog.objects.filter(is_active=True).exclude(
+            name__in=list(active_service_names)
+        ).order_by("name")
+        apply_design_classes(self)
+
+    def clean_catalog_service(self):
+        catalog = self.cleaned_data["catalog_service"]
+        active_duplicate = RegisteredService.objects.filter(user=self.user, name__iexact=catalog.name, is_active=True)
+        if active_duplicate.exists():
+            raise forms.ValidationError("このサービスはすでに利用中です。")
+        return catalog
+
+    def save(self) -> RegisteredService:
+        catalog = self.cleaned_data["catalog_service"]
+        memo = self.cleaned_data.get("memo", "")
+        service = RegisteredService.objects.filter(user=self.user, name__iexact=catalog.name).order_by("id").first()
+        if service is None:
+            service = RegisteredService(
+                user=self.user,
+                name=catalog.name,
+                catalog_service=catalog,
+                billing_type=catalog.billing_type,
+            )
+        service.catalog_service = catalog
+        service.name = catalog.name
+        service.billing_type = catalog.billing_type
+        service.is_active = True
+        service.memo = memo or service.memo
+        service.registration_source = ServiceRegistrationSource.USER
+        service.registered_by = self.user
+        service.deactivation_source = ""
+        service.deactivated_by = None
+        service.deactivated_at = None
+        service.final_receipt_month = None
+        service.stop_note = ""
+        service.save()
+        return service
+
+
+class UserServiceStopForm(forms.Form):
+    final_receipt_month = MonthField(
+        label="最後にアップロードすべき領収書月",
+        initial=current_month,
+        help_text="例: 2026年6月分まで領収書提出が必要な場合は 2026-06 を選択します。",
+    )
+    stop_note = forms.CharField(
+        label="利用停止メモ",
+        required=False,
+        widget=forms.Textarea(attrs={"rows": 3, "placeholder": "任意: 解約日、理由、補足など"}),
+    )
+
+    def __init__(self, *args, service: RegisteredService, **kwargs):
+        self.service = service
+        super().__init__(*args, **kwargs)
+        apply_design_classes(self)
+
+    def save(self, *, stopped_by: User) -> RegisteredService:
+        self.service.deactivate(
+            by=stopped_by,
+            source=ServiceDeactivationSource.USER,
+            final_receipt_month=self.cleaned_data["final_receipt_month"],
+            note=self.cleaned_data.get("stop_note", ""),
+        )
+        return self.service
 
 
 class ReceiptUploadForm(forms.ModelForm):
@@ -170,17 +324,26 @@ class ReceiptUploadForm(forms.ModelForm):
             "file": forms.ClearableFileInput(attrs={"accept": ".pdf,.png,.jpg,.jpeg,.webp"}),
         }
         help_texts = {
-            "service": "管理者が登録した利用サービスから選択します。",
+            "service": "利用中サービス、または最終領収書月までの停止済みサービスから選択します。",
             "amount": "任意。確認用に税込金額などを入力できます。",
             "file": "PDF / PNG / JPG / JPEG / WEBP。最大10MB。ファイル本体は最大3ヶ月保存されます。",
         }
 
-    def __init__(self, *args, user=None, **kwargs):
+    def __init__(self, *args, user=None, period_month=None, **kwargs):
         super().__init__(*args, **kwargs)
         if user is not None:
-            self.fields["service"].queryset = RegisteredService.objects.filter(user=user, is_active=True).order_by("name")
+            self.fields["service"].queryset = RegisteredService.objects.uploadable_for(user, period_month).order_by("-is_active", "name")
         self.fields["service"].empty_label = "利用サービスを選択"
+        self.fields["service"].label_from_instance = self.service_label
         apply_design_classes(self)
+
+    @staticmethod
+    def service_label(service: RegisteredService) -> str:
+        if service.is_active:
+            return service.name
+        if service.final_receipt_month:
+            return f"{service.name}（停止済み・最終 {service.final_receipt_month:%Y-%m}）"
+        return f"{service.name}（停止済み）"
 
     def clean_currency(self):
         currency = self.cleaned_data.get("currency", "JPY")

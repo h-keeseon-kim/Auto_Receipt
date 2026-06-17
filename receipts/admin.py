@@ -1,6 +1,6 @@
 from django.contrib import admin
 
-from .models import Receipt, RegisteredService, Submission, UserProfile
+from .models import Receipt, RegisteredService, ServiceCatalog, Submission, UserProfile
 
 
 class ReceiptInline(admin.TabularInline):
@@ -30,11 +30,28 @@ class ReceiptInline(admin.TabularInline):
     )
 
 
+@admin.register(ServiceCatalog)
+class ServiceCatalogAdmin(admin.ModelAdmin):
+    list_display = ("name", "billing_type", "is_active", "created_by", "updated_at")
+    list_filter = ("billing_type", "is_active")
+    search_fields = ("name", "memo", "created_by__username", "created_by__email")
+
+
 @admin.register(RegisteredService)
 class RegisteredServiceAdmin(admin.ModelAdmin):
-    list_display = ("name", "user", "billing_type", "is_active", "updated_at")
-    list_filter = ("billing_type", "is_active")
-    search_fields = ("name", "user__username", "user__email")
+    list_display = (
+        "name",
+        "user",
+        "billing_type",
+        "is_active",
+        "registration_source",
+        "deactivation_source",
+        "final_receipt_month",
+        "updated_at",
+    )
+    list_filter = ("billing_type", "is_active", "registration_source", "deactivation_source", "final_receipt_month")
+    search_fields = ("name", "user__username", "user__email", "memo", "stop_note")
+    readonly_fields = ("created_at", "updated_at", "deactivated_at")
 
 
 @admin.register(Submission)
