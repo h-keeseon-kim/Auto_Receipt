@@ -325,8 +325,6 @@ class Submission(models.Model):
     def submit(self):
         if not self.receipts.available_files().exists():
             raise ValidationError("領収書ファイルを1件以上アップロードしてから提出してください。")
-        if self.receipts.filter(ai_period_check_status=ReceiptPeriodCheckStatus.MISMATCHED).exists():
-            raise ValidationError("提出月と異なる可能性がある領収書があります。正しい当月分の領収書を再度アップロードしてください。")
         self.status = SubmissionStatus.SUBMITTED
         self.submitted_at = timezone.now()
         self.save(update_fields=["status", "submitted_at", "updated_at"])

@@ -85,8 +85,8 @@ class ReceiptFlowTests(TestCase):
         self.assertEqual(result.suggested_filename, "260619_金_OpenAI_220_USD.pdf")
         self.assertEqual(result.payee, "OpenAI")
 
-    @mock.patch("receipts.views.generate_ai_receipt_filename")
-    def test_user_upload_gets_ai_generated_filename_and_extracted_amount(self, mocked_generate):
+    @mock.patch("receipts.ai_processing.generate_ai_receipt_filename")
+    def test_user_upload_saves_pending_ai_receipt_and_command_processes_later(self, mocked_generate):
         mocked_generate.return_value = ReceiptFilenameResult(
             status=ReceiptFilenameStatus.GENERATED,
             suggested_filename="260619_金_OpenAI_220_USD.pdf",
@@ -108,8 +108,18 @@ class ReceiptFlowTests(TestCase):
         )
 
         self.assertEqual(response.status_code, 302)
+        mocked_generate.assert_not_called()
         receipt = Receipt.objects.get()
         self.assertEqual(receipt.original_filename, "raw.pdf")
+        self.assertEqual(receipt.generated_filename, "")
+        self.assertEqual(receipt.display_filename, "raw.pdf")
+        self.assertEqual(receipt.ai_filename_status, ReceiptFilenameStatus.NOT_PROCESSED)
+        self.assertEqual(receipt.ai_period_check_status, ReceiptPeriodCheckStatus.NOT_CHECKED)
+        self.assertIsNone(receipt.amount)
+        self.assertIsNone(receipt.issued_on)
+
+        call_command("process_pending_receipts", "--limit", "10")
+        receipt.refresh_from_db()
         self.assertEqual(receipt.generated_filename, "260619_金_OpenAI_220_USD.pdf")
         self.assertEqual(receipt.display_filename, "260619_金_OpenAI_220_USD.pdf")
         self.assertEqual(receipt.ai_filename_status, ReceiptFilenameStatus.GENERATED)
@@ -120,9 +130,10 @@ class ReceiptFlowTests(TestCase):
         self.assertEqual(receipt.currency, "USD")
         self.assertEqual(receipt.ai_receipt_month, "2026-06")
         self.assertEqual(receipt.ai_period_check_status, ReceiptPeriodCheckStatus.MATCHED)
+        mocked_generate.assert_called_once()
 
-    @mock.patch("receipts.views.generate_ai_receipt_filename")
-    def test_user_upload_rejects_receipt_from_different_month(self, mocked_generate):
+    @mock.patch("receipts.ai_processing.generate_ai_receipt_filename")
+    def test_background_ai_period_mismatch_keeps_receipt_and_records_admin_memo(self, mocked_generate):
         mocked_generate.return_value = ReceiptFilenameResult(
             status=ReceiptFilenameStatus.GENERATED,
             suggested_filename="260531_日_OpenAI_220_USD.pdf",
@@ -145,11 +156,25 @@ class ReceiptFlowTests(TestCase):
         )
 
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(Receipt.objects.count(), 0)
-        self.assertContains(response, "提出月（2026年06月）ではなく 2026年05月")
-        self.assertContains(response, "再度アップロードしてください")
+        self.assertEqual(Receipt.objects.count(), 1)
+        self.assertNotContains(response, "提出月（2026年06月）ではなく 2026年05月")
+        self.assertContains(response, "AI確認は裏側で実行")
 
-    @mock.patch("receipts.views.generate_ai_receipt_filename")
+        call_command("process_pending_receipts", "--limit", "10")
+        receipt = Receipt.objects.get()
+        self.assertEqual(receipt.ai_period_check_status, ReceiptPeriodCheckStatus.MISMATCHED)
+        self.assertEqual(receipt.ai_receipt_month, "2026-05")
+        self.assertIn("ユーザーへ再アップロードを依頼してください", receipt.ai_period_check_memo)
+
+        admin = User.objects.create_superuser(username="admin", email="admin@example.com", password="admin-password-123")
+        self.client.logout()
+        self.client.login(username="admin", password="admin-password-123")
+        staff_response = self.client.get(reverse("history") + "?month=2026-06")
+        self.assertContains(staff_response, "提出月不一致")
+        self.assertContains(staff_response, "判定月: 2026-05")
+        self.assertContains(staff_response, "ユーザーへ再アップロード")
+
+    @mock.patch("receipts.ai_processing.generate_ai_receipt_filename")
     def test_ai_filename_review_memo_is_visible_to_staff_only(self, mocked_generate):
         mocked_generate.return_value = ReceiptFilenameResult(
             status=ReceiptFilenameStatus.NEEDS_REVIEW,
@@ -168,6 +193,11 @@ class ReceiptFlowTests(TestCase):
         )
 
         receipt = Receipt.objects.get()
+        self.assertEqual(receipt.ai_filename_status, ReceiptFilenameStatus.NOT_PROCESSED)
+        self.assertEqual(receipt.display_filename, "unclear.pdf")
+
+        call_command("process_pending_receipts", "--limit", "10")
+        receipt.refresh_from_db()
         self.assertEqual(receipt.ai_filename_status, ReceiptFilenameStatus.NEEDS_REVIEW)
         self.assertEqual(receipt.display_filename, "unclear.pdf")
 
@@ -183,8 +213,8 @@ class ReceiptFlowTests(TestCase):
         self.assertContains(staff_response, "カード下4桁が7210として確認できませんでした")
         self.assertContains(staff_response, "OpenAI")
 
-    @mock.patch("receipts.views.generate_ai_receipt_filename")
-    def test_user_replace_receipt_file_runs_ai_filename_generation_after_submit(self, mocked_generate):
+    @mock.patch("receipts.ai_processing.generate_ai_receipt_filename")
+    def test_user_replace_receipt_file_marks_ai_pending_and_command_processes_later(self, mocked_generate):
         mocked_generate.return_value = ReceiptFilenameResult(
             status=ReceiptFilenameStatus.GENERATED,
             suggested_filename="260619_金_OpenAI_220_USD.pdf",
@@ -207,6 +237,13 @@ class ReceiptFlowTests(TestCase):
             service_name_snapshot=self.service.name,
             billing_type_snapshot=self.service.billing_type,
             original_filename="wrong.pdf",
+            generated_filename="old-ai.pdf",
+            ai_filename_status=ReceiptFilenameStatus.GENERATED,
+            ai_period_check_status=ReceiptPeriodCheckStatus.MATCHED,
+            ai_receipt_month="2026-06",
+            amount=Decimal("100.00"),
+            currency="USD",
+            issued_on=date(2026, 6, 1),
             file=SimpleUploadedFile("wrong.pdf", b"%PDF-1.4 wrong", content_type="application/pdf"),
             expires_at=timezone.now() + timedelta(days=30),
         )
@@ -220,15 +257,24 @@ class ReceiptFlowTests(TestCase):
         )
 
         self.assertRedirects(response, reverse("submission_detail", args=[submission.pk]))
+        mocked_generate.assert_not_called()
         receipt.refresh_from_db()
         self.assertEqual(receipt.original_filename, "correct.pdf")
+        self.assertEqual(receipt.generated_filename, "")
+        self.assertEqual(receipt.display_filename, "correct.pdf")
+        self.assertEqual(receipt.ai_filename_status, ReceiptFilenameStatus.NOT_PROCESSED)
+        self.assertEqual(receipt.ai_period_check_status, ReceiptPeriodCheckStatus.NOT_CHECKED)
+        self.assertIsNone(receipt.amount)
+        self.assertIsNone(receipt.issued_on)
+
+        call_command("process_pending_receipts", "--limit", "10")
+        receipt.refresh_from_db()
         self.assertEqual(receipt.generated_filename, "260619_金_OpenAI_220_USD.pdf")
-        self.assertEqual(receipt.display_filename, "260619_金_OpenAI_220_USD.pdf")
         self.assertEqual(receipt.ai_period_check_status, ReceiptPeriodCheckStatus.MATCHED)
         mocked_generate.assert_called_once()
 
-    @mock.patch("receipts.views.generate_ai_receipt_filename")
-    def test_user_replace_receipt_file_rejects_different_month_and_keeps_old_file(self, mocked_generate):
+    @mock.patch("receipts.ai_processing.generate_ai_receipt_filename")
+    def test_user_replace_receipt_file_keeps_new_file_even_if_background_detects_different_month(self, mocked_generate):
         mocked_generate.return_value = ReceiptFilenameResult(
             status=ReceiptFilenameStatus.GENERATED,
             suggested_filename="260531_日_OpenAI_220_USD.pdf",
@@ -264,19 +310,23 @@ class ReceiptFlowTests(TestCase):
                 "file": SimpleUploadedFile("wrong-may.pdf", b"%PDF-1.4 may", content_type="application/pdf"),
                 "next": reverse("submission_detail", args=[submission.pk]),
             },
-            follow=True,
         )
 
-        self.assertEqual(response.status_code, 200)
-        self.assertContains(response, "提出月（2026年06月）ではなく 2026年05月")
+        self.assertRedirects(response, reverse("submission_detail", args=[submission.pk]))
         receipt.refresh_from_db()
-        self.assertEqual(receipt.original_filename, "correct-june.pdf")
-        self.assertEqual(receipt.file.name, old_file_name)
-        self.assertEqual(receipt.ai_period_check_status, ReceiptPeriodCheckStatus.MATCHED)
+        self.assertEqual(receipt.original_filename, "wrong-may.pdf")
+        self.assertNotEqual(receipt.file.name, old_file_name)
+        self.assertEqual(receipt.ai_period_check_status, ReceiptPeriodCheckStatus.NOT_CHECKED)
         with receipt.file.open("rb") as fp:
-            self.assertEqual(fp.read(), b"%PDF-1.4 june")
+            self.assertEqual(fp.read(), b"%PDF-1.4 may")
 
-    def test_submission_submit_blocks_persisted_period_mismatch(self):
+        call_command("process_pending_receipts", "--limit", "10")
+        receipt.refresh_from_db()
+        self.assertEqual(receipt.ai_period_check_status, ReceiptPeriodCheckStatus.MISMATCHED)
+        self.assertEqual(receipt.ai_receipt_month, "2026-05")
+        self.assertIn("ユーザーへ再アップロードを依頼してください", receipt.ai_period_check_memo)
+
+    def test_submission_submit_allows_persisted_period_mismatch_for_staff_follow_up(self):
         submission = Submission.objects.create(user=self.user, period_month=date(2026, 6, 1))
         Receipt.objects.create(
             submission=submission,
@@ -290,8 +340,9 @@ class ReceiptFlowTests(TestCase):
             ai_receipt_month="2026-05",
         )
 
-        with self.assertRaises(ValidationError):
-            submission.submit()
+        submission.submit()
+        submission.refresh_from_db()
+        self.assertTrue(submission.is_submitted)
 
     def test_user_can_upload_and_submit(self):
         self.client.login(username="alice", password="password123")
