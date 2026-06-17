@@ -14,7 +14,7 @@ from django.test import TestCase, override_settings
 from django.urls import reverse
 from django.utils import timezone
 
-from .ai_filename import ReceiptFilenameResult, build_result_from_ai_payload
+from .ai_filename import ReceiptFilenameResult, build_result_from_ai_payload, filename_user_part_from_user
 from .forms import ReceiptUploadForm
 from .models import (
     BillingType,
@@ -83,11 +83,36 @@ class ReceiptFlowTests(TestCase):
                 "admin_memo": "",
             },
             original_filename="chatgpt-subscription.pdf",
+            user_filename_part="alice",
         )
 
         self.assertEqual(result.status, ReceiptFilenameStatus.GENERATED)
-        self.assertEqual(result.suggested_filename, "260619_金_OpenAI_220_USD.pdf")
+        self.assertEqual(result.suggested_filename, "260619_alice_OpenAI_220_USD.pdf")
         self.assertEqual(result.payee, "OpenAI")
+
+
+    def test_ai_filename_format_uses_user_email_local_part_and_company_name(self):
+        user = User.objects.create_user(username="test@hakuhodo.co.jp", email="test@hakuhodo.co.jp", password="password123")
+        result = build_result_from_ai_payload(
+            {
+                "card_last4": "7210",
+                "card_last4_matches_target": True,
+                "payee": "Anthropic, PBC",
+                "service_payee_related": True,
+                "service_payee_relation_reason": "Claudeの請求元として関連あり。",
+                "payment_date": "2026-06-02",
+                "amount": "220.00",
+                "currency": "USD",
+                "confidence": 0.98,
+                "can_create_filename": True,
+                "reason": "",
+            },
+            original_filename="Receipt-2990-1089-4605.pdf",
+            user_filename_part=filename_user_part_from_user(user),
+        )
+
+        self.assertEqual(result.status, ReceiptFilenameStatus.GENERATED)
+        self.assertEqual(result.suggested_filename, "260602_test_Anthropic_220_USD.pdf")
 
     def test_ai_payload_marks_unrelated_service_payee_for_review(self):
         result = build_result_from_ai_payload(
@@ -117,7 +142,7 @@ class ReceiptFlowTests(TestCase):
     def test_user_upload_saves_pending_ai_receipt_and_command_processes_later(self, mocked_generate):
         mocked_generate.return_value = ReceiptFilenameResult(
             status=ReceiptFilenameStatus.GENERATED,
-            suggested_filename="260619_金_OpenAI_220_USD.pdf",
+            suggested_filename="260619_alice_OpenAI_220_USD.pdf",
             payee="OpenAI",
             payment_date=date(2026, 6, 19),
             amount=Decimal("220.00"),
@@ -148,8 +173,8 @@ class ReceiptFlowTests(TestCase):
 
         call_command("process_pending_receipts", "--limit", "10")
         receipt.refresh_from_db()
-        self.assertEqual(receipt.generated_filename, "260619_金_OpenAI_220_USD.pdf")
-        self.assertEqual(receipt.display_filename, "260619_金_OpenAI_220_USD.pdf")
+        self.assertEqual(receipt.generated_filename, "260619_alice_OpenAI_220_USD.pdf")
+        self.assertEqual(receipt.display_filename, "260619_alice_OpenAI_220_USD.pdf")
         self.assertEqual(receipt.ai_filename_status, ReceiptFilenameStatus.GENERATED)
         self.assertEqual(receipt.ai_extracted_payee, "OpenAI")
         self.assertEqual(receipt.ai_extracted_card_last4, "7210")
@@ -164,7 +189,7 @@ class ReceiptFlowTests(TestCase):
     def test_background_ai_period_mismatch_keeps_receipt_and_records_admin_memo(self, mocked_generate):
         mocked_generate.return_value = ReceiptFilenameResult(
             status=ReceiptFilenameStatus.GENERATED,
-            suggested_filename="260531_日_OpenAI_220_USD.pdf",
+            suggested_filename="260531_alice_OpenAI_220_USD.pdf",
             payee="OpenAI",
             payment_date=date(2026, 5, 31),
             amount=Decimal("220.00"),
@@ -332,7 +357,7 @@ class ReceiptFlowTests(TestCase):
     def test_user_replace_receipt_file_marks_ai_pending_and_command_processes_later(self, mocked_generate):
         mocked_generate.return_value = ReceiptFilenameResult(
             status=ReceiptFilenameStatus.GENERATED,
-            suggested_filename="260619_金_OpenAI_220_USD.pdf",
+            suggested_filename="260619_alice_OpenAI_220_USD.pdf",
             payee="OpenAI",
             payment_date=date(2026, 6, 19),
             amount=Decimal("220.00"),
@@ -384,7 +409,7 @@ class ReceiptFlowTests(TestCase):
 
         call_command("process_pending_receipts", "--limit", "10")
         receipt.refresh_from_db()
-        self.assertEqual(receipt.generated_filename, "260619_金_OpenAI_220_USD.pdf")
+        self.assertEqual(receipt.generated_filename, "260619_alice_OpenAI_220_USD.pdf")
         self.assertEqual(receipt.ai_period_check_status, ReceiptPeriodCheckStatus.MATCHED)
         mocked_generate.assert_called_once()
 
@@ -392,7 +417,7 @@ class ReceiptFlowTests(TestCase):
     def test_user_replace_receipt_file_keeps_new_file_even_if_background_detects_different_month(self, mocked_generate):
         mocked_generate.return_value = ReceiptFilenameResult(
             status=ReceiptFilenameStatus.GENERATED,
-            suggested_filename="260531_日_OpenAI_220_USD.pdf",
+            suggested_filename="260531_alice_OpenAI_220_USD.pdf",
             payee="OpenAI",
             payment_date=date(2026, 5, 31),
             amount=Decimal("220.00"),
@@ -1005,7 +1030,7 @@ class StaffServiceAssignmentTests(TestCase):
             service_name_snapshot=service.name,
             billing_type_snapshot=service.billing_type,
             original_filename="done.pdf",
-            generated_filename="260619_金_OpenAI_220_USD.pdf",
+            generated_filename="260619_alice_OpenAI_220_USD.pdf",
             ai_filename_status=ReceiptFilenameStatus.GENERATED,
             ai_filename_checked_at=timezone.now(),
             file=SimpleUploadedFile("done.pdf", b"%PDF-1.4 done", content_type="application/pdf"),

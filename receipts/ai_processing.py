@@ -10,7 +10,7 @@ from django.db import close_old_connections, transaction
 from django.db.models import QuerySet
 from django.utils import timezone
 
-from .ai_filename import generate_ai_receipt_filename, target_card_last4
+from .ai_filename import filename_user_part_from_user, generate_ai_receipt_filename, target_card_last4
 from .models import Receipt, ReceiptFilenameStatus, ReceiptPeriodCheckStatus
 
 logger = logging.getLogger(__name__)
@@ -199,6 +199,7 @@ def apply_ai_filename_to_receipt(receipt: Receipt):
         original_filename=receipt.original_filename or Path(receipt.file.name).name,
         content_type=receipt.content_type,
         service_display_name=receipt.service_display_name_snapshot,
+        user_filename_part=filename_user_part_from_user(receipt.submission.user),
     )
 
     receipt.generated_filename = result.suggested_filename[:255] if result.suggested_filename else ""

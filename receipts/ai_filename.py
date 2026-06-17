@@ -15,7 +15,6 @@ from django.conf import settings
 
 from .models import ReceiptFilenameStatus
 
-JP_WEEKDAYS = ["月", "火", "水", "木", "金", "土", "日"]
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp"}
 
 
@@ -57,6 +56,7 @@ def generate_ai_receipt_filename(
     original_filename: str,
     content_type: str,
     service_display_name: str,
+    user_filename_part: str = "",
 ) -> ReceiptFilenameResult:
     """領収書ファイルからファイル名候補を作成する。
 
@@ -105,6 +105,7 @@ def generate_ai_receipt_filename(
                         original_filename=original_filename,
                         content_type=content_type,
                         service_display_name=service_display_name,
+                        user_filename_part=user_filename_part,
                     ),
                 },
             ],
@@ -112,7 +113,11 @@ def generate_ai_receipt_filename(
             max_output_tokens=900,
         )
         payload = json.loads(extract_response_text(response))
-        return build_result_from_payload(payload, original_filename=original_filename)
+        return build_result_from_payload(
+            payload,
+            original_filename=original_filename,
+            user_filename_part=user_filename_part,
+        )
     except Exception as exc:
         return ReceiptFilenameResult(
             status=ReceiptFilenameStatus.FAILED,
@@ -120,7 +125,14 @@ def generate_ai_receipt_filename(
         )
 
 
-def build_openai_content(*, file_bytes: bytes, original_filename: str, content_type: str, service_display_name: str) -> list[dict[str, Any]]:
+def build_openai_content(
+    *,
+    file_bytes: bytes,
+    original_filename: str,
+    content_type: str,
+    service_display_name: str,
+    user_filename_part: str = "",
+) -> list[dict[str, Any]]:
     target = target_card_last4()
     return [
         build_file_input_item(file_bytes=file_bytes, filename=original_filename, content_type=content_type),
@@ -128,6 +140,7 @@ def build_openai_content(*, file_bytes: bytes, original_filename: str, content_t
             "type": "input_text",
             "text": (
                 f"対象の登録サービス名: {service_display_name}\n"
+                f"ファイル名に使うユーザー名部分: {sanitize_filename_part(user_filename_part, fallback='user')}\n"
                 f"元ファイル名: {original_filename}\n"
                 f"必ず次の順番で確認してください。\n"
                 f"1. 領収書内の支払カードまたは支払方法に表示されるカード末尾4桁が {target} で終わるか確認する。"
@@ -141,7 +154,9 @@ def build_openai_content(*, file_bytes: bytes, original_filename: str, content_t
                 f"一方で ChatGPT の登録サービスなのに Anthropic の領収書、Claude の登録サービスなのに OpenAI の領収書のような組み合わせは関連なしとする。"
                 f"判断が曖昧、または払先やサービスとの関係を確認できない場合は service_payee_related を null にする。\n"
                 f"4. 支払日または領収書日付、合計金額、通貨を確認する。\n"
-                f"5. can_create_filename は、カード末尾が {target} と確認でき、払先・日付・金額・通貨のすべてを高い確度で読め、"
+                f"5. ファイル名はアプリ側で YYMMDD_ユーザー名_企業名_金額_通貨 の形式に整形する。"
+                f"企業名は登録サービス名ではなく、領収書上の払先から Inc. / LLC / PBC などの法人格表記を除いた名称を使う。\n"
+                f"6. can_create_filename は、カード末尾が {target} と確認でき、払先・日付・金額・通貨のすべてを高い確度で読め、"
                 f"さらに登録サービス名と払先が関連すると確認できる場合だけ true にする。"
                 f"作成が難しい場合は false にし、reason に管理者が確認すべき理由を日本語で短く書く。"
             ),
@@ -228,7 +243,7 @@ def extract_response_text(response: Any) -> str:
     raise ValueError("OpenAI response did not contain output_text")
 
 
-def build_result_from_payload(payload: dict[str, Any], *, original_filename: str) -> ReceiptFilenameResult:
+def build_result_from_payload(payload: dict[str, Any], *, original_filename: str, user_filename_part: str = "") -> ReceiptFilenameResult:
     target = target_card_last4()
     card_last4 = normalize_card_last4(payload.get("card_last4"))
     card_matches = payload.get("card_last4_matches_target")
@@ -281,6 +296,7 @@ def build_result_from_payload(payload: dict[str, Any], *, original_filename: str
     if payee and payment_date is not None and amount is not None and currency:
         suggested_filename = build_receipt_filename(
             payment_date=payment_date,
+            user_filename_part=user_filename_part,
             payee=payee,
             amount=amount,
             currency=currency,
@@ -318,22 +334,45 @@ def build_result_from_payload(payload: dict[str, Any], *, original_filename: str
     )
 
 
-def build_result_from_ai_payload(payload: dict[str, Any], *, original_filename: str) -> ReceiptFilenameResult:
+def build_result_from_ai_payload(payload: dict[str, Any], *, original_filename: str, user_filename_part: str = "") -> ReceiptFilenameResult:
     """旧テスト・旧実装名との互換用。"""
 
-    return build_result_from_payload(payload, original_filename=original_filename)
+    return build_result_from_payload(payload, original_filename=original_filename, user_filename_part=user_filename_part)
 
 
-def build_receipt_filename(*, payment_date: date, payee: str, amount: Decimal, currency: str, extension: str) -> str:
+def build_receipt_filename(
+    *,
+    payment_date: date,
+    user_filename_part: str,
+    payee: str,
+    amount: Decimal,
+    currency: str,
+    extension: str,
+) -> str:
     return "_".join(
         [
             payment_date.strftime("%y%m%d"),
-            JP_WEEKDAYS[payment_date.weekday()],
-            sanitize_filename_part(payee),
+            sanitize_filename_part(user_filename_part, fallback="user"),
+            sanitize_company_name_for_filename(payee),
             format_amount_for_filename(amount),
             sanitize_filename_part(currency.upper(), fallback="CUR"),
         ]
     ) + (extension.lower() or ".pdf")
+
+
+def filename_user_part_from_user(user: Any) -> str:
+    """ファイル名に入れるユーザー識別子を作る。
+
+    ユーザー名はメール形式で運用するため、Djangoの姓が未設定の場合はメールアドレスの
+    @ 前を使う。例: test@hakuhodo.co.jp -> test。
+    """
+
+    last_name = sanitize_filename_part(getattr(user, "last_name", ""), fallback="")
+    if last_name:
+        return last_name
+    email = getattr(user, "email", "") or getattr(user, "username", "") or ""
+    local_part = str(email).split("@", 1)[0]
+    return sanitize_filename_part(local_part, fallback="user")
 
 
 def normalize_confidence(value: Any) -> float:
@@ -360,6 +399,13 @@ def normalize_payee(value: str) -> str:
     value = re.sub(r"\s+", " ", value)
     value = re.sub(r"^(merchant|payee|seller|vendor|billed by|paid to)\s*[:：]\s*", "", value, flags=re.I)
     return value[:160]
+
+
+def sanitize_company_name_for_filename(value: str, fallback: str = "Unknown") -> str:
+    value = unicodedata.normalize("NFKC", value or "").strip()
+    value = re.sub(r"\b(PBC|INCORPORATED|INC|LLC|L\.?L\.?C|LTD|LIMITED|CORPORATION|CORP|COMPANY|CO|GMBH|S\.?A\.?|K\.?K\.?|G\.?K\.?)\b\.?", "", value, flags=re.I)
+    value = re.sub(r"[,、，]+", " ", value)
+    return sanitize_filename_part(value, fallback=fallback)
 
 
 def sanitize_filename_part(value: str, fallback: str = "Unknown") -> str:
