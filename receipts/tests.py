@@ -1355,6 +1355,37 @@ class TutorialTests(TestCase):
         self.assertContains(response, 'data-auto-start="false"')
         self.assertContains(response, "data-tutorial-open")
 
+
+    def test_tutorial_has_page_routing_data_and_service_stop_target(self):
+        user = User.objects.create_user(username="stop-tutorial@example.com", email="stop-tutorial@example.com", password="password123")
+        catalog = ServiceCatalog.objects.create(name="ChatGPT", billing_type=BillingType.SUBSCRIPTION)
+        RegisteredService.objects.create(
+            user=user,
+            catalog_service=catalog,
+            name=catalog.name,
+            billing_type=catalog.billing_type,
+        )
+        self.client.login(username="stop-tutorial@example.com", password="password123")
+
+        response = self.client.get(reverse("user_services"))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, 'data-current-url-name="user_services"')
+        self.assertContains(response, f'data-user-services-url="{reverse("user_services")}"')
+        self.assertContains(response, f'data-upload-url="{reverse("dashboard")}"')
+        self.assertContains(response, f'data-history-url="{reverse("history")}"')
+        self.assertContains(response, 'data-tutorial-target="service-stop-button"')
+
+    def test_tutorial_script_forces_page_steps_and_returns_to_start_page(self):
+        script = Path("static/js/tutorial.js").read_text()
+
+        self.assertIn('pageName: "user_services"', script)
+        self.assertIn('pageName: "dashboard"', script)
+        self.assertIn('pageName: "history"', script)
+        self.assertIn("使わなくなったサービスを停止します", script)
+        self.assertIn("returnUrl", script)
+        self.assertIn("window.location.assign(url)", script)
+
     def test_staff_gets_staff_tutorial_steps(self):
         admin = User.objects.create_superuser(username="admin", email="admin@example.com", password="admin-password-123")
         self.client.login(username="admin", password="admin-password-123")

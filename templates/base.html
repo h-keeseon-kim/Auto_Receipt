@@ -7,7 +7,7 @@
     <title>{% block title %}{{ app_name }}{% endblock %}</title>
     <link rel="stylesheet" href="{% static 'css/app.css' %}">
 </head>
-<body data-tutorial-role="{% if user.is_staff %}staff{% else %}user{% endif %}">
+<body data-tutorial-role="{% if user.is_staff %}staff{% else %}user{% endif %}" data-current-url-name="{{ request.resolver_match.url_name|default:'' }}">
     <header class="topbar">
         <a class="brand" href="{% url 'home' %}">{{ app_name }}</a>
         <nav class="nav">
@@ -46,7 +46,7 @@
     </main>
 
     {% if user.is_authenticated and tutorial_available %}
-        <div class="tutorial-backdrop" data-tutorial-root data-auto-start="{% if tutorial_auto_start %}true{% else %}false{% endif %}" data-complete-url="{{ tutorial_complete_url }}" hidden>
+        <div class="tutorial-backdrop" data-tutorial-root data-auto-start="{% if tutorial_auto_start %}true{% else %}false{% endif %}" data-complete-url="{{ tutorial_complete_url }}" data-user-services-url="{% url 'user_services' %}" data-upload-url="{% url 'dashboard' %}" data-history-url="{% url 'history' %}" data-staff-services-url="{% url 'staff_services' %}" data-staff-user-create-url="{% url 'staff_user_create' %}" hidden>
             <form hidden>{% csrf_token %}</form>
             <section class="tutorial-card" role="dialog" aria-modal="true" aria-labelledby="tutorial-title" aria-describedby="tutorial-body" tabindex="-1">
                 <button type="button" class="tutorial-close" data-tutorial-close aria-label="チュートリアルを閉じる">×</button>

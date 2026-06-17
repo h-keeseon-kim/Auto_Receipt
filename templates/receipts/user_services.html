@@ -35,7 +35,7 @@
                         <td><span class="badge {{ service.source_badge_class }}">{{ service.get_registration_source_display }}</span></td>
                         <td>{{ service.memo|default:"-"|truncatechars:80 }}</td>
                         <td class="actions">
-                            <a class="button small danger-outline" href="{% url 'user_service_stop' service.pk %}">利用停止</a>
+                            <a class="button small danger-outline" href="{% url 'user_service_stop' service.pk %}" data-tutorial-target="service-stop-button">利用停止</a>
                         </td>
                     </tr>
                 {% empty %}
