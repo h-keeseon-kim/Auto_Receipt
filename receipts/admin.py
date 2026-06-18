@@ -1,6 +1,6 @@
 from django.contrib import admin
 
-from .models import Receipt, ReceiptResubmissionRequest, RegisteredService, ServiceCatalog, Submission, UserProfile
+from .models import EmailDeliveryLog, Receipt, ReceiptResubmissionRequest, RegisteredService, ServiceCatalog, Submission, UserProfile
 
 
 class ReceiptInline(admin.TabularInline):
@@ -170,3 +170,11 @@ class ReceiptResubmissionRequestAdmin(admin.ModelAdmin):
     list_filter = ("status", "period_month", "billing_type_snapshot", "created_at", "resolved_at")
     search_fields = ("user__username", "user__email", "service_name_snapshot", "original_filename", "display_filename", "message")
     readonly_fields = ("created_at", "resolved_at")
+
+
+@admin.register(EmailDeliveryLog)
+class EmailDeliveryLogAdmin(admin.ModelAdmin):
+    list_display = ("created_at", "email_type", "target_month", "to_email", "subject", "status", "sent_at", "created_by")
+    list_filter = ("email_type", "status", "target_month", "created_at")
+    search_fields = ("to_email", "subject", "message", "error", "idempotency_key", "user__username", "user__email")
+    readonly_fields = ("created_at", "sent_at", "idempotency_key", "error")

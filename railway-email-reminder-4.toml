@@ -1,0 +1,9 @@
+# 毎月4日 09:00 JST（00:00 UTC）に全一般ユーザーへアップロード依頼を送るCronサービス例です。
+[build]
+builder = "DOCKERFILE"
+dockerfilePath = "Dockerfile"
+
+[deploy]
+startCommand = "python manage.py send_receipt_reminders --kind initial"
+cronSchedule = "0 0 4 * *"
+restartPolicyType = "NEVER"

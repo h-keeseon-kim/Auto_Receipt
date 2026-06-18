@@ -15,6 +15,18 @@ DEBUG = os.environ.get("DEBUG", "True").lower() in {"1", "true", "yes", "on"}
 def csv_env(name: str, default: str = "") -> list[str]:
     return [value.strip() for value in os.environ.get(name, default).split(",") if value.strip()]
 
+
+def bool_env(name: str, default: bool = False) -> bool:
+    fallback = "true" if default else "false"
+    return os.environ.get(name, fallback).lower() in {"1", "true", "yes", "on"}
+
+
+def int_env(name: str, default: int) -> int:
+    try:
+        return int(os.environ.get(name, str(default)))
+    except (TypeError, ValueError):
+        return default
+
 ALLOWED_HOSTS = csv_env("ALLOWED_HOSTS", "localhost,127.0.0.1,testserver")
 RAILWAY_PUBLIC_DOMAIN = os.environ.get("RAILWAY_PUBLIC_DOMAIN", "").strip()
 if RAILWAY_PUBLIC_DOMAIN and RAILWAY_PUBLIC_DOMAIN not in ALLOWED_HOSTS:
@@ -132,21 +144,46 @@ FILE_UPLOAD_MAX_MEMORY_SIZE = MAX_UPLOAD_SIZE
 DATA_UPLOAD_MAX_MEMORY_SIZE = MAX_UPLOAD_SIZE + 1024 * 1024
 
 RECEIPT_RETENTION_MONTHS = min(max(int(os.environ.get("RECEIPT_RETENTION_MONTHS", "3")), 1), 3)
-ALLOW_SIGNUP = os.environ.get("ALLOW_SIGNUP", "True").lower() in {"1", "true", "yes", "on"}
+ALLOW_SIGNUP = bool_env("ALLOW_SIGNUP", True)
 
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
 OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "")
-RECEIPT_AI_FILENAME_ENABLED = os.environ.get("RECEIPT_AI_FILENAME_ENABLED", "True").lower() in {"1", "true", "yes", "on"}
+RECEIPT_AI_FILENAME_ENABLED = bool_env("RECEIPT_AI_FILENAME_ENABLED", True)
 RECEIPT_CARD_LAST4 = os.environ.get("RECEIPT_CARD_LAST4", "7210")
 try:
     RECEIPT_AI_TIMEOUT = float(os.environ.get("RECEIPT_AI_TIMEOUT", "30"))
 except ValueError:
     RECEIPT_AI_TIMEOUT = 30.0
 
+# SMTP / email settings. Resend SMTP uses username "resend" and an API key as the password.
+SMTP_HOST = os.environ.get("SMTP_HOST", "")
+SMTP_PORT = int_env("SMTP_PORT", 587)
+SMTP_USERNAME = os.environ.get("SMTP_USERNAME", "")
+SMTP_PASSWORD = os.environ.get("SMTP_PASSWORD", "")
+SMTP_FROM = os.environ.get("SMTP_FROM", "noreply@example.com")
+SMTP_STARTTLS = bool_env("SMTP_STARTTLS", True)
+SMTP_SSL = bool_env("SMTP_SSL", False)
+SMTP_TIMEOUT_SECONDS = int_env("SMTP_TIMEOUT_SECONDS", 12)
+APP_BASE_URL = os.environ.get("APP_BASE_URL", "").rstrip("/")
+if not APP_BASE_URL and RAILWAY_PUBLIC_DOMAIN:
+    APP_BASE_URL = f"https://{RAILWAY_PUBLIC_DOMAIN}"
+
+EMAIL_BACKEND = os.environ.get("EMAIL_BACKEND", "django.core.mail.backends.smtp.EmailBackend")
+EMAIL_HOST = SMTP_HOST
+EMAIL_PORT = SMTP_PORT
+EMAIL_HOST_USER = SMTP_USERNAME
+EMAIL_HOST_PASSWORD = SMTP_PASSWORD
+EMAIL_USE_TLS = SMTP_STARTTLS
+EMAIL_USE_SSL = SMTP_SSL
+EMAIL_TIMEOUT = SMTP_TIMEOUT_SECONDS
+DEFAULT_FROM_EMAIL = SMTP_FROM
+SERVER_EMAIL = SMTP_FROM
+RECEIPT_REMINDER_TARGET_MONTH_OFFSET = int_env("RECEIPT_REMINDER_TARGET_MONTH_OFFSET", 0)
+
 SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
 SECURE_REDIRECT_EXEMPT = [r"^health/$"]
 if not DEBUG:
-    SECURE_SSL_REDIRECT = os.environ.get("SECURE_SSL_REDIRECT", "False").lower() in {"1", "true", "yes", "on"}
+    SECURE_SSL_REDIRECT = bool_env("SECURE_SSL_REDIRECT", False)
     SESSION_COOKIE_SECURE = True
     CSRF_COOKIE_SECURE = True
     SESSION_COOKIE_HTTPONLY = True

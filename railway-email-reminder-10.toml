@@ -1,0 +1,9 @@
+# 毎月10日 09:00 JST（01:00 UTC）に未提出ユーザーへ重要リマインダーを送るCronサービス例です。
+[build]
+builder = "DOCKERFILE"
+dockerfilePath = "Dockerfile"
+
+[deploy]
+startCommand = "python manage.py send_receipt_reminders --kind urgent"
+cronSchedule = "0 0 10 * *"
+restartPolicyType = "NEVER"

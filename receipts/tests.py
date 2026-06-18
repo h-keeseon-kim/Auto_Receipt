@@ -7,6 +7,7 @@ from unittest import mock
 from pathlib import Path
 
 from django.contrib.auth.models import User
+from django.core import mail
 from django.core.exceptions import ValidationError
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.core.management import call_command
@@ -18,6 +19,9 @@ from .ai_filename import ReceiptFilenameResult, build_result_from_ai_payload, fi
 from .forms import ReceiptUploadForm
 from .models import (
     BillingType,
+    EmailDeliveryLog,
+    EmailDeliveryStatus,
+    EmailType,
     Receipt,
     ReceiptFilenameStatus,
     ReceiptPeriodCheckStatus,
@@ -1538,3 +1542,66 @@ class TutorialTests(TestCase):
         self.assertEqual(response.status_code, 405)
         user.profile.refresh_from_db()
         self.assertIsNone(user.profile.tutorial_completed_at)
+
+
+@override_settings(
+    PASSWORD_HASHERS=FAST_PASSWORD_HASHERS,
+    EMAIL_BACKEND="django.core.mail.backends.locmem.EmailBackend",
+    DEFAULT_FROM_EMAIL="noreply@mkt-dev3.info",
+    APP_BASE_URL="https://receipthub.example.com",
+)
+class EmailReminderTests(TestCase):
+    def setUp(self):
+        mail.outbox = []
+        self.user_a = User.objects.create_user(username="a@example.com", email="a@example.com", password="password123")
+        self.user_b = User.objects.create_user(username="b@example.com", email="b@example.com", password="password123")
+        self.user_c = User.objects.create_user(username="c@example.com", email="c@example.com", password="password123")
+        self.admin = User.objects.create_superuser(username="admin", email="admin@example.com", password="admin-password-123")
+
+    def test_initial_reminder_sends_to_all_general_users_once(self):
+        call_command("send_receipt_reminders", "--kind", "initial", "--month", "2026-06")
+
+        self.assertEqual(len(mail.outbox), 3)
+        self.assertEqual(EmailDeliveryLog.objects.filter(email_type=EmailType.REMINDER_INITIAL, status=EmailDeliveryStatus.SENT).count(), 3)
+        self.assertIn("2026年06月分の領収書", mail.outbox[0].body)
+        self.assertIn("https://receipthub.example.com/dashboard/?month=2026-06", mail.outbox[0].body)
+
+        call_command("send_receipt_reminders", "--kind", "initial", "--month", "2026-06")
+
+        self.assertEqual(len(mail.outbox), 3)
+        self.assertEqual(EmailDeliveryLog.objects.filter(email_type=EmailType.REMINDER_INITIAL).count(), 3)
+
+    def test_urgent_reminder_sends_only_to_users_without_submitted_submission(self):
+        Submission.objects.create(
+            user=self.user_b,
+            period_month=date(2026, 6, 1),
+            status=SubmissionStatus.SUBMITTED,
+            submitted_at=timezone.now(),
+        )
+        Submission.objects.create(user=self.user_c, period_month=date(2026, 6, 1), status=SubmissionStatus.DRAFT)
+
+        call_command("send_receipt_reminders", "--kind", "urgent", "--month", "2026-06")
+
+        self.assertEqual(len(mail.outbox), 2)
+        recipients = {message.to[0] for message in mail.outbox}
+        self.assertEqual(recipients, {"a@example.com", "c@example.com"})
+        self.assertTrue(all(message.subject.startswith("【重要】") for message in mail.outbox))
+
+    def test_staff_email_test_page_sends_test_email_and_logs_result(self):
+        self.client.login(username="admin", password="admin-password-123")
+
+        response = self.client.post(
+            reverse("staff_email"),
+            {
+                "to_email": "audit@example.com",
+                "subject": "ReceiptHub テスト",
+                "body": "テスト本文です。",
+            },
+        )
+
+        self.assertRedirects(response, reverse("staff_email"))
+        self.assertEqual(len(mail.outbox), 1)
+        self.assertEqual(mail.outbox[0].to, ["audit@example.com"])
+        log = EmailDeliveryLog.objects.get(email_type=EmailType.TEST)
+        self.assertEqual(log.to_email, "audit@example.com")
+        self.assertEqual(log.status, EmailDeliveryStatus.SENT)

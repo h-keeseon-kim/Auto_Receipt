@@ -487,3 +487,24 @@ class StyledPasswordChangeForm(PasswordChangeForm):
     def __init__(self, user, *args, **kwargs):
         super().__init__(user, *args, **kwargs)
         apply_design_classes(self)
+
+
+class StaffEmailTestForm(forms.Form):
+    to_email = forms.EmailField(
+        label="テスト送信先メールアドレス",
+        widget=forms.EmailInput(attrs={"placeholder": "user@example.com"}),
+    )
+    subject = forms.CharField(
+        label="件名",
+        max_length=255,
+        initial="ReceiptHub メール送信テスト",
+    )
+    body = forms.CharField(
+        label="本文",
+        widget=forms.Textarea(attrs={"rows": 6}),
+        initial="ReceiptHub からのテストメールです。SMTP設定が正しく動作しています。",
+    )
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        apply_design_classes(self)

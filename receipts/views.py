@@ -28,6 +28,7 @@ from django.utils.text import slugify
 from django.views.decorators.http import require_POST
 
 from .ai_processing import claim_pending_receipts_for_ai_processing, reset_ai_processing_state, start_background_ai_processing
+from .emailing import send_test_email
 from .forms import (
     MonthSelectForm,
     ReceiptFileReplaceForm,
@@ -36,6 +37,7 @@ from .forms import (
     ServiceCatalogForm,
     StaffServiceForm,
     StaffUserCreateForm,
+    StaffEmailTestForm,
     StyledPasswordChangeForm,
     UserServiceRegistrationForm,
     UserServiceStopForm,
@@ -43,6 +45,7 @@ from .forms import (
 )
 from .models import (
     Receipt,
+    EmailDeliveryLog,
     ReceiptFilenameStatus,
     ReceiptPeriodCheckStatus,
     ReceiptResubmissionRequest,
@@ -973,6 +976,51 @@ def staff_dashboard(request):
     if query_string:
         url = f"{url}?{query_string}"
     return redirect(url)
+
+
+@staff_member_required
+def staff_email(request):
+    if request.method == "POST":
+        form = StaffEmailTestForm(request.POST)
+        if form.is_valid():
+            log, sent = send_test_email(
+                to_email=form.cleaned_data["to_email"],
+                subject=form.cleaned_data["subject"],
+                body=form.cleaned_data["body"],
+                created_by=request.user,
+            )
+            if sent:
+                messages.success(request, f"テストメールを {log.to_email} へ送信しました。")
+            else:
+                messages.error(request, f"テストメール送信に失敗しました: {log.error or '詳細不明'}")
+            return redirect("staff_email")
+    else:
+        initial = {}
+        if request.user.email:
+            initial["to_email"] = request.user.email
+        form = StaffEmailTestForm(initial=initial)
+
+    recent_logs = EmailDeliveryLog.objects.select_related("user", "created_by").order_by("-created_at")[:30]
+    smtp_settings = {
+        "host": settings.SMTP_HOST,
+        "port": settings.SMTP_PORT,
+        "username": settings.SMTP_USERNAME,
+        "from_email": settings.SMTP_FROM,
+        "starttls": settings.SMTP_STARTTLS,
+        "ssl": settings.SMTP_SSL,
+        "timeout": settings.SMTP_TIMEOUT_SECONDS,
+        "password_set": bool(settings.SMTP_PASSWORD),
+        "app_base_url": settings.APP_BASE_URL,
+    }
+    return render(
+        request,
+        "receipts/staff_email.html",
+        {
+            "form": form,
+            "recent_logs": recent_logs,
+            "smtp_settings": smtp_settings,
+        },
+    )
 
 
 @staff_member_required

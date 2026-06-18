@@ -83,6 +83,18 @@ class ResubmissionRequestStatus(models.TextChoices):
     RESOLVED = "resolved", "対応済み"
 
 
+class EmailType(models.TextChoices):
+    REMINDER_INITIAL = "reminder_initial", "4日リマインダー"
+    REMINDER_URGENT = "reminder_urgent", "10日重要リマインダー"
+    TEST = "test", "テスト送信"
+
+
+class EmailDeliveryStatus(models.TextChoices):
+    SENT = "sent", "送信済み"
+    FAILED = "failed", "失敗"
+    SKIPPED = "skipped", "スキップ"
+
+
 class ServiceRegistrationSource(models.TextChoices):
     ADMIN = "admin", "管理者登録"
     USER = "user", "ユーザー登録"
@@ -678,6 +690,63 @@ class ReceiptResubmissionRequest(models.Model):
 
     def __str__(self) -> str:
         return f"{self.user} / {self.period_month:%Y-%m} / {self.service_display_name_snapshot} / {self.get_status_display()}"
+
+
+class EmailDeliveryLog(models.Model):
+    """リマインダー・テストメールの送信結果ログ。重複送信防止にも使う。"""
+
+    email_type = models.CharField("メール種別", max_length=40, choices=EmailType.choices)
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="receipt_email_logs",
+        verbose_name="対象ユーザー",
+    )
+    target_month = models.DateField("対象提出月", null=True, blank=True)
+    to_email = models.EmailField("送信先")
+    subject = models.CharField("件名", max_length=255)
+    status = models.CharField("ステータス", max_length=20, choices=EmailDeliveryStatus.choices, default=EmailDeliveryStatus.SENT)
+    message = models.TextField("本文", blank=True)
+    error = models.TextField("エラー", blank=True)
+    idempotency_key = models.CharField("重複防止キー", max_length=255, unique=True, null=True, blank=True)
+    sent_at = models.DateTimeField("送信日時", null=True, blank=True)
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="created_receipt_email_logs",
+        verbose_name="実行管理者",
+    )
+    created_at = models.DateTimeField("作成日時", auto_now_add=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+        indexes = [
+            models.Index(fields=["email_type", "target_month", "status"]),
+            models.Index(fields=["to_email", "created_at"]),
+        ]
+        verbose_name = "メール送信ログ"
+        verbose_name_plural = "メール送信ログ"
+
+    def clean(self):
+        if self.target_month:
+            self.target_month = month_start(self.target_month)
+        if self.to_email:
+            self.to_email = self.to_email.strip().lower()
+
+    def save(self, *args, **kwargs):
+        if self.target_month:
+            self.target_month = month_start(self.target_month)
+        if self.to_email:
+            self.to_email = self.to_email.strip().lower()
+        super().save(*args, **kwargs)
+
+    def __str__(self) -> str:
+        target = self.target_month.strftime("%Y-%m") if self.target_month else "-"
+        return f"{self.get_email_type_display()} / {target} / {self.to_email} / {self.get_status_display()}"
 
 
 @receiver(post_delete, sender=Receipt)

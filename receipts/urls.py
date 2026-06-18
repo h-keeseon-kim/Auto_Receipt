@@ -20,6 +20,7 @@ urlpatterns = [
     path("receipts/<int:pk>/delete/", views.delete_receipt, name="delete_receipt"),
     path("staff/", views.staff_dashboard, name="staff_dashboard"),
     path("staff/users/new/", views.staff_user_create, name="staff_user_create"),
+    path("staff/email/", views.staff_email, name="staff_email"),
     path("staff/catalog/new/", views.staff_catalog_create, name="staff_catalog_create"),
     path("staff/catalog/<int:pk>/edit/", views.staff_catalog_update, name="staff_catalog_update"),
     path("staff/catalog/<int:pk>/archive/", views.staff_catalog_archive, name="staff_catalog_archive"),
