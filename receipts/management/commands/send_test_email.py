@@ -4,6 +4,7 @@ from django.contrib.auth.models import User
 from django.core.management.base import BaseCommand, CommandError
 
 from receipts.emailing import send_test_email
+from receipts.models import EmailDeliveryStatus
 
 
 class Command(BaseCommand):
@@ -30,5 +31,7 @@ class Command(BaseCommand):
         )
         if sent:
             self.stdout.write(self.style.SUCCESS(f"テストメールを送信しました: {log.to_email}"))
+        elif log.status == EmailDeliveryStatus.SKIPPED:
+            self.stdout.write(self.style.WARNING(f"テストメールをスキップしました: {log.to_email} / {log.error or '停止中ユーザー'}"))
         else:
             self.stdout.write(self.style.ERROR(f"テストメール送信に失敗しました: {log.error or '詳細不明'}"))

@@ -8,10 +8,11 @@ from django.conf import settings
 from django.contrib.auth.models import User
 from django.core.mail import EmailMultiAlternatives
 from django.db import IntegrityError
+from django.db.models import Q
 from django.urls import reverse
 from django.utils import timezone
 
-from .models import EmailDeliveryLog, EmailDeliveryStatus, EmailType, Submission, SubmissionStatus, add_months, month_start
+from .models import EmailDeliveryLog, EmailDeliveryStatus, EmailType, Submission, SubmissionStatus, UserAccountStatus, add_months, month_start
 
 
 def current_target_month(offset: int | None = None) -> date:
@@ -33,7 +34,38 @@ def user_email(user: User) -> str:
 
 
 def active_general_users() -> Iterable[User]:
-    return User.objects.filter(is_active=True, is_staff=False, is_superuser=False).order_by("username")
+    return (
+        User.objects.filter(
+            is_active=True,
+            is_staff=False,
+            is_superuser=False,
+            profile__account_status=UserAccountStatus.ACTIVE,
+        )
+        .select_related("profile")
+        .order_by("username")
+    )
+
+
+def find_general_user_by_email(email: str) -> User | None:
+    email = (email or "").strip().lower()
+    if not email:
+        return None
+    return (
+        User.objects.filter(is_active=True, is_staff=False, is_superuser=False)
+        .filter(Q(email__iexact=email) | Q(username__iexact=email))
+        .select_related("profile")
+        .order_by("id")
+        .first()
+    )
+
+
+def user_allows_receipt_email(user: User | None) -> bool:
+    if user is None:
+        return True
+    try:
+        return user.profile.account_status == UserAccountStatus.ACTIVE
+    except Exception:
+        return False
 
 
 def users_without_submitted_submission(target_month: date) -> Iterable[User]:
@@ -125,6 +157,50 @@ def send_logged_email(
     effective_key = idempotency_key
     if force and idempotency_key:
         effective_key = f"{idempotency_key}:force:{timezone.now().strftime('%Y%m%d%H%M%S%f')}"
+
+    if not user_allows_receipt_email(user):
+        status = EmailDeliveryStatus.SKIPPED
+        error = "停止中ユーザーのため送信しませんでした。"
+        if log_to_update is not None:
+            log_to_update.email_type = email_type
+            log_to_update.user = user
+            log_to_update.target_month = target_month
+            log_to_update.to_email = to_email
+            log_to_update.subject = subject
+            log_to_update.status = status
+            log_to_update.message = body
+            log_to_update.error = error
+            log_to_update.sent_at = None
+            log_to_update.created_by = created_by or log_to_update.created_by
+            log_to_update.save(
+                update_fields=[
+                    "email_type",
+                    "user",
+                    "target_month",
+                    "to_email",
+                    "subject",
+                    "status",
+                    "message",
+                    "error",
+                    "sent_at",
+                    "created_by",
+                ]
+            )
+            return log_to_update, False
+        log = EmailDeliveryLog.objects.create(
+            email_type=email_type,
+            user=user,
+            target_month=target_month,
+            to_email=to_email,
+            subject=subject,
+            status=status,
+            message=body,
+            error=error,
+            idempotency_key=effective_key,
+            sent_at=None,
+            created_by=created_by,
+        )
+        return log, False
 
     headers = {}
     if effective_key:
@@ -256,9 +332,11 @@ def send_receipt_reminders(
 
 
 def send_test_email(*, to_email: str, subject: str, body: str, created_by: User | None = None) -> tuple[EmailDeliveryLog, bool]:
+    matched_user = find_general_user_by_email(to_email)
     key = f"receipthub:test:{timezone.now().strftime('%Y%m%d%H%M%S%f')}:{to_email.lower()}"
     return send_logged_email(
         email_type=EmailType.TEST,
+        user=matched_user,
         to_email=to_email,
         subject=subject,
         body=body,

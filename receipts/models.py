@@ -83,6 +83,11 @@ class ResubmissionRequestStatus(models.TextChoices):
     RESOLVED = "resolved", "対応済み"
 
 
+class UserAccountStatus(models.TextChoices):
+    ACTIVE = "active", "利用中"
+    STOPPED = "stopped", "停止中"
+
+
 class EmailType(models.TextChoices):
     REMINDER_INITIAL = "reminder_initial", "4日リマインダー"
     REMINDER_URGENT = "reminder_urgent", "10日重要リマインダー"
@@ -240,6 +245,18 @@ class RegisteredService(models.Model):
             raise ValidationError({"final_receipt_month": "ユーザー停止の場合は最後にアップロードすべき領収書月を選択してください。"})
 
     def save(self, *args, **kwargs):
+        old_user_id = None
+        old_is_active = None
+        if self.pk:
+            old_state = (
+                type(self).objects.filter(pk=self.pk)
+                .values("user_id", "is_active")
+                .first()
+            )
+            if old_state:
+                old_user_id = old_state["user_id"]
+                old_is_active = old_state["is_active"]
+
         if self.catalog_service_id:
             self.name = self.catalog_service.name
             self.billing_type = self.catalog_service.billing_type
@@ -248,6 +265,11 @@ class RegisteredService(models.Model):
         if self.final_receipt_month:
             self.final_receipt_month = month_start(self.final_receipt_month)
         super().save(*args, **kwargs)
+
+        if old_user_id and old_user_id != self.user_id:
+            sync_user_account_status_from_services(old_user_id)
+        if old_is_active is None or old_is_active != self.is_active or old_user_id != self.user_id:
+            sync_user_account_status_from_services(self.user_id)
 
     def is_uploadable_for(self, period_month) -> bool:
         period_month = month_start(period_month)
@@ -357,6 +379,12 @@ class Submission(models.Model):
 
 class UserProfile(models.Model):
     user = models.OneToOneField(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="profile")
+    account_status = models.CharField(
+        "利用ステータス",
+        max_length=20,
+        choices=UserAccountStatus.choices,
+        default=UserAccountStatus.STOPPED,
+    )
     must_change_password = models.BooleanField("次回ログイン時にパスワード変更を必須にする", default=False)
     initial_password_generated_at = models.DateTimeField("初期パスワード生成日時", null=True, blank=True)
     password_changed_at = models.DateTimeField("初回パスワード変更日時", null=True, blank=True)
@@ -376,10 +404,20 @@ class UserProfile(models.Model):
         verbose_name = "ユーザープロファイル"
         verbose_name_plural = "ユーザープロファイル"
 
+    @property
+    def is_receipt_email_enabled(self) -> bool:
+        return self.account_status == UserAccountStatus.ACTIVE
+
+    def set_account_status(self, status: str):
+        if status not in UserAccountStatus.values:
+            raise ValidationError({"account_status": "利用ステータスが不正です。"})
+        self.account_status = status
+        self.save(update_fields=["account_status", "updated_at"])
+
     def mark_initial_password_generated(self):
         self.initial_password_generated_at = timezone.now()
         self.password_changed_at = None
-        self.save(update_fields=["must_change_password", "initial_password_generated_at", "password_changed_at", "created_by", "updated_at"])
+        self.save(update_fields=["account_status", "must_change_password", "initial_password_generated_at", "password_changed_at", "created_by", "updated_at"])
 
     def mark_password_changed(self):
         self.must_change_password = False
@@ -391,7 +429,31 @@ class UserProfile(models.Model):
         self.save(update_fields=["tutorial_completed_at", "updated_at"])
 
     def __str__(self) -> str:
-        return f"{self.user} / password_change_required={self.must_change_password}"
+        return f"{self.user} / {self.get_account_status_display()} / password_change_required={self.must_change_password}"
+
+
+def sync_user_account_status_from_services(user_id: int) -> str | None:
+    """利用サービスの有無に合わせてユーザーステータスを自動更新する。
+
+    1件以上の利用中サービスがあれば「利用中」、0件なら「停止中」にする。
+    管理者が手動で停止したユーザーも、後からサービスを新規登録・再開したタイミングで自動的に利用中へ戻る。
+    """
+
+    if not user_id:
+        return None
+    try:
+        profile = UserProfile.objects.select_related("user").get(user_id=user_id)
+    except UserProfile.DoesNotExist:
+        return None
+    if profile.user.is_staff or profile.user.is_superuser or not profile.user.is_active:
+        return profile.account_status
+
+    has_active_service = RegisteredService.objects.filter(user_id=user_id, is_active=True).exists()
+    next_status = UserAccountStatus.ACTIVE if has_active_service else UserAccountStatus.STOPPED
+    if profile.account_status != next_status:
+        profile.account_status = next_status
+        profile.save(update_fields=["account_status", "updated_at"])
+    return next_status
 
 
 class ReceiptQuerySet(models.QuerySet):
@@ -747,6 +809,11 @@ class EmailDeliveryLog(models.Model):
     def __str__(self) -> str:
         target = self.target_month.strftime("%Y-%m") if self.target_month else "-"
         return f"{self.get_email_type_display()} / {target} / {self.to_email} / {self.get_status_display()}"
+
+
+@receiver(post_delete, sender=RegisteredService)
+def sync_user_account_status_after_service_delete(sender, instance: RegisteredService, **kwargs):
+    sync_user_account_status_from_services(instance.user_id)
 
 
 @receiver(post_delete, sender=Receipt)

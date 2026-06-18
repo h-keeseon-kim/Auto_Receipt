@@ -20,6 +20,7 @@ from .models import (
     ServiceCatalog,
     ServiceDeactivationSource,
     ServiceRegistrationSource,
+    UserAccountStatus,
     validate_upload_size,
 )
 
@@ -440,6 +441,13 @@ class StaffUserCreateForm(forms.Form):
         widget=forms.EmailInput(attrs={"autocomplete": "off", "placeholder": "user@example.com"}),
         help_text="このメールアドレスをログイン時のアカウント名として使います。",
     )
+    account_status = forms.ChoiceField(
+        label="初期ステータス",
+        choices=UserAccountStatus.choices,
+        initial=UserAccountStatus.STOPPED,
+        required=False,
+        help_text="停止中ユーザーにはリマインダーメール・テストメールを送信しません。サービス利用開始時は自動で利用中に切り替わります。",
+    )
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -450,6 +458,9 @@ class StaffUserCreateForm(forms.Form):
         ensure_unique_account_email(email)
         return email
 
+    def clean_account_status(self):
+        return self.cleaned_data.get("account_status") or UserAccountStatus.STOPPED
+
     def save(self, *, created_by: User) -> tuple[User, str]:
         email = self.cleaned_data["email"]
         user = User(username=email, email=email, is_active=True, is_staff=False, is_superuser=False)
@@ -459,10 +470,34 @@ class StaffUserCreateForm(forms.Form):
         user.save()
 
         profile = user.profile
+        profile.account_status = self.cleaned_data["account_status"]
         profile.must_change_password = True
         profile.created_by = created_by
         profile.mark_initial_password_generated()
         return user, password
+
+
+class StaffUserStatusForm(forms.Form):
+    user_id = forms.IntegerField(widget=forms.HiddenInput)
+    account_status = forms.ChoiceField(label="ステータス", choices=UserAccountStatus.choices)
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        apply_design_classes(self)
+
+    def clean_user_id(self):
+        user_id = self.cleaned_data["user_id"]
+        try:
+            return User.objects.select_related("profile").get(pk=user_id, is_active=True, is_staff=False, is_superuser=False)
+        except User.DoesNotExist as exc:
+            raise forms.ValidationError("対象ユーザーが見つかりません。") from exc
+
+    def save(self, *, updated_by: User | None = None) -> User:
+        user = self.cleaned_data["user_id"]
+        profile = user.profile
+        profile.account_status = self.cleaned_data["account_status"]
+        profile.save(update_fields=["account_status", "updated_at"])
+        return user
 
 
 class EmailOrUsernameAuthenticationForm(AuthenticationForm):

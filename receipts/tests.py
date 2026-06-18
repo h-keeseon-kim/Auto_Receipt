@@ -33,6 +33,7 @@ from .models import (
     ServiceRegistrationSource,
     Submission,
     SubmissionStatus,
+    UserAccountStatus,
     UserProfile,
 )
 
@@ -809,6 +810,34 @@ class StaffUserProvisioningTests(TestCase):
         self.assertContains(response, "このメールアドレスはすでに登録されています")
         self.assertEqual(User.objects.filter(username__iexact="existing@example.com").count(), 1)
 
+    def test_staff_can_change_user_status_on_user_create_page(self):
+        user = User.objects.create_user(username="status@example.com", email="status@example.com", password="password123")
+        self.assertEqual(user.profile.account_status, UserAccountStatus.STOPPED)
+
+        response = self.client.post(
+            reverse("staff_user_create"),
+            {
+                "action": "update_status",
+                "user_id": user.pk,
+                "account_status": UserAccountStatus.ACTIVE,
+            },
+        )
+
+        self.assertRedirects(response, reverse("staff_user_create"))
+        user.profile.refresh_from_db()
+        self.assertEqual(user.profile.account_status, UserAccountStatus.ACTIVE)
+
+    def test_created_user_can_start_as_active_status(self):
+        response = self.client.post(
+            reverse("staff_user_create"),
+            {"email": "active.user@example.com", "account_status": UserAccountStatus.ACTIVE},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        user = User.objects.get(username="active.user@example.com")
+        self.assertEqual(user.profile.account_status, UserAccountStatus.ACTIVE)
+        self.assertContains(response, "利用中")
+
     def test_non_staff_cannot_access_staff_user_create(self):
         self.client.logout()
         user = User.objects.create_user(username="user@example.com", email="user@example.com", password="password123")
@@ -1151,6 +1180,27 @@ class StaffServiceAssignmentTests(TestCase):
         self.assertContains(response, "領収書を追加")
         self.assertNotContains(response, "<h2>利用サービス</h2>", html=True)
         self.assertNotContains(response, "サービス編集")
+
+    def test_user_status_auto_updates_when_services_start_and_stop(self):
+        self.user.profile.refresh_from_db()
+        self.assertEqual(self.user.profile.account_status, UserAccountStatus.STOPPED)
+
+        service = RegisteredService.objects.create(
+            user=self.user,
+            catalog_service=self.catalog,
+            name=self.catalog.name,
+            billing_type=self.catalog.billing_type,
+        )
+        self.user.profile.refresh_from_db()
+        self.assertEqual(self.user.profile.account_status, UserAccountStatus.ACTIVE)
+
+        service.deactivate(by=self.admin, source=ServiceDeactivationSource.ADMIN)
+        self.user.profile.refresh_from_db()
+        self.assertEqual(self.user.profile.account_status, UserAccountStatus.STOPPED)
+
+        service.activate()
+        self.user.profile.refresh_from_db()
+        self.assertEqual(self.user.profile.account_status, UserAccountStatus.ACTIVE)
 
     def test_user_cannot_upload_receipt_for_another_users_service(self):
         own_service = RegisteredService.objects.create(
@@ -1557,6 +1607,9 @@ class EmailReminderTests(TestCase):
         self.user_b = User.objects.create_user(username="b@example.com", email="b@example.com", password="password123")
         self.user_c = User.objects.create_user(username="c@example.com", email="c@example.com", password="password123")
         self.admin = User.objects.create_superuser(username="admin", email="admin@example.com", password="admin-password-123")
+        for account in [self.user_a, self.user_b, self.user_c]:
+            account.profile.account_status = UserAccountStatus.ACTIVE
+            account.profile.save(update_fields=["account_status", "updated_at"])
 
     def test_initial_reminder_sends_to_all_general_users_once(self):
         call_command("send_receipt_reminders", "--kind", "initial", "--month", "2026-06")
@@ -1586,6 +1639,37 @@ class EmailReminderTests(TestCase):
         recipients = {message.to[0] for message in mail.outbox}
         self.assertEqual(recipients, {"a@example.com", "c@example.com"})
         self.assertTrue(all(message.subject.startswith("【重要】") for message in mail.outbox))
+
+    def test_reminders_exclude_stopped_users(self):
+        self.user_b.profile.account_status = UserAccountStatus.STOPPED
+        self.user_b.profile.save(update_fields=["account_status", "updated_at"])
+
+        call_command("send_receipt_reminders", "--kind", "initial", "--month", "2026-06")
+
+        recipients = {message.to[0] for message in mail.outbox}
+        self.assertEqual(recipients, {"a@example.com", "c@example.com"})
+        self.assertFalse(EmailDeliveryLog.objects.filter(to_email="b@example.com").exists())
+
+    def test_test_email_is_skipped_for_stopped_user(self):
+        self.user_a.profile.account_status = UserAccountStatus.STOPPED
+        self.user_a.profile.save(update_fields=["account_status", "updated_at"])
+        self.client.login(username="admin", password="admin-password-123")
+
+        response = self.client.post(
+            reverse("staff_email"),
+            {
+                "to_email": "a@example.com",
+                "subject": "ReceiptHub テスト",
+                "body": "テスト本文です。",
+            },
+        )
+
+        self.assertRedirects(response, reverse("staff_email"))
+        self.assertEqual(len(mail.outbox), 0)
+        log = EmailDeliveryLog.objects.get(email_type=EmailType.TEST)
+        self.assertEqual(log.to_email, "a@example.com")
+        self.assertEqual(log.status, EmailDeliveryStatus.SKIPPED)
+        self.assertEqual(log.user, self.user_a)
 
     def test_staff_email_test_page_sends_test_email_and_logs_result(self):
         self.client.login(username="admin", password="admin-password-123")

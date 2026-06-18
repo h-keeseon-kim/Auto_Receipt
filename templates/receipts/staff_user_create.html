@@ -4,7 +4,7 @@
 <div class="page-title">
     <div>
         <h1>ユーザー発行</h1>
-        <p class="muted">一般ユーザーのアカウント名をメールアドレス形式で作成し、初期パスワードを生成します。</p>
+        <p class="muted">一般ユーザーのアカウント作成と、利用ステータスの管理を行います。</p>
     </div>
     <div class="actions">
         <a class="button" href="{% url 'history' %}">提出履歴へ戻る</a>
@@ -25,6 +25,10 @@
             <span class="label">初期パスワード</span>
             <code class="credential-value">{{ generated_password }}</code>
         </div>
+        <div>
+            <span class="label">ステータス</span>
+            <strong>{{ generated_user.profile.get_account_status_display }}</strong>
+        </div>
     </div>
     <div class="notice message">
         ユーザーはこのアカウント名と初期パスワードでログイン後、最初に必ずパスワード変更ページへ移動します。
@@ -44,18 +48,33 @@
 
 <section class="card section">
     <div class="section-header">
-        <h2>最近作成された一般ユーザー</h2>
+        <div>
+            <h2>一般ユーザー管理</h2>
+            <p class="muted">停止中のユーザーには、月次リマインダーとテストメールを送信しません。サービスが0件になると自動で停止中、1件以上利用開始すると自動で利用中になります。</p>
+        </div>
     </div>
-    <div class="table-wrap">
-        <table>
+    <div class="table-wrap scroll-box medium horizontal-scroll">
+        <table class="status-table">
             <thead>
-                <tr><th>アカウント名</th><th>メール</th><th>初回変更</th><th>作成日時</th><th>操作</th></tr>
+                <tr>
+                    <th>アカウント名</th>
+                    <th>メール</th>
+                    <th>ステータス</th>
+                    <th>利用中サービス</th>
+                    <th>初回変更</th>
+                    <th>作成日時</th>
+                    <th>操作</th>
+                </tr>
             </thead>
             <tbody>
-                {% for account in recent_users %}
+                {% for account in managed_accounts %}
                     <tr>
                         <td><strong>{{ account.username }}</strong></td>
                         <td>{{ account.email|default:"-" }}</td>
+                        <td>
+                            <span class="badge {% if account.profile.account_status == 'active' %}submitted{% else %}neutral{% endif %}">{{ account.profile.get_account_status_display }}</span>
+                        </td>
+                        <td>{{ account.active_service_count }}</td>
                         <td>
                             {% if account.profile.must_change_password %}
                                 <span class="badge draft">未変更</span>
@@ -64,10 +83,23 @@
                             {% endif %}
                         </td>
                         <td>{{ account.date_joined|date:"Y-m-d H:i" }}</td>
-                        <td><a class="button small" href="{% url 'staff_user_services' account.pk %}">サービス登録</a></td>
+                        <td class="actions-cell">
+                            <form method="post" class="inline-form nowrap">
+                                {% csrf_token %}
+                                <input type="hidden" name="action" value="update_status">
+                                <input type="hidden" name="user_id" value="{{ account.pk }}">
+                                <select name="account_status" class="form-select compact-select" aria-label="{{ account.username }} のステータス">
+                                    {% for status_value, status_label in status_choices %}
+                                        <option value="{{ status_value }}" {% if account.profile.account_status == status_value %}selected{% endif %}>{{ status_label }}</option>
+                                    {% endfor %}
+                                </select>
+                                <button type="submit" class="button small">更新</button>
+                            </form>
+                            <a class="button small" href="{% url 'staff_user_services' account.pk %}">サービス登録</a>
+                        </td>
                     </tr>
                 {% empty %}
-                    <tr><td colspan="5" class="muted center">一般ユーザーはまだ作成されていません。</td></tr>
+                    <tr><td colspan="7" class="muted center">一般ユーザーはまだ作成されていません。</td></tr>
                 {% endfor %}
             </tbody>
         </table>

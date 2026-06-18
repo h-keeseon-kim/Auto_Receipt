@@ -37,6 +37,7 @@ from .forms import (
     ServiceCatalogForm,
     StaffServiceForm,
     StaffUserCreateForm,
+    StaffUserStatusForm,
     StaffEmailTestForm,
     StyledPasswordChangeForm,
     UserServiceRegistrationForm,
@@ -46,6 +47,7 @@ from .forms import (
 from .models import (
     Receipt,
     EmailDeliveryLog,
+    EmailDeliveryStatus,
     ReceiptFilenameStatus,
     ReceiptPeriodCheckStatus,
     ReceiptResubmissionRequest,
@@ -55,6 +57,7 @@ from .models import (
     ServiceDeactivationSource,
     ServiceRegistrationSource,
     Submission,
+    UserAccountStatus,
     SubmissionStatus,
     UserProfile,
     receipt_expiry_from,
@@ -943,6 +946,17 @@ def download_receipt(request, pk: int):
 def staff_user_create(request):
     generated_user = None
     generated_password = None
+    if request.method == "POST" and request.POST.get("action") == "update_status":
+        status_form = StaffUserStatusForm(request.POST)
+        if status_form.is_valid():
+            account = status_form.save(updated_by=request.user)
+            messages.success(request, f"{account.username} のステータスを {account.profile.get_account_status_display()} に変更しました。")
+        else:
+            for errors in status_form.errors.values():
+                for error in errors:
+                    messages.error(request, error)
+        return redirect("staff_user_create")
+
     if request.method == "POST":
         form = StaffUserCreateForm(request.POST)
         if form.is_valid():
@@ -952,10 +966,17 @@ def staff_user_create(request):
     else:
         form = StaffUserCreateForm()
 
-    recent_users = (
+    managed_accounts = (
         User.objects.filter(is_staff=False, is_superuser=False)
         .select_related("profile")
-        .order_by("-date_joined")[:10]
+        .annotate(
+            active_service_count=Count(
+                "registered_services",
+                filter=Q(registered_services__is_active=True),
+                distinct=True,
+            )
+        )
+        .order_by("username")
     )
     return render(
         request,
@@ -964,10 +985,10 @@ def staff_user_create(request):
             "form": form,
             "generated_user": generated_user,
             "generated_password": generated_password,
-            "recent_users": recent_users,
+            "managed_accounts": managed_accounts,
+            "status_choices": UserAccountStatus.choices,
         },
     )
-
 
 @staff_member_required
 def staff_dashboard(request):
@@ -991,6 +1012,8 @@ def staff_email(request):
             )
             if sent:
                 messages.success(request, f"テストメールを {log.to_email} へ送信しました。")
+            elif log.status == EmailDeliveryStatus.SKIPPED:
+                messages.warning(request, f"{log.to_email} は停止中ユーザーのため、テストメールを送信しませんでした。")
             else:
                 messages.error(request, f"テストメール送信に失敗しました: {log.error or '詳細不明'}")
             return redirect("staff_email")

@@ -473,3 +473,21 @@ body.tutorial-open { overflow-x: hidden; }
     color: var(--primary);
     font-weight: 700;
 }
+.inline-form.nowrap {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4rem;
+    margin: 0;
+    white-space: nowrap;
+}
+.compact-select {
+    width: auto;
+    min-width: 7.5rem;
+}
+.actions-cell {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    flex-wrap: nowrap;
+    white-space: nowrap;
+}
