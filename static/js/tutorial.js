@@ -127,8 +127,8 @@
         {
             pageName: "staff_user_create",
             selector: "[data-tutorial-target='staff-user-create-nav']",
-            title: "ユーザーを発行します",
-            body: "新しい一般ユーザーは管理者がメールアドレス形式で発行します。初期パスワードはランダム生成され、初回ログイン時に変更が必須になります。",
+            title: "ユーザーを管理します",
+            body: "新しい一般ユーザーの発行、初期パスワードの生成、利用ステータスの管理を行います。",
             placement: "below",
         },
         {

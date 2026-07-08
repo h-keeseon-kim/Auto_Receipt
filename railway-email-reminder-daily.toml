@@ -1,0 +1,9 @@
+# 毎日09:00 JST（00:00 UTC）に起動し、管理者画面で設定した日にだけメールを送るCronサービス例です。
+[build]
+builder = "DOCKERFILE"
+dockerfilePath = "Dockerfile"
+
+[deploy]
+startCommand = "python manage.py send_receipt_reminders --kind auto"
+cronSchedule = "0 0 * * *"
+restartPolicyType = "NEVER"

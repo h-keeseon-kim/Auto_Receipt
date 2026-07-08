@@ -38,6 +38,7 @@ from .forms import (
     StaffServiceForm,
     StaffUserCreateForm,
     StaffUserStatusForm,
+    EmailReminderScheduleForm,
     StaffEmailTestForm,
     StyledPasswordChangeForm,
     UserServiceRegistrationForm,
@@ -47,6 +48,7 @@ from .forms import (
 from .models import (
     Receipt,
     EmailDeliveryLog,
+    EmailReminderSchedule,
     EmailDeliveryStatus,
     ReceiptFilenameStatus,
     ReceiptPeriodCheckStatus,
@@ -1001,27 +1003,42 @@ def staff_dashboard(request):
 
 @staff_member_required
 def staff_email(request):
+    reminder_schedule = EmailReminderSchedule.get_solo()
+    initial = {}
+    if request.user.email:
+        initial["to_email"] = request.user.email
+    form = StaffEmailTestForm(initial=initial)
+    schedule_form = EmailReminderScheduleForm(instance=reminder_schedule)
+
     if request.method == "POST":
-        form = StaffEmailTestForm(request.POST)
-        if form.is_valid():
-            log, sent = send_test_email(
-                to_email=form.cleaned_data["to_email"],
-                subject=form.cleaned_data["subject"],
-                body=form.cleaned_data["body"],
-                created_by=request.user,
-            )
-            if sent:
-                messages.success(request, f"テストメールを {log.to_email} へ送信しました。")
-            elif log.status == EmailDeliveryStatus.SKIPPED:
-                messages.warning(request, f"{log.to_email} は停止中ユーザーのため、テストメールを送信しませんでした。")
-            else:
-                messages.error(request, f"テストメール送信に失敗しました: {log.error or '詳細不明'}")
-            return redirect("staff_email")
-    else:
-        initial = {}
-        if request.user.email:
-            initial["to_email"] = request.user.email
-        form = StaffEmailTestForm(initial=initial)
+        action = request.POST.get("action")
+        if action == "update_reminder_schedule":
+            schedule_form = EmailReminderScheduleForm(request.POST, instance=reminder_schedule)
+            if schedule_form.is_valid():
+                updated_schedule = schedule_form.save(commit=False)
+                updated_schedule.updated_by = request.user
+                updated_schedule.save()
+                messages.success(
+                    request,
+                    f"リマインダー日を毎月{updated_schedule.reminder_day}日、警告日を毎月{updated_schedule.warning_day}日に変更しました。",
+                )
+                return redirect("staff_email")
+        else:
+            form = StaffEmailTestForm(request.POST)
+            if form.is_valid():
+                log, sent = send_test_email(
+                    to_email=form.cleaned_data["to_email"],
+                    subject=form.cleaned_data["subject"],
+                    body=form.cleaned_data["body"],
+                    created_by=request.user,
+                )
+                if sent:
+                    messages.success(request, f"テストメールを {log.to_email} へ送信しました。")
+                elif log.status == EmailDeliveryStatus.SKIPPED:
+                    messages.warning(request, f"{log.to_email} は停止中ユーザーのため、テストメールを送信しませんでした。")
+                else:
+                    messages.error(request, f"テストメール送信に失敗しました: {log.error or '詳細不明'}")
+                return redirect("staff_email")
 
     recent_logs = EmailDeliveryLog.objects.select_related("user", "created_by").order_by("-created_at")[:30]
     smtp_settings = {
@@ -1040,6 +1057,8 @@ def staff_email(request):
         "receipts/staff_email.html",
         {
             "form": form,
+            "schedule_form": schedule_form,
+            "reminder_schedule": reminder_schedule,
             "recent_logs": recent_logs,
             "smtp_settings": smtp_settings,
         },

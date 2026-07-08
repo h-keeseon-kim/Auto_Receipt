@@ -20,6 +20,7 @@ from .forms import ReceiptUploadForm
 from .models import (
     BillingType,
     EmailDeliveryLog,
+    EmailReminderSchedule,
     EmailDeliveryStatus,
     EmailType,
     Receipt,
@@ -1689,3 +1690,45 @@ class EmailReminderTests(TestCase):
         log = EmailDeliveryLog.objects.get(email_type=EmailType.TEST)
         self.assertEqual(log.to_email, "audit@example.com")
         self.assertEqual(log.status, EmailDeliveryStatus.SENT)
+
+    def test_staff_email_page_updates_reminder_schedule(self):
+        self.client.login(username="admin", password="admin-password-123")
+
+        response = self.client.get(reverse("staff_email"))
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "メール送信")
+        self.assertContains(response, "リマインダー送信日")
+        self.assertNotContains(response, "リマインダー実行設定")
+
+        response = self.client.post(
+            reverse("staff_email"),
+            {
+                "action": "update_reminder_schedule",
+                "reminder_day": "6",
+                "warning_day": "13",
+            },
+        )
+
+        self.assertRedirects(response, reverse("staff_email"))
+        schedule = EmailReminderSchedule.get_solo()
+        self.assertEqual(schedule.reminder_day, 6)
+        self.assertEqual(schedule.warning_day, 13)
+        self.assertEqual(schedule.updated_by, self.admin)
+
+    def test_auto_reminder_uses_configured_days(self):
+        schedule = EmailReminderSchedule.get_solo()
+        schedule.reminder_day = 8
+        schedule.warning_day = 14
+        schedule.save()
+
+        with mock.patch("receipts.management.commands.send_receipt_reminders.timezone.localdate", return_value=date(2026, 6, 8)):
+            call_command("send_receipt_reminders", "--kind", "auto", "--month", "2026-06")
+
+        self.assertEqual(len(mail.outbox), 3)
+        self.assertEqual(EmailDeliveryLog.objects.filter(email_type=EmailType.REMINDER_INITIAL).count(), 3)
+
+        mail.outbox = []
+        with mock.patch("receipts.management.commands.send_receipt_reminders.timezone.localdate", return_value=date(2026, 6, 9)):
+            call_command("send_receipt_reminders", "--kind", "auto", "--month", "2026-06")
+
+        self.assertEqual(len(mail.outbox), 0)

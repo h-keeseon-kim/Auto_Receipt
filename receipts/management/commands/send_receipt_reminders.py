@@ -5,7 +5,7 @@ from django.utils import timezone
 
 from receipts.emailing import current_target_month, send_receipt_reminders
 from receipts.forms import MonthField
-from receipts.models import EmailType
+from receipts.models import EmailReminderSchedule, EmailType
 
 
 class Command(BaseCommand):
@@ -16,7 +16,7 @@ class Command(BaseCommand):
             "--kind",
             choices=["auto", "initial", "urgent"],
             default="auto",
-            help="initial=4日リマインダー、urgent=10日重要リマインダー、auto=実行日の4日/10日で自動判定。",
+            help="initial=通常リマインダー、urgent=重要リマインダー、auto=管理者画面で設定した送信日に応じて自動判定。",
         )
         parser.add_argument(
             "--month",
@@ -34,22 +34,28 @@ class Command(BaseCommand):
         except Exception as exc:
             raise CommandError("--month は YYYY-MM 形式で指定してください。") from exc
 
-    def resolve_kind(self, value: str) -> str | None:
+    def resolve_kind(self, value: str) -> tuple[str | None, EmailReminderSchedule]:
+        schedule = EmailReminderSchedule.get_solo()
         if value == "initial":
-            return EmailType.REMINDER_INITIAL
+            return EmailType.REMINDER_INITIAL, schedule
         if value == "urgent":
-            return EmailType.REMINDER_URGENT
+            return EmailType.REMINDER_URGENT, schedule
         day = timezone.localdate().day
-        if day == 4:
-            return EmailType.REMINDER_INITIAL
-        if day == 10:
-            return EmailType.REMINDER_URGENT
-        return None
+        if day == schedule.reminder_day:
+            return EmailType.REMINDER_INITIAL, schedule
+        if day == schedule.warning_day:
+            return EmailType.REMINDER_URGENT, schedule
+        return None, schedule
 
     def handle(self, *args, **options):
-        email_type = self.resolve_kind(options["kind"])
+        email_type, schedule = self.resolve_kind(options["kind"])
         if email_type is None:
-            self.stdout.write(self.style.SUCCESS("本日はリマインダー送信対象日ではありません。送信せず終了します。"))
+            self.stdout.write(
+                self.style.SUCCESS(
+                    f"本日はリマインダー送信対象日ではありません。"
+                    f"現在の設定: リマインダー日=毎月{schedule.reminder_day}日、警告日=毎月{schedule.warning_day}日。送信せず終了します。"
+                )
+            )
             return
 
         target_month = self.parse_month(options.get("month"))
@@ -59,7 +65,10 @@ class Command(BaseCommand):
             dry_run=options["dry_run"],
             force=options["force"],
         )
-        label = "4日リマインダー" if email_type == EmailType.REMINDER_INITIAL else "10日重要リマインダー"
+        if email_type == EmailType.REMINDER_INITIAL:
+            label = f"通常リマインダー（毎月{schedule.reminder_day}日）"
+        else:
+            label = f"重要リマインダー（毎月{schedule.warning_day}日）"
         message = (
             f"{label} / 対象月 {result.target_month:%Y-%m}: "
             f"対象={result.selected_count}, 送信済み={result.sent_count}, "

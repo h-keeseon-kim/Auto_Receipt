@@ -15,6 +15,7 @@ from django.utils import timezone
 from django.utils.crypto import get_random_string
 
 from .models import (
+    EmailReminderSchedule,
     Receipt,
     RegisteredService,
     ServiceCatalog,
@@ -522,6 +523,39 @@ class StyledPasswordChangeForm(PasswordChangeForm):
     def __init__(self, user, *args, **kwargs):
         super().__init__(user, *args, **kwargs)
         apply_design_classes(self)
+
+
+
+
+class EmailReminderScheduleForm(forms.ModelForm):
+    reminder_day = forms.IntegerField(
+        label="リマインダー日",
+        min_value=1,
+        max_value=28,
+        help_text="毎月この日に、利用中ユーザー全員へ通常リマインダーを送信します。",
+    )
+    warning_day = forms.IntegerField(
+        label="警告日",
+        min_value=1,
+        max_value=28,
+        help_text="毎月この日に、利用中かつ未提出のユーザーへ【重要】メールを送信します。",
+    )
+
+    class Meta:
+        model = EmailReminderSchedule
+        fields = ("reminder_day", "warning_day")
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        apply_design_classes(self)
+
+    def clean(self):
+        cleaned_data = super().clean()
+        reminder_day = cleaned_data.get("reminder_day")
+        warning_day = cleaned_data.get("warning_day")
+        if reminder_day and warning_day and warning_day <= reminder_day:
+            self.add_error("warning_day", "警告日はリマインダー日より後の日付にしてください。")
+        return cleaned_data
 
 
 class StaffEmailTestForm(forms.Form):

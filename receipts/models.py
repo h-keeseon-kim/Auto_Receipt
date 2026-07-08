@@ -89,8 +89,8 @@ class UserAccountStatus(models.TextChoices):
 
 
 class EmailType(models.TextChoices):
-    REMINDER_INITIAL = "reminder_initial", "4日リマインダー"
-    REMINDER_URGENT = "reminder_urgent", "10日重要リマインダー"
+    REMINDER_INITIAL = "reminder_initial", "通常リマインダー"
+    REMINDER_URGENT = "reminder_urgent", "重要リマインダー"
     TEST = "test", "テスト送信"
 
 
@@ -753,6 +753,57 @@ class ReceiptResubmissionRequest(models.Model):
     def __str__(self) -> str:
         return f"{self.user} / {self.period_month:%Y-%m} / {self.service_display_name_snapshot} / {self.get_status_display()}"
 
+
+
+
+class EmailReminderSchedule(models.Model):
+    """Monthly reminder day settings managed from the staff email page.
+
+    The application keeps a single row with pk=1. Railway Cron should run the
+    reminder command daily with --kind auto; this schedule decides whether the
+    current day sends the normal reminder, the urgent warning, or nothing.
+    """
+
+    reminder_day = models.PositiveSmallIntegerField("リマインダー日", default=4)
+    warning_day = models.PositiveSmallIntegerField("警告日", default=10)
+    updated_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="updated_email_reminder_schedules",
+        verbose_name="更新管理者",
+    )
+    updated_at = models.DateTimeField("更新日時", auto_now=True)
+    created_at = models.DateTimeField("作成日時", auto_now_add=True)
+
+    class Meta:
+        verbose_name = "メールリマインダー日設定"
+        verbose_name_plural = "メールリマインダー日設定"
+
+    @classmethod
+    def get_solo(cls) -> "EmailReminderSchedule":
+        obj, _created = cls.objects.get_or_create(pk=1, defaults={"reminder_day": 4, "warning_day": 10})
+        return obj
+
+    def clean(self):
+        errors = {}
+        if self.reminder_day is None or not 1 <= int(self.reminder_day) <= 28:
+            errors["reminder_day"] = "リマインダー日は1〜28日の間で設定してください。"
+        if self.warning_day is None or not 1 <= int(self.warning_day) <= 28:
+            errors["warning_day"] = "警告日は1〜28日の間で設定してください。"
+        if not errors and int(self.warning_day) <= int(self.reminder_day):
+            errors["warning_day"] = "警告日はリマインダー日より後の日付にしてください。"
+        if errors:
+            raise ValidationError(errors)
+
+    def save(self, *args, **kwargs):
+        self.pk = 1
+        self.full_clean()
+        super().save(*args, **kwargs)
+
+    def __str__(self) -> str:
+        return f"通常: 毎月{self.reminder_day}日 / 警告: 毎月{self.warning_day}日"
 
 class EmailDeliveryLog(models.Model):
     """リマインダー・テストメールの送信結果ログ。重複送信防止にも使う。"""

@@ -1,6 +1,6 @@
 from django.contrib import admin
 
-from .models import EmailDeliveryLog, Receipt, ReceiptResubmissionRequest, RegisteredService, ServiceCatalog, Submission, UserProfile
+from .models import EmailDeliveryLog, EmailReminderSchedule, Receipt, ReceiptResubmissionRequest, RegisteredService, ServiceCatalog, Submission, UserProfile
 
 
 class ReceiptInline(admin.TabularInline):
@@ -178,3 +178,15 @@ class EmailDeliveryLogAdmin(admin.ModelAdmin):
     list_filter = ("email_type", "status", "target_month", "created_at")
     search_fields = ("to_email", "subject", "message", "error", "idempotency_key", "user__username", "user__email")
     readonly_fields = ("created_at", "sent_at", "idempotency_key", "error")
+
+
+@admin.register(EmailReminderSchedule)
+class EmailReminderScheduleAdmin(admin.ModelAdmin):
+    list_display = ("reminder_day", "warning_day", "updated_by", "updated_at")
+    readonly_fields = ("created_at", "updated_at")
+
+    def has_add_permission(self, request):
+        return not EmailReminderSchedule.objects.exists()
+
+    def has_delete_permission(self, request, obj=None):
+        return False
