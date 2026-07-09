@@ -37,6 +37,7 @@ from .forms import (
     ServiceCatalogForm,
     StaffServiceForm,
     StaffUserCreateForm,
+    StaffUserPasswordResetForm,
     StaffUserStatusForm,
     EmailReminderScheduleForm,
     StaffEmailTestForm,
@@ -948,6 +949,15 @@ def download_receipt(request, pk: int):
 def staff_user_create(request):
     generated_user = None
     generated_password = None
+    password_result_user = None
+    password_result = None
+    password_result_was_random = False
+
+    # 既存データや手動作成ユーザーでプロファイルが欠けていても、
+    # ユーザー管理画面が500にならないように補完する。
+    for account in User.objects.filter(is_staff=False, is_superuser=False, profile__isnull=True):
+        UserProfile.objects.get_or_create(user=account)
+
     if request.method == "POST" and request.POST.get("action") == "update_status":
         status_form = StaffUserStatusForm(request.POST)
         if status_form.is_valid():
@@ -959,7 +969,20 @@ def staff_user_create(request):
                     messages.error(request, error)
         return redirect("staff_user_create")
 
-    if request.method == "POST":
+    if request.method == "POST" and request.POST.get("action") == "reset_password":
+        password_form = StaffUserPasswordResetForm(request.POST)
+        if password_form.is_valid():
+            password_result_user, password_result, password_result_was_random = password_form.save(updated_by=request.user)
+            if password_result_was_random:
+                messages.success(request, f"{password_result_user.username} のパスワードをランダム再発行しました。")
+            else:
+                messages.success(request, f"{password_result_user.username} のパスワードを変更しました。")
+        else:
+            for errors in password_form.errors.values():
+                for error in errors:
+                    messages.error(request, error)
+        form = StaffUserCreateForm()
+    elif request.method == "POST":
         form = StaffUserCreateForm(request.POST)
         if form.is_valid():
             generated_user, generated_password = form.save(created_by=request.user)
@@ -987,6 +1010,9 @@ def staff_user_create(request):
             "form": form,
             "generated_user": generated_user,
             "generated_password": generated_password,
+            "password_result_user": password_result_user,
+            "password_result": password_result,
+            "password_result_was_random": password_result_was_random,
             "managed_accounts": managed_accounts,
             "status_choices": UserAccountStatus.choices,
         },

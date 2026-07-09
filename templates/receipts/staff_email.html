@@ -1,10 +1,10 @@
 {% extends "base.html" %}
-{% block title %}メール - {{ app_name }}{% endblock %}
+{% block title %}メール送信 - {{ app_name }}{% endblock %}
 {% block content %}
 <div class="page-title">
     <div>
-        <h1>メール</h1>
-        <p class="muted">リマインダーメールのSMTP設定確認と、テスト送信を行います。</p>
+        <h1>メール送信</h1>
+        <p class="muted">リマインダーメールの送信日設定、SMTP設定確認、テスト送信を行います。</p>
     </div>
     <div class="actions">
         <a class="button" href="{% url 'history' %}">提出履歴へ</a>
@@ -23,37 +23,40 @@
 <section class="card section">
     <div class="section-header">
         <div>
+            <h2>リマインダー送信日</h2>
+            <p class="muted">通常リマインダーと【重要】警告メールを送る日付を変更できます。日付は毎月1〜28日の範囲で設定してください。</p>
+        </div>
+    </div>
+    <section class="status-grid compact-grid">
+        <div class="card"><span class="label">通常リマインダー</span><strong>毎月{{ reminder_schedule.reminder_day }}日</strong></div>
+        <div class="card"><span class="label">警告メール</span><strong>毎月{{ reminder_schedule.warning_day }}日</strong></div>
+    </section>
+    <form method="post" class="form-grid auth-card wide" novalidate>
+        {% csrf_token %}
+        <input type="hidden" name="action" value="update_reminder_schedule">
+        {{ schedule_form.as_p }}
+        <div class="actions">
+            <button type="submit" class="button primary">送信日を保存</button>
+        </div>
+    </form>
+    <p class="muted small">Railway Cronは毎日1回実行し、ここで設定した日付に一致した場合だけメールを送信します。</p>
+</section>
+
+<section class="card section">
+    <div class="section-header">
+        <div>
             <h2>テストメール送信</h2>
             <p class="muted">Resend SMTP設定が正しいか確認するため、任意のメールアドレスへテスト送信できます。送信先が停止中ユーザーの場合は送信せず、スキップとして記録します。</p>
         </div>
     </div>
     <form method="post" class="form-grid auth-card wide" novalidate>
         {% csrf_token %}
+        <input type="hidden" name="action" value="send_test_email">
         {{ form.as_p }}
         <div class="actions">
             <button type="submit" class="button primary">テスト送信</button>
         </div>
     </form>
-</section>
-
-<section class="card section">
-    <div class="section-header">
-        <div>
-            <h2>リマインダー実行設定</h2>
-            <p class="muted">Railway Cronで以下の管理コマンドを実行します。RailwayのcronScheduleはUTC基準です。</p>
-        </div>
-    </div>
-    <div class="credential-grid">
-        <div>
-            <span class="label">毎月4日 09:00 JST</span>
-            <code class="credential-value">python manage.py send_receipt_reminders --kind initial</code>
-        </div>
-        <div>
-            <span class="label">毎月10日 09:00 JST</span>
-            <code class="credential-value">python manage.py send_receipt_reminders --kind urgent</code>
-        </div>
-    </div>
-    <p class="muted small">同じ対象月・同じユーザーへのリマインダーは送信ログで重複送信を防ぎます。再送したい場合は管理コマンドに <code>--force</code> を付けます。</p>
 </section>
 
 <section class="card section">

@@ -491,3 +491,20 @@ body.tutorial-open { overflow-x: hidden; }
     flex-wrap: nowrap;
     white-space: nowrap;
 }
+
+.password-reset-cell {
+    min-width: 440px;
+}
+
+.password-reset-form {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    flex-wrap: nowrap;
+    white-space: nowrap;
+}
+
+.compact-password {
+    width: 150px;
+    min-width: 150px;
+}

@@ -22,6 +22,7 @@ from .models import (
     ServiceDeactivationSource,
     ServiceRegistrationSource,
     UserAccountStatus,
+    UserProfile,
     validate_upload_size,
 )
 
@@ -489,16 +490,76 @@ class StaffUserStatusForm(forms.Form):
     def clean_user_id(self):
         user_id = self.cleaned_data["user_id"]
         try:
-            return User.objects.select_related("profile").get(pk=user_id, is_active=True, is_staff=False, is_superuser=False)
+            user = User.objects.get(pk=user_id, is_active=True, is_staff=False, is_superuser=False)
         except User.DoesNotExist as exc:
             raise forms.ValidationError("対象ユーザーが見つかりません。") from exc
+        UserProfile.objects.get_or_create(user=user)
+        return user
 
     def save(self, *, updated_by: User | None = None) -> User:
         user = self.cleaned_data["user_id"]
-        profile = user.profile
+        profile, _ = UserProfile.objects.get_or_create(user=user)
         profile.account_status = self.cleaned_data["account_status"]
         profile.save(update_fields=["account_status", "updated_at"])
         return user
+
+
+class StaffUserPasswordResetForm(forms.Form):
+    user_id = forms.IntegerField(widget=forms.HiddenInput)
+    new_password = forms.CharField(
+        label="新パスワード",
+        required=False,
+        widget=forms.PasswordInput(attrs={"autocomplete": "new-password", "placeholder": "空欄ならランダム生成"}),
+        help_text="空欄で送信するとランダムパスワードを生成します。入力する場合は確認欄にも同じ値を入れてください。",
+    )
+    new_password_confirm = forms.CharField(
+        label="新パスワード確認",
+        required=False,
+        widget=forms.PasswordInput(attrs={"autocomplete": "new-password", "placeholder": "確認用"}),
+    )
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        apply_design_classes(self)
+
+    def clean_user_id(self):
+        user_id = self.cleaned_data["user_id"]
+        try:
+            user = User.objects.get(pk=user_id, is_active=True, is_staff=False, is_superuser=False)
+        except User.DoesNotExist as exc:
+            raise forms.ValidationError("対象ユーザーが見つかりません。") from exc
+        UserProfile.objects.get_or_create(user=user)
+        return user
+
+    def clean(self):
+        cleaned_data = super().clean()
+        password = cleaned_data.get("new_password") or ""
+        password_confirm = cleaned_data.get("new_password_confirm") or ""
+        user = cleaned_data.get("user_id")
+        if password or password_confirm:
+            if password != password_confirm:
+                self.add_error("new_password_confirm", "新パスワードと確認欄が一致しません。")
+            elif user:
+                try:
+                    validate_password(password, user=user)
+                except ValidationError as exc:
+                    self.add_error("new_password", exc)
+        return cleaned_data
+
+    def save(self, *, updated_by: User | None = None) -> tuple[User, str, bool]:
+        user = self.cleaned_data["user_id"]
+        manual_password = self.cleaned_data.get("new_password") or ""
+        generated_random = not bool(manual_password)
+        password = manual_password or generate_initial_password(user=user)
+        user.set_password(password)
+        user.save(update_fields=["password"])
+
+        profile, _ = UserProfile.objects.get_or_create(user=user)
+        profile.must_change_password = True
+        profile.initial_password_generated_at = timezone.now()
+        profile.password_changed_at = None
+        profile.save(update_fields=["must_change_password", "initial_password_generated_at", "password_changed_at", "updated_at"])
+        return user, password, generated_random
 
 
 class EmailOrUsernameAuthenticationForm(AuthenticationForm):

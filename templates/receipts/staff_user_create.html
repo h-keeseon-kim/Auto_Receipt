@@ -1,10 +1,10 @@
 {% extends "base.html" %}
-{% block title %}ユーザー発行 - ReceiptHub{% endblock %}
+{% block title %}ユーザー管理 - ReceiptHub{% endblock %}
 {% block content %}
 <div class="page-title">
     <div>
-        <h1>ユーザー発行</h1>
-        <p class="muted">一般ユーザーのアカウント作成と、利用ステータスの管理を行います。</p>
+        <h1>ユーザー管理</h1>
+        <p class="muted">一般ユーザーのアカウント作成、利用ステータス、パスワード再発行・変更を管理します。</p>
     </div>
     <div class="actions">
         <a class="button" href="{% url 'history' %}">提出履歴へ戻る</a>
@@ -37,6 +37,30 @@
 </section>
 {% endif %}
 
+{% if password_result_user and password_result %}
+<section class="card section credential-card">
+    <h2>変更後パスワード</h2>
+    <p class="muted">変更後パスワードはこの画面でのみ確認できます。既存パスワードはハッシュ化保存のため復元表示できません。</p>
+    <div class="credential-grid">
+        <div>
+            <span class="label">アカウント名</span>
+            <code class="credential-value">{{ password_result_user.username }}</code>
+        </div>
+        <div>
+            <span class="label">{% if password_result_was_random %}再発行パスワード{% else %}変更後パスワード{% endif %}</span>
+            <code class="credential-value">{{ password_result }}</code>
+        </div>
+        <div>
+            <span class="label">次回ログイン</span>
+            <strong>パスワード変更必須</strong>
+        </div>
+    </div>
+    <div class="notice message">
+        対象ユーザーへこのパスワードを安全な方法で伝えてください。ユーザーはログイン後、必ずパスワード変更ページへ移動します。
+    </div>
+</section>
+{% endif %}
+
 <section class="card section" data-tutorial-target="staff-user-create-form">
     <h2>新規ユーザー作成</h2>
     <form method="post" class="stack">
@@ -50,7 +74,7 @@
     <div class="section-header">
         <div>
             <h2>一般ユーザー管理</h2>
-            <p class="muted">停止中のユーザーには、月次リマインダーとテストメールを送信しません。サービスが0件になると自動で停止中、1件以上利用開始すると自動で利用中になります。</p>
+            <p class="muted">停止中のユーザーには、月次リマインダーとテストメールを送信しません。サービスが0件になると自動で停止中、1件以上利用開始すると自動で利用中になります。既存パスワードは確認できないため、必要な場合は再発行または変更してください。</p>
         </div>
     </div>
     <div class="table-wrap scroll-box medium horizontal-scroll">
@@ -63,7 +87,8 @@
                     <th>利用中サービス</th>
                     <th>初回変更</th>
                     <th>作成日時</th>
-                    <th>操作</th>
+                    <th>ステータス操作</th>
+                    <th>パスワード操作</th>
                 </tr>
             </thead>
             <tbody>
@@ -97,9 +122,19 @@
                             </form>
                             <a class="button small" href="{% url 'staff_user_services' account.pk %}">サービス登録</a>
                         </td>
+                        <td class="password-reset-cell">
+                            <form method="post" class="password-reset-form">
+                                {% csrf_token %}
+                                <input type="hidden" name="action" value="reset_password">
+                                <input type="hidden" name="user_id" value="{{ account.pk }}">
+                                <input type="password" name="new_password" class="form-control compact-password" placeholder="空欄ならランダム" autocomplete="new-password" aria-label="{{ account.username }} の新パスワード">
+                                <input type="password" name="new_password_confirm" class="form-control compact-password" placeholder="確認" autocomplete="new-password" aria-label="{{ account.username }} の新パスワード確認">
+                                <button type="submit" class="button small">変更/再発行</button>
+                            </form>
+                        </td>
                     </tr>
                 {% empty %}
-                    <tr><td colspan="7" class="muted center">一般ユーザーはまだ作成されていません。</td></tr>
+                    <tr><td colspan="8" class="muted center">一般ユーザーはまだ作成されていません。</td></tr>
                 {% endfor %}
             </tbody>
         </table>

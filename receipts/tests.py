@@ -839,6 +839,63 @@ class StaffUserProvisioningTests(TestCase):
         self.assertEqual(user.profile.account_status, UserAccountStatus.ACTIVE)
         self.assertContains(response, "利用中")
 
+    def test_staff_can_reset_user_password_randomly_and_view_it_once(self):
+        user = User.objects.create_user(username="reset@example.com", email="reset@example.com", password="OldPassword123")
+        user.profile.must_change_password = False
+        user.profile.save(update_fields=["must_change_password", "updated_at"])
+
+        response = self.client.post(
+            reverse("staff_user_create"),
+            {
+                "action": "reset_password",
+                "user_id": user.pk,
+                "new_password": "",
+                "new_password_confirm": "",
+            },
+        )
+
+        self.assertEqual(response.status_code, 200)
+        user.refresh_from_db()
+        user.profile.refresh_from_db()
+        generated_password = response.context["password_result"]
+        self.assertIsNotNone(generated_password)
+        self.assertTrue(user.check_password(generated_password))
+        self.assertTrue(user.profile.must_change_password)
+        self.assertIsNotNone(user.profile.initial_password_generated_at)
+        self.assertContains(response, "変更後パスワード")
+        self.assertContains(response, generated_password)
+
+    def test_staff_can_set_manual_user_password_on_user_management_page(self):
+        user = User.objects.create_user(username="manual@example.com", email="manual@example.com", password="OldPassword123")
+
+        response = self.client.post(
+            reverse("staff_user_create"),
+            {
+                "action": "reset_password",
+                "user_id": user.pk,
+                "new_password": "ManualPassword12345",
+                "new_password_confirm": "ManualPassword12345",
+            },
+        )
+
+        self.assertEqual(response.status_code, 200)
+        user.refresh_from_db()
+        user.profile.refresh_from_db()
+        self.assertTrue(user.check_password("ManualPassword12345"))
+        self.assertEqual(response.context["password_result"], "ManualPassword12345")
+        self.assertFalse(response.context["password_result_was_random"])
+        self.assertTrue(user.profile.must_change_password)
+
+    def test_user_management_page_repairs_missing_profile_instead_of_500(self):
+        user = User.objects.create_user(username="noprofile@example.com", email="noprofile@example.com", password="Password12345")
+        user.profile.delete()
+
+        response = self.client.get(reverse("staff_user_create"))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(hasattr(User.objects.get(pk=user.pk), "profile"))
+        self.assertContains(response, "noprofile@example.com")
+
     def test_non_staff_cannot_access_staff_user_create(self):
         self.client.logout()
         user = User.objects.create_user(username="user@example.com", email="user@example.com", password="password123")
