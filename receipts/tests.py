@@ -998,6 +998,69 @@ class StaffUserProvisioningTests(TestCase):
         self.assertContains(response, "このメールアドレスはすでに登録されています")
         self.assertEqual(User.objects.filter(username__iexact="existing@example.com").count(), 1)
 
+    def test_superuser_can_clear_own_contact_email_and_reuse_it_for_general_user(self):
+        previous_email = self.admin.email
+
+        response = self.client.post(
+            reverse("staff_user_create"),
+            {"action": "update_superuser_email", "email": ""},
+        )
+
+        self.assertRedirects(response, reverse("staff_user_create"))
+        self.admin.refresh_from_db()
+        self.assertEqual(self.admin.username, "admin")
+        self.assertEqual(self.admin.email, "")
+        self.assertTrue(self.admin.check_password("admin-password-123"))
+
+        response = self.client.post(
+            reverse("staff_user_create"),
+            {"action": "create_user", "email": previous_email},
+        )
+        self.assertEqual(response.status_code, 200)
+        account = User.objects.get(username=previous_email)
+        self.assertFalse(account.is_staff)
+        self.assertEqual(account.email, previous_email)
+
+    def test_superuser_contact_email_rejects_address_used_by_another_account(self):
+        User.objects.create_user(username="used@example.com", email="used@example.com", password="password123")
+
+        response = self.client.post(
+            reverse("staff_user_create"),
+            {"action": "update_superuser_email", "email": "USED@example.com"},
+            follow=True,
+        )
+
+        self.assertContains(response, "このメールアドレスはすでに登録されています")
+        self.admin.refresh_from_db()
+        self.assertEqual(self.admin.email, "admin@example.com")
+
+    def test_clear_superuser_email_management_command_keeps_login_credentials(self):
+        call_command("clear_superuser_email", "--username", "admin")
+
+        self.admin.refresh_from_db()
+        self.assertEqual(self.admin.email, "")
+        self.assertEqual(self.admin.username, "admin")
+        self.assertTrue(self.admin.check_password("admin-password-123"))
+
+    def test_non_superuser_staff_cannot_change_superuser_contact_email(self):
+        manager = User.objects.create_user(
+            username="manager@example.com",
+            email="manager@example.com",
+            password="manager-password-123",
+            is_staff=True,
+        )
+        self.client.logout()
+        self.client.login(username=manager.username, password="manager-password-123")
+
+        response = self.client.post(
+            reverse("staff_user_create"),
+            {"action": "update_superuser_email", "email": ""},
+        )
+
+        self.assertEqual(response.status_code, 403)
+        self.admin.refresh_from_db()
+        self.assertEqual(self.admin.email, "admin@example.com")
+
     def test_staff_can_change_user_status_on_user_create_page(self):
         user = User.objects.create_user(username="status@example.com", email="status@example.com", password="password123")
         self.assertEqual(user.profile.account_status, UserAccountStatus.STOPPED)
@@ -2446,4 +2509,4 @@ class FinalWorkflowAcceptanceTests(TestCase):
         self.assertTrue(CardStatement.objects.filter(pk=statement.pk).exists())
 
     def test_version_file_is_present_without_web_display_requirement(self):
-        self.assertEqual(Path("VERSION").read_text(encoding="utf-8").strip(), "1.1.0")
+        self.assertEqual(Path("VERSION").read_text(encoding="utf-8").strip(), "1.1.1")

@@ -4,9 +4,32 @@
 <div class="page-title">
     <div>
         <h1>ユーザー管理</h1>
-        <p class="muted">アカウント作成・削除、利用ステータス、パスワード再発行を管理します。スーパーアカウントは一般・管理者の権限も変更できます。</p>
+        <p class="muted">アカウント作成・削除、利用ステータス、パスワード再発行を管理します。スーパーアカウントは権限と自身の連絡先メールアドレスも変更できます。</p>
     </div>
 </div>
+
+{% if superuser_email_form %}
+<section class="card section">
+    <div class="section-header">
+        <div>
+            <h2>スーパーアカウント設定</h2>
+            <p class="muted">連絡先メールアドレスは任意です。空欄にしても、ログイン名「{{ request.user.username }}」とパスワードは変更されません。</p>
+        </div>
+    </div>
+    <form method="post" class="form-grid">
+        {% csrf_token %}
+        <input type="hidden" name="action" value="update_superuser_email">
+        {{ superuser_email_form.non_field_errors }}
+        <div class="form-row">
+            {{ superuser_email_form.email.errors }}
+            {{ superuser_email_form.email.label_tag }}
+            {{ superuser_email_form.email }}
+            {% if superuser_email_form.email.help_text %}<span class="helptext">{{ superuser_email_form.email.help_text }}</span>{% endif %}
+        </div>
+        <button type="submit" class="button">連絡先メールを保存</button>
+    </form>
+</section>
+{% endif %}
 
 {% if generated_user and generated_password %}
 <section class="card section credential-card">

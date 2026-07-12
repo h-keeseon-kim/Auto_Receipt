@@ -50,8 +50,12 @@ def normalize_account_email(value: str) -> str:
     return (value or "").strip().lower()
 
 
-def ensure_unique_account_email(email: str):
-    if User.objects.filter(username__iexact=email).exists() or User.objects.filter(email__iexact=email).exists():
+def ensure_unique_account_email(email: str, *, exclude_user: User | None = None):
+    """ログイン名または連絡先メールとして使用済みのアドレスを拒否する。"""
+    queryset = User.objects.all()
+    if exclude_user is not None and exclude_user.pk:
+        queryset = queryset.exclude(pk=exclude_user.pk)
+    if queryset.filter(username__iexact=email).exists() or queryset.filter(email__iexact=email).exists():
         raise forms.ValidationError("このメールアドレスはすでに登録されています。")
 
 
@@ -524,6 +528,38 @@ class RegisterForm(UserCreationForm):
         if commit:
             user.save()
         return user
+
+
+class StaffSuperuserEmailForm(forms.Form):
+    email = forms.EmailField(
+        label="スーパーアカウントの連絡先メールアドレス",
+        required=False,
+        max_length=254,
+        widget=forms.EmailInput(attrs={"autocomplete": "email", "placeholder": "空欄にできます"}),
+        help_text=(
+            "空欄で保存すると、現在のメールアドレスを一般ユーザーのアカウント名として使用できるようになります。"
+            "スーパーアカウントのログイン名は変更されません。"
+        ),
+    )
+
+    def __init__(self, *args, user: User, **kwargs):
+        if not user.is_superuser:
+            raise ValueError("スーパーアカウントだけが連絡先メールアドレスを変更できます。")
+        self.user = user
+        kwargs.setdefault("initial", {"email": user.email})
+        super().__init__(*args, **kwargs)
+        apply_design_classes(self)
+
+    def clean_email(self):
+        email = normalize_account_email(self.cleaned_data.get("email") or "")
+        if email:
+            ensure_unique_account_email(email, exclude_user=self.user)
+        return email
+
+    def save(self) -> User:
+        self.user.email = self.cleaned_data["email"]
+        self.user.save(update_fields=["email"])
+        return self.user
 
 
 class StaffUserCreateForm(forms.Form):

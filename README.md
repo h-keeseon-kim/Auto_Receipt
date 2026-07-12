@@ -1,12 +1,12 @@
 # ReceiptHub
 
-**Version: 1.1.0**
+**Version: 1.1.1**
 
 ReceiptHubは、社内で利用しているサブスクリプション、従量課金/API、一回払いサービスの領収書を月単位で回収・検査・管理するDjangoアプリです。
 
 バージョンはリポジトリ直下の `VERSION` に記録します。Web画面には表示しません。
 
-## v1.1.0で実現する最終フロー
+## v1.1.1で実現する最終フロー
 
 ### 一般ユーザー
 
@@ -338,17 +338,13 @@ python manage.py process_pending_receipts --limit 100
 既存リポジトリへパッチを適用した後、Railwayへpushします。
 
 ```bash
-git apply ReceiptHub_v1.1.0.patch
+git apply ReceiptHub_v1.1.1.patch
 git add .
-git commit -m "Release ReceiptHub v1.1.0"
+git commit -m "Release ReceiptHub v1.1.1"
 git push
 ```
 
-今回追加される主なマイグレーションは次です。
-
-```text
-receipts/migrations/0015_extra_receipts.py
-```
+v1.1.1では新しいDBマイグレーションはありません。既存のv1.1.0までのマイグレーションが適用済みであれば、そのままデプロイできます。
 
 デプロイ後の確認:
 
@@ -370,3 +366,16 @@ node --check static/js/staff_statement_processing.js
 ```
 
 OpenAI APIとResend SMTPの本番疎通は、管理画面のAI実行・テストメール機能で確認してください。自動テストでは外部API呼び出しをモックします。
+
+
+### スーパーアカウントの連絡先メール
+
+スーパーアカウントのログイン名は `admin` のまま維持し、連絡先メールアドレスは任意にできます。「ユーザー管理」の「スーパーアカウント設定」でメール欄を空欄にして保存すると、そのメールアドレスを一般ユーザーのアカウント名として再利用できます。
+
+CLIから実施する場合は次を実行します。
+
+```bash
+python manage.py clear_superuser_email --username admin
+```
+
+この操作はスーパーアカウントのログイン名・パスワード・権限を変更しません。

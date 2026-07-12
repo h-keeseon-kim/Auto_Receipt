@@ -40,6 +40,7 @@ from .forms import (
     ServiceCatalogForm,
     StaffServiceForm,
     StaffUserCreateForm,
+    StaffSuperuserEmailForm,
     StaffUserPasswordResetForm,
     StaffUserRoleForm,
     StaffUserStatusForm,
@@ -1284,6 +1285,25 @@ def staff_user_create(request):
     action = request.POST.get("action") if request.method == "POST" else ""
     create_form_kwargs = {"allow_admin_role": request.user.is_superuser}
 
+    if action == "update_superuser_email":
+        if not request.user.is_superuser:
+            raise PermissionDenied("スーパーアカウントのメールアドレスを変更できるのは本人だけです。")
+        superuser_email_form = StaffSuperuserEmailForm(request.POST, user=request.user)
+        if superuser_email_form.is_valid():
+            previous_email = request.user.email
+            account = superuser_email_form.save()
+            if account.email:
+                messages.success(request, f"スーパーアカウントの連絡先メールアドレスを {account.email} に変更しました。")
+            elif previous_email:
+                messages.success(request, "スーパーアカウントの連絡先メールアドレスを空欄にしました。以前のメールアドレスを一般ユーザー登録に使用できます。")
+            else:
+                messages.info(request, "スーパーアカウントの連絡先メールアドレスはすでに空欄です。")
+        else:
+            for errors in superuser_email_form.errors.values():
+                for error in errors:
+                    messages.error(request, error)
+        return redirect("staff_user_create")
+
     if action == "update_status":
         status_form = StaffUserStatusForm(request.POST)
         if status_form.is_valid():
@@ -1380,6 +1400,9 @@ def staff_user_create(request):
             "status_choices": UserAccountStatus.choices,
             "role_choices": StaffUserCreateForm.ROLE_CHOICES,
             "can_manage_roles": request.user.is_superuser,
+            "superuser_email_form": (
+                StaffSuperuserEmailForm(user=request.user) if request.user.is_superuser else None
+            ),
         },
     )
 
