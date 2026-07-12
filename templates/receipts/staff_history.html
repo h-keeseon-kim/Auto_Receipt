@@ -35,9 +35,10 @@
     <div class="section-header">
         <div>
             <h2>提出状況</h2>
-            <p class="muted">ユーザー名順です。「月別状況」からサービス単位の提出状況とカード明細の照合結果を確認できます。</p>
+            <p class="muted">ユーザー名順です。「月別状況」からサービス単位の提出状況を確認できます。全社カード明細は専用ページで一括照合します。</p>
         </div>
         <div class="actions nowrap">
+            <a class="button" href="{% url 'staff_card_statements' %}?month={{ selected_month|date:'Y-m' }}">ご利用代金明細</a>
             <a class="button primary" href="{% url 'staff_download_month' %}?month={{ selected_month|date:'Y-m' }}">提出済みZIP</a>
         </div>
     </div>
@@ -58,7 +59,7 @@
                         <td>
                             <div class="table-actions">
                                 <a class="button small primary" href="{% url 'staff_user_month_status' row.user.pk %}?month={{ selected_month|date:'Y-m' }}">月別状況</a>
-                                <a class="button small" href="{% url 'staff_services' %}?user={{ row.user.pk }}">サービス</a>
+                                <a class="button small" href="{% url 'staff_services' %}?tab=users&user={{ row.user.pk }}">サービス</a>
                                 {% if row.submission %}
                                     <a class="button small" href="{% url 'staff_submission_detail' row.submission.pk %}">提出詳細</a>
                                     <a class="button small" href="{% url 'staff_download_submission' row.submission.pk %}">ZIP</a>

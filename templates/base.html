@@ -14,6 +14,7 @@
             {% if user.is_authenticated %}
                 {% if user.is_staff %}
                     <a href="{% url 'history' %}" data-tutorial-target="staff-history-nav">提出履歴</a>
+                    <a href="{% url 'staff_card_statements' %}" data-tutorial-target="staff-statements-nav">ご利用代金明細</a>
                     <a href="{% url 'staff_services' %}" data-tutorial-target="staff-services-nav">利用サービス管理</a>
                     <a href="{% url 'staff_user_create' %}" data-tutorial-target="staff-user-create-nav">ユーザー管理</a>
                     <a href="{% url 'staff_email' %}">メール送信</a>
@@ -47,7 +48,7 @@
     </main>
 
     {% if user.is_authenticated and tutorial_available %}
-        <div class="tutorial-backdrop" data-tutorial-root data-auto-start="{% if tutorial_auto_start %}true{% else %}false{% endif %}" data-complete-url="{{ tutorial_complete_url }}" data-user-services-url="{% url 'user_services' %}" data-upload-url="{% url 'dashboard' %}" data-history-url="{% url 'history' %}" data-staff-services-url="{% url 'staff_services' %}" data-staff-user-create-url="{% url 'staff_user_create' %}" hidden>
+        <div class="tutorial-backdrop" data-tutorial-root data-auto-start="{% if tutorial_auto_start %}true{% else %}false{% endif %}" data-complete-url="{{ tutorial_complete_url }}" data-user-services-url="{% url 'user_services' %}" data-upload-url="{% url 'dashboard' %}" data-history-url="{% url 'history' %}" data-staff-statements-url="{% url 'staff_card_statements' %}" data-staff-services-url="{% url 'staff_services' %}?tab=catalog" data-staff-user-create-url="{% url 'staff_user_create' %}" hidden>
             <form hidden>{% csrf_token %}</form>
             <section class="tutorial-card" role="dialog" aria-modal="true" aria-labelledby="tutorial-title" aria-describedby="tutorial-body" tabindex="-1">
                 <button type="button" class="tutorial-close" data-tutorial-close aria-label="チュートリアルを閉じる">×</button>

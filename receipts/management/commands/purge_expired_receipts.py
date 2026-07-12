@@ -30,7 +30,6 @@ class Command(BaseCommand):
                 expires_at__lte=now,
             )
             .exclude(file="")
-            .select_related("user")
             .order_by("expires_at")[:batch_size]
         )
 
@@ -56,7 +55,7 @@ class Command(BaseCommand):
         statement_purged = 0
         for statement in statements:
             label = (
-                f"カード明細#{statement.id} {statement.user} "
+                f"全社カード明細#{statement.id} "
                 f"{statement.period_month:%Y-%m} expires_at={statement.expires_at}"
             )
             if dry_run:

@@ -77,7 +77,7 @@ from .models import (
     receipt_expiry_from,
 )
 from .monthly_status import build_user_month_summary
-from .statement_processing import start_background_statement_processing
+from .statement_processing import reconcile_card_statement_items, start_background_statement_processing
 
 
 def safe_part(value: str, fallback: str = "item") -> str:
@@ -417,6 +417,9 @@ def user_service_stop(request, pk: int):
 
 @staff_member_required
 def staff_services(request):
+    active_tab = request.GET.get("tab") or ("users" if request.GET.get("user") else "catalog")
+    if active_tab not in {"catalog", "users"}:
+        active_tab = "catalog"
     users = list(
         managed_users_queryset().annotate(
             total_service_count=Count("registered_services", distinct=True),
@@ -470,6 +473,7 @@ def staff_services(request):
         request,
         "receipts/staff_services.html",
         {
+            "active_tab": active_tab,
             "users": users,
             "services": services,
             "selected_user": selected_user,
@@ -929,17 +933,7 @@ def staff_user_month_status(request, user_id: int):
         .prefetch_related(Prefetch("receipts", queryset=Receipt.objects.select_related("service").order_by("uploaded_at", "pk")))
         .first()
     )
-    statements = (
-        CardStatement.objects.filter(user=managed_user, period_month=selected_month)
-        .select_related("uploaded_by")
-        .prefetch_related(
-            Prefetch(
-                "items",
-                queryset=CardStatementItem.objects.select_related("matched_service", "matched_receipt").order_by("sequence", "pk"),
-            )
-        )
-        .order_by("-uploaded_at")
-    )
+    global_statement_count = CardStatement.objects.filter(period_month=selected_month).count()
     return render(
         request,
         "receipts/staff_user_month_status.html",
@@ -950,28 +944,80 @@ def staff_user_month_status(request, user_id: int):
             "monthly_summary": monthly_summary,
             "available_services": available_services,
             "submission": submission,
+            "global_statement_count": global_statement_count,
+        },
+    )
+
+
+def global_statement_services(period_month):
+    return (
+        RegisteredService.objects.filter(user__is_active=True, user__is_staff=False, user__is_superuser=False)
+        .filter(Q(is_active=True) | Q(is_active=False, final_receipt_month__gte=period_month))
+        .select_related("user", "catalog_service")
+        .order_by("user__username", "name", "billing_type")
+    )
+
+
+def global_statement_queryset(period_month):
+    return (
+        CardStatement.objects.filter(period_month=period_month)
+        .select_related("uploaded_by")
+        .prefetch_related(
+            Prefetch(
+                "items",
+                queryset=CardStatementItem.objects.select_related(
+                    "matched_user",
+                    "matched_catalog_service",
+                    "matched_service__user",
+                    "matched_service__catalog_service",
+                    "matched_receipt__submission__user",
+                    "matched_receipt__service__catalog_service",
+                ).order_by("sequence", "pk"),
+            )
+        )
+        .order_by("-uploaded_at", "-pk")
+    )
+
+
+@staff_member_required
+def staff_card_statements(request):
+    selected_month, month_form = parse_month_from_request(request)
+    statements = global_statement_queryset(selected_month)
+    available_services = global_statement_services(selected_month)
+    stats = {
+        "statement_count": statements.count(),
+        "processing_count": statements.filter(status=CardStatementStatus.PROCESSING).count(),
+        "missing_count": sum(statement.missing_receipt_count for statement in statements),
+        "manual_review_count": sum(statement.manual_review_count for statement in statements),
+    }
+    return render(
+        request,
+        "receipts/staff_card_statements.html",
+        {
+            "selected_month": selected_month,
+            "month_form": month_form,
             "statements": statements,
             "statement_form": CardStatementUploadForm(),
+            "available_services": available_services,
             "target_card_last4": target_card_last4(),
+            "stats": stats,
         },
     )
 
 
 @staff_member_required
 @require_POST
-def staff_upload_card_statement(request, user_id: int):
-    managed_user = get_managed_user(user_id)
+def staff_upload_card_statement(request):
     selected_month = parse_month_value(request.POST.get("month"))
     form = CardStatementUploadForm(request.POST, request.FILES)
     if not form.is_valid():
         for errors in form.errors.values():
             for error in errors:
                 messages.error(request, error)
-        return redirect(f"{reverse('staff_user_month_status', args=[managed_user.pk])}?month={month_query(selected_month)}")
+        return redirect(f"{reverse('staff_card_statements')}?month={month_query(selected_month)}")
 
     upload = form.cleaned_data["file"]
     statement = form.save(commit=False)
-    statement.user = managed_user
     statement.period_month = selected_month
     statement.original_filename = upload.name
     statement.file_size = upload.size
@@ -986,33 +1032,23 @@ def staff_upload_card_statement(request, user_id: int):
         messages.error(request, exc.messages[0] if exc.messages else str(exc))
     else:
         start_background_statement_processing(statement.pk)
-        messages.success(request, "ご利用代金明細書をアップロードしました。AIで明細項目を解析中です。完了後、未提出の領収書をハイライトします。")
-    return redirect(f"{reverse('staff_user_month_status', args=[managed_user.pk])}?month={month_query(selected_month)}")
+        messages.success(
+            request,
+            "全ユーザー共通のご利用代金明細書をアップロードしました。AIで全明細行を抽出し、対象月に全ユーザーが提出した領収書と照合しています。",
+        )
+    return redirect(f"{reverse('staff_card_statements')}?month={month_query(selected_month)}")
 
 
 @staff_member_required
-def staff_card_statement_status(request, user_id: int):
-    managed_user = get_managed_user(user_id)
+def staff_card_statement_status(request):
     selected_month = parse_month_value(request.GET.get("month"))
-    available_services = RegisteredService.objects.uploadable_for(managed_user, selected_month).select_related("catalog_service")
-    statements = (
-        CardStatement.objects.filter(user=managed_user, period_month=selected_month)
-        .select_related("uploaded_by")
-        .prefetch_related(
-            Prefetch(
-                "items",
-                queryset=CardStatementItem.objects.select_related("matched_service", "matched_receipt").order_by("sequence", "pk"),
-            )
-        )
-        .order_by("-uploaded_at")
-    )
+    statements = global_statement_queryset(selected_month)
     html = render_to_string(
         "receipts/_staff_card_statements.html",
         {
-            "managed_user": managed_user,
             "selected_month": selected_month,
             "statements": statements,
-            "available_services": available_services,
+            "available_services": global_statement_services(selected_month),
             "target_card_last4": target_card_last4(),
         },
         request=request,
@@ -1023,7 +1059,7 @@ def staff_card_statement_status(request, user_id: int):
 
 @staff_member_required
 def staff_download_card_statement(request, pk: int):
-    statement = get_object_or_404(CardStatement.objects.select_related("user"), pk=pk, user__is_staff=False, user__is_superuser=False)
+    statement = get_object_or_404(CardStatement, pk=pk)
     if not statement.file_available:
         raise Http404("保存期限が過ぎたか、明細ファイルが削除済みです。")
     filename = statement.original_filename or Path(statement.file.name).name
@@ -1033,41 +1069,39 @@ def staff_download_card_statement(request, pk: int):
 @staff_member_required
 @require_POST
 def staff_delete_card_statement(request, pk: int):
-    statement = get_object_or_404(CardStatement.objects.select_related("user"), pk=pk, user__is_staff=False, user__is_superuser=False)
-    user_id = statement.user_id
+    statement = get_object_or_404(CardStatement, pk=pk)
     selected_month = statement.period_month
     filename = statement.original_filename or "ご利用代金明細書"
     statement.delete()
-    messages.success(request, f"{filename} と解析履歴を削除しました。")
-    return redirect(f"{reverse('staff_user_month_status', args=[user_id])}?month={month_query(selected_month)}")
+    messages.success(request, f"{filename} と全ユーザー照合履歴を削除しました。")
+    return redirect(f"{reverse('staff_card_statements')}?month={month_query(selected_month)}")
 
 
-def refresh_card_statement_review_status(statement: CardStatement):
-    target_last4 = str(getattr(settings, "RECEIPT_CARD_LAST4", "7210"))[-4:]
-    target_month = statement.period_month.strftime("%Y-%m")
-    unresolved = statement.items.filter(
-        receipt_required=True,
-        match_status__in=[StatementMatchStatus.AMBIGUOUS, StatementMatchStatus.UNMATCHED],
-    ).exists()
-    statement.status = (
-        CardStatementStatus.NEEDS_REVIEW
-        if unresolved or statement.card_last4 != target_last4 or statement.statement_period != target_month
-        else CardStatementStatus.COMPLETED
-    )
-    statement.save(update_fields=["status", "updated_at"])
+@staff_member_required
+@require_POST
+def staff_reconcile_card_statement(request, pk: int):
+    statement = get_object_or_404(CardStatement, pk=pk)
+    if statement.status == CardStatementStatus.PROCESSING:
+        messages.info(request, "AI解析中のため、完了後に再照合してください。")
+    elif statement.status == CardStatementStatus.FAILED:
+        messages.error(request, "AI解析に失敗した明細書は再照合できません。明細書を削除して再アップロードしてください。")
+    else:
+        reconcile_card_statement_items(statement.pk)
+        messages.success(request, "対象月に現在保存されている全ユーザーの領収書と再照合しました。")
+    return redirect(f"{reverse('staff_card_statements')}?month={month_query(statement.period_month)}#statement-{statement.pk}")
 
 
 @staff_member_required
 @require_POST
 def staff_update_statement_item(request, pk: int):
     item = get_object_or_404(
-        CardStatementItem.objects.select_related("statement", "statement__user"),
+        CardStatementItem.objects.select_related("statement", "matched_service", "matched_catalog_service"),
         pk=pk,
-        statement__user__is_staff=False,
-        statement__user__is_superuser=False,
     )
     action = request.POST.get("item_action") or "match"
     if action == "ignore":
+        item.matched_user = None
+        item.matched_catalog_service = None
         item.matched_service = None
         item.matched_receipt = None
         item.match_status = StatementMatchStatus.IGNORED
@@ -1077,37 +1111,28 @@ def staff_update_statement_item(request, pk: int):
     else:
         service_id = request.POST.get("service_id")
         if not service_id:
-            messages.error(request, "対応サービスを選択してください。")
+            messages.error(request, "対応するユーザー / サービスを選択してください。")
             return redirect(
-                f"{reverse('staff_user_month_status', args=[item.statement.user_id])}?month={month_query(item.statement.period_month)}#statement-{item.statement_id}"
+                f"{reverse('staff_card_statements')}?month={month_query(item.statement.period_month)}#statement-{item.statement_id}"
             )
         service = get_object_or_404(
-            RegisteredService,
+            RegisteredService.objects.select_related("user", "catalog_service"),
             pk=service_id,
-            user=item.statement.user,
+            user__is_staff=False,
+            user__is_superuser=False,
         )
+        item.matched_user = service.user
+        item.matched_catalog_service = service.catalog_service
         item.matched_service = service
-        used_receipt_ids = CardStatementItem.objects.filter(
-            statement=item.statement,
-            matched_receipt__isnull=False,
-        ).exclude(pk=item.pk).values_list("matched_receipt_id", flat=True)
-        item.matched_receipt = (
-            Receipt.objects.available_files()
-            .filter(
-                submission__user=item.statement.user,
-                submission__period_month=item.statement.period_month,
-                service=service,
-            )
-            .exclude(pk__in=used_receipt_ids)
-            .order_by("uploaded_at", "pk")
-            .first()
-        )
+        item.matched_receipt = None
         item.match_status = StatementMatchStatus.MATCHED
         item.receipt_required = request.POST.get("receipt_required") == "on"
         item.match_confidence = 1.0
-        item.match_memo = "管理者が対応サービスを確認しました。"
+        item.match_memo = "管理者が対応ユーザーとサービスを確認しました。"
     item.save(
         update_fields=[
+            "matched_user",
+            "matched_catalog_service",
             "matched_service",
             "matched_receipt",
             "match_status",
@@ -1116,11 +1141,12 @@ def staff_update_statement_item(request, pk: int):
             "match_memo",
         ]
     )
-    refresh_card_statement_review_status(item.statement)
+    reconcile_card_statement_items(item.statement_id, preserve_manual=True)
     messages.success(request, f"明細 {item.line_reference or item.pk} の対応を更新しました。")
     return redirect(
-        f"{reverse('staff_user_month_status', args=[item.statement.user_id])}?month={month_query(item.statement.period_month)}#statement-{item.statement_id}"
+        f"{reverse('staff_card_statements')}?month={month_query(item.statement.period_month)}#statement-{item.statement_id}"
     )
+
 
 def staff_history(request):
     selected_month, month_form = parse_month_from_request(request)
@@ -1341,11 +1367,10 @@ def staff_user_create(request):
             # post_delete シグナルにより実ファイルも同時に削除される。
             with transaction.atomic():
                 Receipt.objects.filter(submission__user=account).delete()
-                CardStatement.objects.filter(user=account).delete()
                 Submission.objects.filter(user=account).delete()
                 RegisteredService.objects.filter(user=account).delete()
                 account.delete()
-            messages.success(request, f"{username} を削除しました。関連するサービス、提出履歴、領収書ファイル、カード明細も削除されました。")
+            messages.success(request, f"{username} を削除しました。関連するサービス、提出履歴、領収書ファイルも削除されました。全社カード明細の行データは監査履歴として残り、ユーザー紐付けだけが解除されます。")
         return redirect("staff_user_create")
 
     if action == "reset_password":

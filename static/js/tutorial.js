@@ -118,6 +118,27 @@
             placement: "above",
         },
         {
+            pageName: "staff_card_statements",
+            selector: "[data-tutorial-target='staff-statements-nav']",
+            title: "ご利用代金明細ページです",
+            body: "会社全体のカード明細をアップロードし、対象月に全ユーザーが提出した領収書と一括照合します。",
+            placement: "below",
+        },
+        {
+            pageName: "staff_card_statements",
+            selector: "[data-tutorial-target='staff-statement-upload-section']",
+            title: "全社明細書をアップロードします",
+            body: "対象月を選び、ユーザーを指定せずに会社共通のご利用代金明細書をアップロードします。AIが明細表の全行を抽出します。",
+            placement: "above",
+        },
+        {
+            pageName: "staff_card_statements",
+            selector: "[data-tutorial-target='staff-statement-results']",
+            title: "未提出の明細行を確認します",
+            body: "黄色は一致する領収書が全ユーザーの提出物から見つからない行、薄橙色はユーザーまたはサービスの対応が曖昧な行です。",
+            placement: "above",
+        },
+        {
             pageName: "staff_services",
             selector: "[data-tutorial-target='staff-services-nav']",
             title: "利用サービス管理を行います",
@@ -226,6 +247,7 @@
             user_services: root.dataset.userServicesUrl,
             dashboard: root.dataset.uploadUrl,
             history: root.dataset.historyUrl,
+            staff_card_statements: root.dataset.staffStatementsUrl,
             staff_services: root.dataset.staffServicesUrl,
             staff_user_create: root.dataset.staffUserCreateUrl,
         };

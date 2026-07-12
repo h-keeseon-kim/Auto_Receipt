@@ -1,0 +1,51 @@
+{% extends "base.html" %}
+{% load static %}
+{% block title %}ご利用代金明細 - ReceiptHub{% endblock %}
+{% block content %}
+<div class="page-title">
+    <div>
+        <h1>ご利用代金明細</h1>
+        <p class="muted">会社全体のカード明細を、対象月にすべての一般ユーザーがアップロードした領収書と一括照合します。</p>
+    </div>
+    <form method="get" class="month-form">
+        {{ month_form.month.label_tag }}
+        {{ month_form.month }}
+        <button class="button" type="submit">表示</button>
+    </form>
+</div>
+
+<section class="status-grid">
+    <div class="card"><span class="label">明細書</span><strong>{{ stats.statement_count }}</strong></div>
+    <div class="card"><span class="label">AI解析中</span><strong class="{% if stats.processing_count %}danger{% endif %}">{{ stats.processing_count }}</strong></div>
+    <div class="card"><span class="label">領収書未提出行</span><strong class="{% if stats.missing_count %}danger{% endif %}">{{ stats.missing_count }}</strong></div>
+    <div class="card"><span class="label">手動確認行</span><strong class="{% if stats.manual_review_count %}danger{% endif %}">{{ stats.manual_review_count }}</strong></div>
+</section>
+
+<section class="card section" data-tutorial-target="staff-statement-upload-section">
+    <div class="section-header">
+        <div>
+            <h2>{{ selected_month|date:"Y年m月" }}分の全社明細書をアップロード</h2>
+            <p class="muted">ユーザーは選択しません。AIが全明細行を抽出した後、対象月の全ユーザー領収書と一対一で照合し、未提出行を黄色で表示します。</p>
+        </div>
+    </div>
+    <form method="post" enctype="multipart/form-data" action="{% url 'staff_upload_card_statement' %}" class="statement-upload-form">
+        {% csrf_token %}
+        <input type="hidden" name="month" value="{{ selected_month|date:'Y-m' }}">
+        <div class="form-row">
+            {{ statement_form.file.errors }}
+            {{ statement_form.file.label_tag }}
+            {{ statement_form.file }}
+            {% if statement_form.file.help_text %}<span class="helptext">{{ statement_form.file.help_text }}</span>{% endif %}
+        </div>
+        <button type="submit" class="button primary">明細書をアップロードして全ユーザー照合</button>
+    </form>
+</section>
+
+<div data-statement-results data-tutorial-target="staff-statement-results" data-status-url="{% url 'staff_card_statement_status' %}?month={{ selected_month|date:'Y-m' }}">
+    {% include "receipts/_staff_card_statements.html" %}
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script src="{% static 'js/staff_statement_processing.js' %}" defer></script>
+{% endblock %}

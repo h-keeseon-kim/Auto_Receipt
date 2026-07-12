@@ -237,6 +237,8 @@ class CardStatementItemInline(admin.TabularInline):
         "amount_jpy",
         "original_amount",
         "original_currency",
+        "matched_user",
+        "matched_catalog_service",
         "matched_service",
         "match_status",
         "receipt_required",
@@ -249,7 +251,6 @@ class CardStatementItemInline(admin.TabularInline):
 @admin.register(CardStatement)
 class CardStatementAdmin(admin.ModelAdmin):
     list_display = (
-        "user",
         "period_month",
         "status",
         "card_last4",
@@ -260,8 +261,8 @@ class CardStatementAdmin(admin.ModelAdmin):
         "file_deleted_at",
     )
     list_filter = ("status", "period_month", "file_deleted_at")
-    search_fields = ("user__username", "user__email", "original_filename", "ai_admin_memo", "items__merchant_name")
-    readonly_fields = ("uploaded_at", "processed_at", "expires_at", "file_deleted_at", "file_delete_reason", "updated_at")
+    search_fields = ("original_filename", "ai_admin_memo", "items__merchant_name", "items__matched_user__username")
+    readonly_fields = ("uploaded_at", "processed_at", "reconciled_at", "expires_at", "file_deleted_at", "file_delete_reason", "updated_at")
     inlines = [CardStatementItemInline]
 
 
@@ -273,10 +274,12 @@ class CardStatementItemAdmin(admin.ModelAdmin):
         "transaction_date",
         "merchant_name",
         "amount_jpy",
+        "matched_user",
+        "matched_catalog_service",
         "matched_service",
         "match_status",
         "receipt_required",
         "matched_receipt",
     )
     list_filter = ("match_status", "receipt_required", "statement__period_month")
-    search_fields = ("merchant_name", "line_reference", "statement__user__username", "matched_service__name", "match_memo")
+    search_fields = ("merchant_name", "line_reference", "matched_user__username", "matched_service__name", "match_memo")

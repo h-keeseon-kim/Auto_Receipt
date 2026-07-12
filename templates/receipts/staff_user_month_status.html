@@ -1,11 +1,10 @@
 {% extends "base.html" %}
-{% load static %}
 {% block title %}ユーザー月別状況 - ReceiptHub{% endblock %}
 {% block content %}
 <div class="page-title">
     <div>
         <h1>{{ managed_user.username }} / {{ selected_month|date:"Y年m月" }}</h1>
-        <p class="muted">利用サービスごとの領収書状況と、ご利用代金明細書との照合結果を確認できます。</p>
+        <p class="muted">利用サービスごとの領収書提出状況を確認できます。全社カード明細との照合は専用ページで行います。</p>
         <div class="actions">
             <a class="button" href="{% url 'history' %}?month={{ selected_month|date:'Y-m' }}">提出履歴へ戻る</a>
             <a class="button" href="{% url 'staff_user_services' managed_user.pk %}">利用サービス管理</a>
@@ -65,28 +64,11 @@
 <section class="card section">
     <div class="section-header">
         <div>
-            <h2>ご利用代金明細書</h2>
-            <p class="muted">カード明細をアップロードすると、AIがカード末尾、請求対象月、ご利用先、登録サービス、領収書提出状況を照合します。</p>
+            <h2>全社ご利用代金明細との照合</h2>
+            <p class="muted">ご利用代金明細書はユーザー別ではなく、対象月の全ユーザー領収書とまとめて照合します。</p>
         </div>
+        <a class="button primary" href="{% url 'staff_card_statements' %}?month={{ selected_month|date:'Y-m' }}">ご利用代金明細を確認</a>
     </div>
-    <form method="post" enctype="multipart/form-data" action="{% url 'staff_upload_card_statement' managed_user.pk %}" class="statement-upload-form">
-        {% csrf_token %}
-        <input type="hidden" name="month" value="{{ selected_month|date:'Y-m' }}">
-        <div class="form-row">
-            {{ statement_form.file.errors }}
-            {{ statement_form.file.label_tag }}
-            {{ statement_form.file }}
-            {% if statement_form.file.help_text %}<span class="helptext">{{ statement_form.file.help_text }}</span>{% endif %}
-        </div>
-        <button type="submit" class="button primary">明細書をアップロードして解析</button>
-    </form>
+    <p>対象月にアップロードされている全社明細書: <strong>{{ global_statement_count }}</strong>件</p>
 </section>
-
-<div data-statement-results data-status-url="{% url 'staff_card_statement_status' managed_user.pk %}?month={{ selected_month|date:'Y-m' }}">
-    {% include "receipts/_staff_card_statements.html" %}
-</div>
-{% endblock %}
-
-{% block scripts %}
-<script src="{% static 'js/staff_statement_processing.js' %}" defer></script>
 {% endblock %}

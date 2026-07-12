@@ -489,9 +489,9 @@ class CardStatementUploadForm(forms.ModelForm):
         widgets = {
             "file": forms.ClearableFileInput(attrs={"accept": ".pdf,.png,.jpg,.jpeg,.webp"}),
         }
-        labels = {"file": "ご利用代金明細書"}
+        labels = {"file": "全社ご利用代金明細書"}
         help_texts = {
-            "file": "PDF / PNG / JPG / JPEG / WEBP。最大10MB。ファイル本体は最大3ヶ月保存されます。",
+            "file": "全ユーザー分の利用履歴が載った明細書を選択してください。PDF / PNG / JPG / JPEG / WEBP、最大10MB。ファイル本体は最大3ヶ月保存されます。",
         }
 
     def __init__(self, *args, **kwargs):

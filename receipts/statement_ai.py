@@ -30,11 +30,17 @@ class StatementAnalysisItem:
     amount_jpy: Decimal | None
     original_amount: Decimal | None
     original_currency: str
-    registered_service_id: int | None
+    service_catalog_id: int | None
     match_status: str
     receipt_required: bool
     confidence: float
     reason: str
+
+    @property
+    def registered_service_id(self) -> int | None:
+        """v1.1.x互換。現在はサービスマスターIDを返す。"""
+
+        return self.service_catalog_id
 
 
 @dataclass(frozen=True)
@@ -55,18 +61,15 @@ def statement_ai_enabled() -> bool:
     )
 
 
-def service_payload(services: Iterable[Any]) -> list[dict[str, Any]]:
-    payload = []
-    for service in services:
-        aliases = ""
-        if getattr(service, "catalog_service_id", None) and getattr(service.catalog_service, "merchant_aliases", ""):
-            aliases = service.catalog_service.merchant_aliases
+def service_payload(catalogs: Iterable[Any]) -> list[dict[str, Any]]:
+    payload: list[dict[str, Any]] = []
+    for catalog in catalogs:
         payload.append(
             {
-                "id": service.pk,
-                "name": service.name,
-                "billing_type": service.get_billing_type_display(),
-                "aliases": aliases,
+                "id": catalog.pk,
+                "name": catalog.name,
+                "billing_type": catalog.get_billing_type_display(),
+                "aliases": catalog.merchant_aliases or "",
             }
         )
     return payload
@@ -78,8 +81,14 @@ def generate_card_statement_analysis(
     original_filename: str,
     content_type: str,
     period_month: date,
-    services: Iterable[Any],
+    service_catalogs: Iterable[Any],
 ) -> StatementAnalysisResult:
+    """明細書の全行を抽出し、サービスマスター候補までAIで判定する。
+
+    明細書はユーザー単位ではなく会社全体のものとして扱う。ユーザーの特定と
+    領収書の一対一照合は、抽出後にサーバー側で全ユーザーの領収書を使って行う。
+    """
+
     if not statement_ai_enabled():
         return StatementAnalysisResult(
             status=CardStatementStatus.FAILED,
@@ -94,25 +103,29 @@ def generate_card_statement_analysis(
             admin_memo=f"OpenAI Python SDKを読み込めませんでした: {exc}",
         )
 
-    registered_services = service_payload(services)
+    catalogs = service_payload(service_catalogs)
     target_month = period_month.strftime("%Y-%m")
     target_last4 = target_card_last4()
     prompt = (
-        "このファイルはクレジットカードのご利用代金明細書です。すべての利用明細行を抽出し、"
-        "登録サービスとの対応を判定してください。推測で確定せず、曖昧な場合は ambiguous にしてください。\n"
+        "このファイルは会社全体で利用している法人クレジットカードのご利用代金明細書です。"
+        "特定の1ユーザーの明細ではありません。表にあるすべての利用明細行を漏れなく抽出してください。\n"
         f"管理対象月: {target_month}\n"
         f"確認対象カード末尾4桁: {target_last4}\n"
         "statement_period は利用日ではなく、請求・支払対象月を YYYY-MM で返してください。"
-        "例えば利用日が5月でも支払日が6月29日なら statement_period は 2026-06 です。\n"
-        "各明細について、ご利用先、利用日、当月請求金額（円）、外貨金額・通貨を抽出してください。\n"
-        "registered_service_id は、次の登録サービス一覧の id からだけ選びます。"
-        "サービス名とカード明細のご利用先は完全一致しない場合があります。"
-        "ChatGPT と OPENAI *CHATGPT / OPENAI.COM、Claude と CLAUDE.AI / ANTHROPIC.COM のような運営会社・請求名義も関連として扱ってください。\n"
-        f"登録サービス一覧: {json.dumps(registered_services, ensure_ascii=False)}\n"
-        "match_status の基準: matched=十分に一致、ambiguous=候補はあるが断定不可、"
-        "unmatched=登録サービスに一致しない、ignored=明らかに領収書管理対象外。\n"
-        "receipt_required は、登録サービスに対応するソフトウェア/SaaS/API等の請求で領収書が必要なら true。"
-        "登録サービスにないがソフトウェア利用料らしい項目は ambiguous または unmatched とし、receipt_required=true にして人が確認できるようにしてください。"
+        "例えば利用日が5月で支払日が6月29日なら statement_period は 2026-06 です。\n"
+        "各明細について、明細番号、ご利用先、利用日、当月請求金額（円）、外貨金額・通貨を抽出してください。\n"
+        "service_catalog_id は次のサービスマスター一覧の id からだけ選びます。"
+        "ユーザーはここでは特定しません。サービス名とカード明細の請求名義は完全一致しない場合があります。"
+        "ChatGPT と OPENAI *CHATGPT / OPENAI.COM、Claude と CLAUDE.AI / ANTHROPIC.COM のような"
+        "運営会社・請求名義の関連も考慮してください。\n"
+        f"サービスマスター一覧: {json.dumps(catalogs, ensure_ascii=False)}\n"
+        "match_status の基準: matched=サービスマスターと十分に一致、"
+        "ambiguous=候補はあるが断定不可、unmatched=登録サービスに一致しない、"
+        "ignored=明らかに領収書管理対象外。\n"
+        "receipt_required は、ソフトウェア、SaaS、API、オンラインサービス等の請求で領収書確認が必要なら true。"
+        "サービスマスターにないが領収書が必要そうな項目も、ambiguous または unmatched とし、"
+        "receipt_required=true にして人が確認できるようにしてください。"
+        "reason は簡潔にしてください。"
     )
 
     try:
@@ -129,8 +142,8 @@ def generate_card_statement_analysis(
                         {
                             "type": "input_text",
                             "text": (
-                                "あなたは法人カード明細と領収書提出状況を照合する監査補助AIです。"
-                                "表の全明細行を漏れなく抽出し、確信できない関係は曖昧として残してください。"
+                                "あなたは法人カード明細と、複数ユーザーが提出した領収書を照合する監査補助AIです。"
+                                "まず明細表の全行を正確に抽出し、確信できない関係は曖昧として残してください。"
                             ),
                         }
                     ],
@@ -148,13 +161,13 @@ def generate_card_statement_analysis(
                 },
             ],
             text={"format": statement_schema()},
-            max_output_tokens=8000,
+            max_output_tokens=int(getattr(settings, "STATEMENT_AI_MAX_OUTPUT_TOKENS", 16000)),
         )
         payload = json.loads(extract_response_text(response))
         return build_statement_result_from_payload(
             payload,
             target_month=target_month,
-            allowed_service_ids={item["id"] for item in registered_services},
+            allowed_catalog_ids={item["id"] for item in catalogs},
         )
     except Exception as exc:
         return StatementAnalysisResult(
@@ -166,7 +179,7 @@ def generate_card_statement_analysis(
 def statement_schema() -> dict[str, Any]:
     return {
         "type": "json_schema",
-        "name": "card_statement_extraction",
+        "name": "global_card_statement_extraction",
         "strict": True,
         "schema": {
             "type": "object",
@@ -188,7 +201,7 @@ def statement_schema() -> dict[str, Any]:
                             "amount_jpy": {"type": ["number", "string", "null"]},
                             "original_amount": {"type": ["number", "string", "null"]},
                             "original_currency": {"type": ["string", "null"]},
-                            "registered_service_id": {"type": ["integer", "null"]},
+                            "service_catalog_id": {"type": ["integer", "null"]},
                             "match_status": {
                                 "type": "string",
                                 "enum": [
@@ -209,7 +222,7 @@ def statement_schema() -> dict[str, Any]:
                             "amount_jpy",
                             "original_amount",
                             "original_currency",
-                            "registered_service_id",
+                            "service_catalog_id",
                             "match_status",
                             "receipt_required",
                             "confidence",
@@ -236,39 +249,40 @@ def build_statement_result_from_payload(
     payload: dict[str, Any],
     *,
     target_month: str,
-    allowed_service_ids: set[int],
+    allowed_catalog_ids: set[int] | None = None,
+    # v1.1.xのテストや呼び出しとの互換用。値はサービスマスターIDとして扱う。
+    allowed_service_ids: set[int] | None = None,
 ) -> StatementAnalysisResult:
+    if allowed_catalog_ids is None:
+        allowed_catalog_ids = allowed_service_ids or set()
+
     card_last4 = normalize_card_last4(payload.get("card_last4"))
     statement_period = normalize_period(payload.get("statement_period"))
     payment_date = parse_iso_date(payload.get("payment_date"))
     target_last4 = target_card_last4()
     issues: list[str] = []
     if card_last4 != target_last4:
-        issues.append(
-            f"カード末尾が{target_last4}ではなく{card_last4 or '確認不可'}として解析されました。"
-        )
+        issues.append(f"カード末尾が{target_last4}ではなく{card_last4 or '確認不可'}として解析されました。")
     if statement_period != target_month:
-        issues.append(
-            f"明細対象月が{target_month}ではなく{statement_period or '確認不可'}として解析されました。"
-        )
+        issues.append(f"明細対象月が{target_month}ではなく{statement_period or '確認不可'}として解析されました。")
 
     items: list[StatementAnalysisItem] = []
     for index, raw in enumerate(payload.get("items") or [], start=1):
         merchant = normalize_payee(raw.get("merchant_name") or "")
         if not merchant:
             continue
-        service_id = raw.get("registered_service_id")
+        catalog_id = raw.get("service_catalog_id", raw.get("registered_service_id"))
         try:
-            service_id = int(service_id) if service_id is not None else None
+            catalog_id = int(catalog_id) if catalog_id is not None else None
         except (TypeError, ValueError):
-            service_id = None
-        if service_id not in allowed_service_ids:
-            service_id = None
+            catalog_id = None
+        if catalog_id not in allowed_catalog_ids:
+            catalog_id = None
 
         match_status = str(raw.get("match_status") or StatementMatchStatus.UNMATCHED)
         if match_status not in StatementMatchStatus.values:
             match_status = StatementMatchStatus.UNMATCHED
-        if match_status == StatementMatchStatus.MATCHED and service_id is None:
+        if match_status == StatementMatchStatus.MATCHED and catalog_id is None:
             match_status = StatementMatchStatus.AMBIGUOUS
 
         item = StatementAnalysisItem(
@@ -278,7 +292,7 @@ def build_statement_result_from_payload(
             amount_jpy=parse_amount(raw.get("amount_jpy")),
             original_amount=parse_amount(raw.get("original_amount")),
             original_currency=normalize_currency(raw.get("original_currency") or ""),
-            registered_service_id=service_id,
+            service_catalog_id=catalog_id,
             match_status=match_status,
             receipt_required=bool(raw.get("receipt_required")),
             confidence=normalize_confidence(raw.get("confidence")),

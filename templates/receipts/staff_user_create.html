@@ -8,29 +8,6 @@
     </div>
 </div>
 
-{% if superuser_email_form %}
-<section class="card section">
-    <div class="section-header">
-        <div>
-            <h2>スーパーアカウント設定</h2>
-            <p class="muted">連絡先メールアドレスは任意です。空欄にしても、ログイン名「{{ request.user.username }}」とパスワードは変更されません。</p>
-        </div>
-    </div>
-    <form method="post" class="form-grid">
-        {% csrf_token %}
-        <input type="hidden" name="action" value="update_superuser_email">
-        {{ superuser_email_form.non_field_errors }}
-        <div class="form-row">
-            {{ superuser_email_form.email.errors }}
-            {{ superuser_email_form.email.label_tag }}
-            {{ superuser_email_form.email }}
-            {% if superuser_email_form.email.help_text %}<span class="helptext">{{ superuser_email_form.email.help_text }}</span>{% endif %}
-        </div>
-        <button type="submit" class="button">連絡先メールを保存</button>
-    </form>
-</section>
-{% endif %}
-
 {% if generated_user and generated_password %}
 <section class="card section credential-card">
     <h2>作成したアカウント</h2>
@@ -139,13 +116,12 @@
                         <td>
                             <div class="table-actions">
                                 {% if not account.is_staff %}
-                                    <a class="button small" href="{% url 'staff_user_services' account.pk %}">サービス</a>
                                     <a class="button small" href="{% url 'staff_user_month_status' account.pk %}">月別状況</a>
                                 {% else %}<span class="muted">管理者画面を利用</span>{% endif %}
                             </div>
                         </td>
                         <td>
-                            <form method="post" class="delete-user-form" onsubmit="return confirm('このユーザーを削除しますか？関連するサービス、提出履歴、領収書ファイル、カード明細もすべて削除されます。この操作は元に戻せません。');">
+                            <form method="post" class="delete-user-form" onsubmit="return confirm('このユーザーを削除しますか？関連するサービス、提出履歴、領収書ファイルもすべて削除されます。全社カード明細自体は削除されません。この操作は元に戻せません。');">
                                 {% csrf_token %}
                                 <input type="hidden" name="action" value="delete_user">
                                 <input type="hidden" name="user_id" value="{{ account.pk }}">
@@ -160,4 +136,26 @@
         </table>
     </div>
 </section>
+{% if superuser_email_form %}
+<section class="card section">
+    <div class="section-header">
+        <div>
+            <h2>スーパーアカウント設定</h2>
+            <p class="muted">連絡先メールアドレスは任意です。空欄にしても、ログイン名「{{ request.user.username }}」とパスワードは変更されません。</p>
+        </div>
+    </div>
+    <form method="post" class="form-grid">
+        {% csrf_token %}
+        <input type="hidden" name="action" value="update_superuser_email">
+        {{ superuser_email_form.non_field_errors }}
+        <div class="form-row">
+            {{ superuser_email_form.email.errors }}
+            {{ superuser_email_form.email.label_tag }}
+            {{ superuser_email_form.email }}
+            {% if superuser_email_form.email.help_text %}<span class="helptext">{{ superuser_email_form.email.help_text }}</span>{% endif %}
+        </div>
+        <button type="submit" class="button">連絡先メールを保存</button>
+    </form>
+</section>
+{% endif %}
 {% endblock %}

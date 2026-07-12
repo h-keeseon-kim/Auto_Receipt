@@ -1321,7 +1321,7 @@ class StaffServiceAssignmentTests(TestCase):
         response = self.client.get(reverse("history"))
         self.assertNotContains(response, "2026年06月")
 
-    def test_staff_services_catalog_is_paginated_and_user_sections_are_combined(self):
+    def test_staff_services_catalog_and_user_status_are_separate_tabs(self):
         for index in range(25):
             ServiceCatalog.objects.create(
                 name=f"Catalog {index:02d}",
@@ -1336,13 +1336,20 @@ class StaffServiceAssignmentTests(TestCase):
         )
         self.client.login(username="admin", password="admin-password-123")
 
-        response = self.client.get(reverse("staff_services") + f"?user={self.user.pk}")
+        catalog_response = self.client.get(reverse("staff_services") + "?tab=catalog")
+        self.assertEqual(catalog_response.status_code, 200)
+        self.assertEqual(catalog_response.context["active_tab"], "catalog")
+        self.assertEqual(catalog_response.context["catalog_page_obj"].paginator.num_pages, 2)
+        self.assertContains(catalog_response, "1 / 2ページ")
+        self.assertContains(catalog_response, "サービスマスター登録")
+        self.assertNotContains(catalog_response, "対象ユーザー")
 
+        response = self.client.get(reverse("staff_services") + f"?tab=users&user={self.user.pk}")
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.context["catalog_page_obj"].paginator.num_pages, 2)
-        self.assertContains(response, "1 / 2ページ")
+        self.assertEqual(response.context["active_tab"], "users")
         self.assertContains(response, "対象ユーザー")
         self.assertContains(response, "scroll-box")
+        self.assertNotContains(response, "サービスマスター登録")
         self.assertNotContains(response, "ユーザー操作の通知")
         content = response.content.decode()
         self.assertLess(content.index("登録状況"), content.index("登録サービス一覧"))
@@ -1450,16 +1457,19 @@ class StaffServiceAssignmentTests(TestCase):
         )
         self.client.login(username="admin", password="admin-password-123")
 
-        response = self.client.get(reverse("staff_services") + f"?user={self.user.pk}")
+        catalog_response = self.client.get(reverse("staff_services") + "?tab=catalog")
+        self.assertEqual(catalog_response.status_code, 200)
+        self.assertNotContains(catalog_response, "提出履歴へ")
+        catalog_content = catalog_response.content.decode()
+        self.assertEqual(catalog_content.count("サービスマスター登録"), 1)
+        self.assertLess(catalog_content.index("<h2>サービスマスター</h2>"), catalog_content.index("サービスマスター登録"))
 
-        self.assertEqual(response.status_code, 200)
-        self.assertNotContains(response, "提出履歴へ")
-        content = response.content.decode()
-        self.assertEqual(content.count("サービスマスター登録"), 1)
-        self.assertEqual(content.count("このユーザーへサービス登録"), 1)
-        self.assertLess(content.index("<h2>サービスマスター</h2>"), content.index("サービスマスター登録"))
-        self.assertLess(content.index("<h2>ユーザー別サービス状況</h2>"), content.index("このユーザーへサービス登録"))
-        self.assertNotContains(response, ">サービスを登録</a>")
+        user_response = self.client.get(reverse("staff_services") + f"?tab=users&user={self.user.pk}")
+        self.assertEqual(user_response.status_code, 200)
+        user_content = user_response.content.decode()
+        self.assertEqual(user_content.count("このユーザーへサービス登録"), 1)
+        self.assertLess(user_content.index("<h2>ユーザー別サービス状況</h2>"), user_content.index("このユーザーへサービス登録"))
+        self.assertNotContains(user_response, ">サービスを登録</a>")
 
     def test_staff_registers_service_for_user_and_user_sees_it(self):
         self.client.login(username="admin", password="admin-password-123")
@@ -1691,7 +1701,7 @@ class UserServiceRegistrationTests(TestCase):
 
         self.client.logout()
         self.client.login(username="admin", password="admin-password-123")
-        response = self.client.get(reverse("staff_services"))
+        response = self.client.get(reverse("staff_services") + f"?tab=users&user={self.user.pk}")
         self.assertContains(response, "新規登録/停止")
         self.assertNotContains(response, "ユーザー操作の通知")
         self.assertContains(response, "Slack（サブスク）")
@@ -1768,7 +1778,7 @@ class UserServiceRegistrationTests(TestCase):
 
         self.client.logout()
         self.client.login(username="admin", password="admin-password-123")
-        response = self.client.get(reverse("staff_services"))
+        response = self.client.get(reverse("staff_services") + f"?tab=users&user={self.user.pk}")
         self.assertContains(response, "ユーザー停止")
         self.assertContains(response, "2026年06月")
         self.assertContains(response, "解約済み")
@@ -2279,7 +2289,7 @@ class FinalWorkflowAcceptanceTests(TestCase):
                         "amount_jpy": "35949",
                         "original_amount": "220",
                         "original_currency": "USD",
-                        "registered_service_id": self.subscription.pk,
+                        "service_catalog_id": self.subscription_catalog.pk,
                         "match_status": StatementMatchStatus.MATCHED,
                         "receipt_required": True,
                         "confidence": 0.99,
@@ -2288,13 +2298,13 @@ class FinalWorkflowAcceptanceTests(TestCase):
                 ],
             },
             target_month="2026-06",
-            allowed_service_ids={self.subscription.pk, self.api_service.pk},
+            allowed_catalog_ids={self.subscription_catalog.pk, self.api_catalog.pk},
         )
         self.assertEqual(result.status, CardStatementStatus.COMPLETED)
         self.assertEqual(result.statement_period, "2026-06")
         self.assertEqual(result.payment_date, date(2026, 6, 29))
         self.assertEqual(result.items[0].transaction_date, date(2026, 5, 3))
-        self.assertEqual(result.items[0].registered_service_id, self.subscription.pk)
+        self.assertEqual(result.items[0].service_catalog_id, self.subscription_catalog.pk)
 
     @mock.patch("receipts.statement_processing.generate_card_statement_analysis")
     def test_statement_processing_highlights_missing_receipt_and_cancels_false_no_usage(self, mocked_analysis):
@@ -2306,7 +2316,6 @@ class FinalWorkflowAcceptanceTests(TestCase):
             declared_by=self.user,
         )
         statement = CardStatement.objects.create(
-            user=self.user,
             period_month=date(2026, 6, 1),
             file=SimpleUploadedFile("statement.pdf", b"%PDF-1.4 statement", content_type="application/pdf"),
             original_filename="statement.pdf",
@@ -2328,7 +2337,7 @@ class FinalWorkflowAcceptanceTests(TestCase):
                     amount_jpy=Decimal("8236"),
                     original_amount=Decimal("49.92"),
                     original_currency="USD",
-                    registered_service_id=self.api_service.pk,
+                    service_catalog_id=self.api_catalog.pk,
                     match_status=StatementMatchStatus.MATCHED,
                     receipt_required=True,
                     confidence=0.98,
@@ -2357,7 +2366,6 @@ class FinalWorkflowAcceptanceTests(TestCase):
     def test_statement_processing_links_existing_receipt(self, mocked_analysis):
         receipt = self.create_receipt(service=self.subscription)
         statement = CardStatement.objects.create(
-            user=self.user,
             period_month=date(2026, 6, 1),
             file=SimpleUploadedFile("statement.pdf", b"%PDF-1.4 statement", content_type="application/pdf"),
             original_filename="statement.pdf",
@@ -2379,7 +2387,7 @@ class FinalWorkflowAcceptanceTests(TestCase):
                     amount_jpy=Decimal("35949"),
                     original_amount=Decimal("220"),
                     original_currency="USD",
-                    registered_service_id=self.subscription.pk,
+                    service_catalog_id=self.subscription_catalog.pk,
                     match_status=StatementMatchStatus.MATCHED,
                     receipt_required=True,
                     confidence=0.99,
@@ -2398,7 +2406,6 @@ class FinalWorkflowAcceptanceTests(TestCase):
     def test_statement_rows_use_distinct_receipts_and_keep_extra_charge_highlighted(self, mocked_analysis):
         first_receipt = self.create_receipt(service=self.subscription, filename="first.pdf")
         statement = CardStatement.objects.create(
-            user=self.user,
             period_month=date(2026, 6, 1),
             file=SimpleUploadedFile("statement.pdf", b"%PDF-1.4 statement", content_type="application/pdf"),
             original_filename="statement.pdf",
@@ -2420,7 +2427,7 @@ class FinalWorkflowAcceptanceTests(TestCase):
                     amount_jpy=Decimal("35949"),
                     original_amount=Decimal("220"),
                     original_currency="USD",
-                    registered_service_id=self.subscription.pk,
+                    service_catalog_id=self.subscription_catalog.pk,
                     match_status=StatementMatchStatus.MATCHED,
                     receipt_required=True,
                     confidence=0.99,
@@ -2433,7 +2440,7 @@ class FinalWorkflowAcceptanceTests(TestCase):
                     amount_jpy=Decimal("3595"),
                     original_amount=Decimal("22"),
                     original_currency="USD",
-                    registered_service_id=self.subscription.pk,
+                    service_catalog_id=self.subscription_catalog.pk,
                     match_status=StatementMatchStatus.MATCHED,
                     receipt_required=True,
                     confidence=0.99,
@@ -2458,7 +2465,7 @@ class FinalWorkflowAcceptanceTests(TestCase):
     def test_staff_can_upload_statement_and_start_background_analysis(self, mocked_start):
         self.client.login(username="admin", password="admin-password-123")
         response = self.client.post(
-            reverse("staff_upload_card_statement", args=[self.user.pk]),
+            reverse("staff_upload_card_statement"),
             {
                 "month": "2026-06",
                 "file": SimpleUploadedFile(
@@ -2470,14 +2477,14 @@ class FinalWorkflowAcceptanceTests(TestCase):
         )
         self.assertRedirects(
             response,
-            reverse("staff_user_month_status", args=[self.user.pk]) + "?month=2026-06",
+            reverse("staff_card_statements") + "?month=2026-06",
         )
         statement = CardStatement.objects.get()
         self.assertEqual(statement.status, CardStatementStatus.PROCESSING)
         self.assertEqual(statement.original_filename, "lifecard_meisai_user1_202606.pdf")
         mocked_start.assert_called_once_with(statement.pk)
 
-    def test_staff_month_page_shows_missing_services_and_statement_upload(self):
+    def test_staff_month_page_shows_missing_services_and_links_to_global_statement_page(self):
         self.client.login(username="admin", password="admin-password-123")
         response = self.client.get(
             reverse("staff_user_month_status", args=[self.user.pk]) + "?month=2026-06"
@@ -2487,11 +2494,201 @@ class FinalWorkflowAcceptanceTests(TestCase):
         self.assertContains(response, "OpenAI API（従量課金 / API）")
         self.assertContains(response, "領収書未提出")
         self.assertContains(response, "API利用確認待ち")
-        self.assertContains(response, "ご利用代金明細書")
+        self.assertContains(response, "全社ご利用代金明細との照合")
+        self.assertContains(response, reverse("staff_card_statements") + "?month=2026-06")
+        self.assertNotContains(response, 'type="file"')
+
+    @mock.patch("receipts.statement_processing.generate_card_statement_analysis")
+    def test_global_statement_matches_receipt_from_another_user(self, mocked_analysis):
+        other_user = User.objects.create_user(
+            username="other@example.com",
+            email="other@example.com",
+            password="password123",
+        )
+        other_service = RegisteredService.objects.create(
+            user=other_user,
+            catalog_service=self.subscription_catalog,
+            name=self.subscription_catalog.name,
+            billing_type=self.subscription_catalog.billing_type,
+            registered_by=self.superuser,
+        )
+        other_submission = Submission.objects.create(
+            user=other_user,
+            period_month=date(2026, 6, 1),
+        )
+        other_receipt = Receipt.objects.create(
+            submission=other_submission,
+            service=other_service,
+            service_name_snapshot=other_service.name,
+            billing_type_snapshot=other_service.billing_type,
+            original_filename="other-openai.pdf",
+            generated_filename="260503_other_OpenAI_220_USD.pdf",
+            amount=Decimal("220.00"),
+            currency="USD",
+            issued_on=date(2026, 5, 3),
+            ai_extracted_payee="OPENAI *CHATGPT",
+            ai_filename_status=ReceiptFilenameStatus.GENERATED,
+            file=SimpleUploadedFile(
+                "other-openai.pdf",
+                b"%PDF-1.4 other",
+                content_type="application/pdf",
+            ),
+            expires_at=timezone.now() + timedelta(days=30),
+        )
+        statement = CardStatement.objects.create(
+            period_month=date(2026, 6, 1),
+            file=SimpleUploadedFile("statement.pdf", b"%PDF-1.4 statement", content_type="application/pdf"),
+            original_filename="statement.pdf",
+            content_type="application/pdf",
+            status=CardStatementStatus.PROCESSING,
+            uploaded_by=self.superuser,
+            expires_at=timezone.now() + timedelta(days=30),
+        )
+        mocked_analysis.return_value = StatementAnalysisResult(
+            status=CardStatementStatus.COMPLETED,
+            card_last4="7210",
+            statement_period="2026-06",
+            payment_date=date(2026, 6, 29),
+            items=(
+                StatementAnalysisItem(
+                    line_reference="0276",
+                    transaction_date=date(2026, 5, 3),
+                    merchant_name="OPENAI *CHATGPT",
+                    amount_jpy=Decimal("35949"),
+                    original_amount=Decimal("220"),
+                    original_currency="USD",
+                    service_catalog_id=self.subscription_catalog.pk,
+                    match_status=StatementMatchStatus.MATCHED,
+                    receipt_required=True,
+                    confidence=0.99,
+                    reason="ChatGPTの請求名義と一致。",
+                ),
+            ),
+        )
+
+        process_card_statement(statement.pk)
+        item = statement.items.get()
+        self.assertEqual(item.matched_receipt, other_receipt)
+        self.assertEqual(item.matched_user, other_user)
+        self.assertEqual(item.matched_service, other_service)
+        self.assertFalse(item.needs_highlight)
+
+        self.client.login(username="admin", password="admin-password-123")
+        response = self.client.get(reverse("staff_card_statements") + "?month=2026-06")
+        self.assertContains(response, "other@example.com")
+        self.assertContains(response, "260503_other_OpenAI_220_USD.pdf")
+        self.assertNotContains(response, 'class="statement-missing-row"')
+
+    @mock.patch("receipts.statement_processing.generate_card_statement_analysis")
+    def test_global_statement_does_not_guess_user_when_same_service_has_multiple_users(self, mocked_analysis):
+        other_user = User.objects.create_user(
+            username="other@example.com",
+            email="other@example.com",
+            password="password123",
+        )
+        RegisteredService.objects.create(
+            user=other_user,
+            catalog_service=self.subscription_catalog,
+            name=self.subscription_catalog.name,
+            billing_type=self.subscription_catalog.billing_type,
+            registered_by=self.superuser,
+        )
+        statement = CardStatement.objects.create(
+            period_month=date(2026, 6, 1),
+            file=SimpleUploadedFile("statement.pdf", b"%PDF-1.4 statement", content_type="application/pdf"),
+            original_filename="statement.pdf",
+            content_type="application/pdf",
+            status=CardStatementStatus.PROCESSING,
+            uploaded_by=self.superuser,
+            expires_at=timezone.now() + timedelta(days=30),
+        )
+        mocked_analysis.return_value = StatementAnalysisResult(
+            status=CardStatementStatus.COMPLETED,
+            card_last4="7210",
+            statement_period="2026-06",
+            payment_date=date(2026, 6, 29),
+            items=(
+                StatementAnalysisItem(
+                    line_reference="0276",
+                    transaction_date=date(2026, 5, 3),
+                    merchant_name="OPENAI *CHATGPT",
+                    amount_jpy=Decimal("35949"),
+                    original_amount=Decimal("220"),
+                    original_currency="USD",
+                    service_catalog_id=self.subscription_catalog.pk,
+                    match_status=StatementMatchStatus.MATCHED,
+                    receipt_required=True,
+                    confidence=0.99,
+                    reason="ChatGPT候補。",
+                ),
+            ),
+        )
+
+        process_card_statement(statement.pk)
+        item = statement.items.get()
+        self.assertIsNone(item.matched_user)
+        self.assertIsNone(item.matched_service)
+        self.assertEqual(item.matched_catalog_service, self.subscription_catalog)
+        self.assertEqual(item.match_status, StatementMatchStatus.AMBIGUOUS)
+        self.assertTrue(item.needs_highlight)
+        self.assertIn("複数ユーザー", item.match_memo)
+
+    @mock.patch("receipts.statement_processing.generate_card_statement_analysis")
+    def test_global_statement_highlights_missing_receipt_row(self, mocked_analysis):
+        statement = CardStatement.objects.create(
+            period_month=date(2026, 6, 1),
+            file=SimpleUploadedFile("statement.pdf", b"%PDF-1.4 statement", content_type="application/pdf"),
+            original_filename="statement.pdf",
+            content_type="application/pdf",
+            status=CardStatementStatus.PROCESSING,
+            uploaded_by=self.superuser,
+            expires_at=timezone.now() + timedelta(days=30),
+        )
+        mocked_analysis.return_value = StatementAnalysisResult(
+            status=CardStatementStatus.COMPLETED,
+            card_last4="7210",
+            statement_period="2026-06",
+            payment_date=date(2026, 6, 29),
+            items=(
+                StatementAnalysisItem(
+                    line_reference="0302",
+                    transaction_date=date(2026, 5, 16),
+                    merchant_name="OPENAI",
+                    amount_jpy=Decimal("8236"),
+                    original_amount=Decimal("49.92"),
+                    original_currency="USD",
+                    service_catalog_id=self.api_catalog.pk,
+                    match_status=StatementMatchStatus.MATCHED,
+                    receipt_required=True,
+                    confidence=0.98,
+                    reason="OpenAI API候補。",
+                ),
+            ),
+        )
+
+        process_card_statement(statement.pk)
+        item = statement.items.get()
+        self.assertTrue(item.needs_highlight)
+
+        self.client.login(username="admin", password="admin-password-123")
+        response = self.client.get(reverse("staff_card_statements") + "?month=2026-06")
+        self.assertContains(response, 'class="statement-missing-row"')
+        self.assertContains(response, "領収書未提出")
+        self.assertContains(response, "黄色は領収書が必要")
+        self.assertContains(response, 'data-tutorial-target="staff-statement-upload-section"')
+        self.assertContains(response, 'data-tutorial-target="staff-statement-results"')
+
+    def test_user_management_places_superuser_settings_last_and_removes_service_shortcut(self):
+        self.client.login(username="admin", password="admin-password-123")
+        response = self.client.get(reverse("staff_user_create"))
+        self.assertEqual(response.status_code, 200)
+        content = response.content.decode()
+        self.assertLess(content.index("登録アカウント"), content.index("スーパーアカウント設定"))
+        self.assertNotContains(response, reverse("staff_user_services", args=[self.user.pk]))
+        self.assertContains(response, reverse("staff_user_month_status", args=[self.user.pk]))
 
     def test_expired_statement_file_is_purged_but_metadata_remains(self):
         statement = CardStatement.objects.create(
-            user=self.user,
             period_month=date(2026, 6, 1),
             file=SimpleUploadedFile("expired.pdf", b"%PDF-1.4 statement", content_type="application/pdf"),
             original_filename="expired.pdf",
@@ -2509,4 +2706,4 @@ class FinalWorkflowAcceptanceTests(TestCase):
         self.assertTrue(CardStatement.objects.filter(pk=statement.pk).exists())
 
     def test_version_file_is_present_without_web_display_requirement(self):
-        self.assertEqual(Path("VERSION").read_text(encoding="utf-8").strip(), "1.1.1")
+        self.assertEqual(Path("VERSION").read_text(encoding="utf-8").strip(), "1.2.0")

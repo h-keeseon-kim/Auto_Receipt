@@ -52,7 +52,7 @@ def receipt_upload_path(instance: "Receipt", filename: str) -> str:
 def statement_upload_path(instance: "CardStatement", filename: str) -> str:
     suffix = Path(filename).suffix.lower()
     period = instance.period_month.strftime("%Y-%m")
-    return f"card_statements/user_{instance.user_id}/{period}/{uuid4().hex}{suffix}"
+    return f"card_statements/{period}/{uuid4().hex}{suffix}"
 
 
 class BillingType(models.TextChoices):
@@ -888,9 +888,8 @@ class MonthlyServiceDeclaration(models.Model):
 
 
 class CardStatement(models.Model):
-    """管理者がアップロードするカードのご利用代金明細書。"""
+    """管理者がアップロードする全ユーザー共通のカード利用代金明細書。"""
 
-    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="card_statements")
     period_month = models.DateField("対象月")
     file = models.FileField(
         "ご利用代金明細書",
@@ -918,6 +917,7 @@ class CardStatement(models.Model):
     )
     uploaded_at = models.DateTimeField("アップロード日時", auto_now_add=True)
     processed_at = models.DateTimeField("解析完了日時", null=True, blank=True)
+    reconciled_at = models.DateTimeField("領収書照合日時", null=True, blank=True)
     expires_at = models.DateTimeField("ファイル保存期限", null=True, blank=True)
     file_deleted_at = models.DateTimeField("ファイル削除日時", null=True, blank=True)
     file_delete_reason = models.CharField("ファイル削除理由", max_length=40, blank=True)
@@ -925,15 +925,13 @@ class CardStatement(models.Model):
 
     class Meta:
         ordering = ["-uploaded_at"]
-        indexes = [models.Index(fields=["user", "period_month", "status"])]
+        indexes = [models.Index(fields=["period_month", "status"])]
         verbose_name = "ご利用代金明細書"
         verbose_name_plural = "ご利用代金明細書"
 
     def clean(self):
         if self.period_month:
             self.period_month = month_start(self.period_month)
-        if self.user_id and (self.user.is_staff or self.user.is_superuser):
-            raise ValidationError({"user": "一般ユーザーを選択してください。"})
 
     def save(self, *args, **kwargs):
         if self.period_month:
@@ -956,7 +954,10 @@ class CardStatement(models.Model):
 
     @property
     def manual_review_count(self) -> int:
-        return self.items.filter(match_status__in=[StatementMatchStatus.AMBIGUOUS, StatementMatchStatus.UNMATCHED]).count()
+        return self.items.filter(
+            Q(match_status__in=[StatementMatchStatus.AMBIGUOUS, StatementMatchStatus.UNMATCHED])
+            | Q(receipt_required=True, matched_user__isnull=True)
+        ).distinct().count()
 
     def purge_file(self, reason: str = "expired") -> bool:
         if not self.file_available:
@@ -972,7 +973,7 @@ class CardStatement(models.Model):
         return True
 
     def __str__(self) -> str:
-        return f"{self.user} / {self.period_month:%Y-%m} / {self.get_status_display()}"
+        return f"全ユーザー / {self.period_month:%Y-%m} / {self.get_status_display()}"
 
 
 class CardStatementItem(models.Model):
@@ -985,6 +986,22 @@ class CardStatementItem(models.Model):
     amount_jpy = models.DecimalField("請求金額（円）", max_digits=14, decimal_places=2, null=True, blank=True)
     original_amount = models.DecimalField("外貨金額", max_digits=14, decimal_places=2, null=True, blank=True)
     original_currency = models.CharField("外貨通貨", max_length=3, blank=True)
+    matched_user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="statement_items",
+        verbose_name="一致ユーザー",
+    )
+    matched_catalog_service = models.ForeignKey(
+        ServiceCatalog,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="statement_items",
+        verbose_name="一致サービスマスター",
+    )
     matched_service = models.ForeignKey(
         RegisteredService,
         on_delete=models.SET_NULL,
@@ -1019,9 +1036,27 @@ class CardStatementItem(models.Model):
             return "対象外"
         if self.matched_receipt_id and self.matched_receipt and self.matched_receipt.file_available:
             return "領収書あり"
-        if self.matched_service_id:
+        if self.matched_service_id or self.matched_catalog_service_id:
             return "領収書未提出"
         return "要確認"
+
+    @property
+    def matched_user_label(self) -> str:
+        if self.matched_user_id and self.matched_user:
+            return self.matched_user.username
+        if self.matched_receipt_id and self.matched_receipt:
+            return self.matched_receipt.submission.user.username
+        if self.matched_service_id and self.matched_service:
+            return self.matched_service.user.username
+        return "-"
+
+    @property
+    def matched_service_label(self) -> str:
+        if self.matched_service_id and self.matched_service:
+            return self.matched_service.display_name
+        if self.matched_catalog_service_id and self.matched_catalog_service:
+            return self.matched_catalog_service.display_name
+        return "-"
 
     @property
     def needs_highlight(self) -> bool:
@@ -1198,36 +1233,19 @@ def sync_user_account_status_after_service_delete(sender, instance: RegisteredSe
 
 @receiver(post_save, sender=Receipt)
 def sync_statement_items_after_receipt_save(sender, instance: Receipt, **kwargs):
-    if not instance.file_available or instance.service_id is None:
+    if not instance.file_available:
         return
+    # カード明細は会社全体のため、対象月の全ユーザー領収書を使って再照合する。
+    # OpenAI APIは呼ばず、保存済みの明細行に対してローカル照合だけを行う。
+    from .statement_processing import reconcile_card_statement_items
 
-    # 同じ領収書を1つのカード明細内の複数行へ割り当てない。
-    # カード明細が複数アップロードされている場合は、各明細書につき未一致の先頭1行だけを更新する。
     statement_ids = list(
-        CardStatementItem.objects.filter(
-            statement__user=instance.submission.user,
-            statement__period_month=instance.submission.period_month,
-            matched_service=instance.service,
-            receipt_required=True,
-        )
-        .values_list("statement_id", flat=True)
-        .distinct()
+        CardStatement.objects.filter(period_month=instance.submission.period_month)
+        .exclude(status__in=[CardStatementStatus.PROCESSING, CardStatementStatus.FAILED])
+        .values_list("pk", flat=True)
     )
     for statement_id in statement_ids:
-        if CardStatementItem.objects.filter(statement_id=statement_id, matched_receipt=instance).exists():
-            continue
-        item = (
-            CardStatementItem.objects.filter(
-                statement_id=statement_id,
-                matched_service=instance.service,
-                receipt_required=True,
-                matched_receipt__isnull=True,
-            )
-            .order_by("sequence", "pk")
-            .first()
-        )
-        if item is not None:
-            CardStatementItem.objects.filter(pk=item.pk).update(matched_receipt=instance)
+        reconcile_card_statement_items(statement_id)
 
 
 @receiver(post_delete, sender=Receipt)
