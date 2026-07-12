@@ -1,0 +1,92 @@
+{% extends "base.html" %}
+{% load static %}
+{% block title %}ユーザー月別状況 - ReceiptHub{% endblock %}
+{% block content %}
+<div class="page-title">
+    <div>
+        <h1>{{ managed_user.username }} / {{ selected_month|date:"Y年m月" }}</h1>
+        <p class="muted">利用サービスごとの領収書状況と、ご利用代金明細書との照合結果を確認できます。</p>
+        <div class="actions">
+            <a class="button" href="{% url 'history' %}?month={{ selected_month|date:'Y-m' }}">提出履歴へ戻る</a>
+            <a class="button" href="{% url 'staff_user_services' managed_user.pk %}">利用サービス管理</a>
+        </div>
+    </div>
+    <form method="get" class="month-form">
+        {{ month_form.month.label_tag }}
+        {{ month_form.month }}
+        <button class="button" type="submit">表示</button>
+    </form>
+</div>
+
+<section class="status-grid">
+    <div class="card"><span class="label">ユーザーステータス</span><strong class="badge {% if managed_user.profile.account_status == 'active' %}submitted{% else %}neutral{% endif %}">{{ managed_user.profile.get_account_status_display }}</strong></div>
+    <div class="card"><span class="label">提出ステータス</span>{% if submission %}<strong class="badge {{ submission.status }}">{{ submission.get_status_display }}</strong>{% else %}<strong class="badge neutral">未着手</strong>{% endif %}</div>
+    <div class="card"><span class="label">提出対象サービス</span><strong>{{ monthly_summary.total_services }}</strong></div>
+    <div class="card"><span class="label">確認済み</span><strong>{{ monthly_summary.progress_label }}</strong></div>
+    <div class="card"><span class="label">領収書未提出</span><strong class="{% if monthly_summary.missing_required_count %}danger{% endif %}">{{ monthly_summary.missing_required_count }}</strong></div>
+    <div class="card"><span class="label">API利用確認待ち</span><strong class="{% if monthly_summary.api_pending_count %}danger{% endif %}">{{ monthly_summary.api_pending_count }}</strong></div>
+</section>
+
+<section class="card section">
+    <div class="section-header">
+        <div>
+            <h2>月別サービス状況</h2>
+            <p class="muted">各サービスに領収書があるか、または従量課金 / APIが「当月利用なし」と申告されているかを表示します。</p>
+        </div>
+    </div>
+    <div class="table-wrap scroll-box medium table-scroll-wide">
+        <table class="monthly-service-status-table">
+            <thead><tr><th>サービス</th><th>種別</th><th>当月ステータス</th><th>領収書</th><th>補足</th></tr></thead>
+            <tbody>
+                {% for row in monthly_summary.rows %}
+                    <tr class="{% if row.status_code == 'missing' or row.status_code == 'api_pending' %}attention-row{% endif %}">
+                        <td><strong>{{ row.service.display_name }}</strong></td>
+                        <td>{{ row.service.get_billing_type_display }}</td>
+                        <td><span class="badge {{ row.badge_class }}">{{ row.status_label }}</span></td>
+                        <td>
+                            {% for receipt in row.receipts %}
+                                <div>
+                                    {% if receipt.file_available %}<a href="{% url 'download_receipt' receipt.pk %}">{{ receipt.display_filename }}</a>{% else %}<span class="muted">{{ receipt.display_filename }}（削除済み）</span>{% endif %}
+                                </div>
+                            {% empty %}-{% endfor %}
+                        </td>
+                        <td>
+                            {% if row.no_usage_declared %}ユーザーが当月利用なしと申告{% elif row.status_code == 'api_pending' %}<span class="danger">利用有無の確認が必要</span>{% elif row.status_code == 'missing' %}<span class="danger">領収書アップロード待ち</span>{% else %}-{% endif %}
+                        </td>
+                    </tr>
+                {% empty %}
+                    <tr><td colspan="5" class="muted center">対象月の利用サービスはありません。</td></tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</section>
+
+<section class="card section">
+    <div class="section-header">
+        <div>
+            <h2>ご利用代金明細書</h2>
+            <p class="muted">カード明細をアップロードすると、AIがカード末尾、請求対象月、ご利用先、登録サービス、領収書提出状況を照合します。</p>
+        </div>
+    </div>
+    <form method="post" enctype="multipart/form-data" action="{% url 'staff_upload_card_statement' managed_user.pk %}" class="statement-upload-form">
+        {% csrf_token %}
+        <input type="hidden" name="month" value="{{ selected_month|date:'Y-m' }}">
+        <div class="form-row">
+            {{ statement_form.file.errors }}
+            {{ statement_form.file.label_tag }}
+            {{ statement_form.file }}
+            {% if statement_form.file.help_text %}<span class="helptext">{{ statement_form.file.help_text }}</span>{% endif %}
+        </div>
+        <button type="submit" class="button primary">明細書をアップロードして解析</button>
+    </form>
+</section>
+
+<div data-statement-results data-status-url="{% url 'staff_card_statement_status' managed_user.pk %}?month={{ selected_month|date:'Y-m' }}">
+    {% include "receipts/_staff_card_statements.html" %}
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script src="{% static 'js/staff_statement_processing.js' %}" defer></script>
+{% endblock %}

@@ -11,7 +11,13 @@ from django.db.models import QuerySet
 from django.utils import timezone
 
 from .ai_filename import filename_user_part_from_user, generate_ai_receipt_filename, target_card_last4
-from .models import Receipt, ReceiptFilenameStatus, ReceiptPeriodCheckStatus
+from .models import (
+    Receipt,
+    ReceiptFilenameStatus,
+    ReceiptPeriodCheckStatus,
+    ReceiptResubmissionRequest,
+    SubmissionStatus,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -41,6 +47,78 @@ AI_RESET_FIELDS = [
 
 AI_EXTRACTED_VALUE_FIELDS = ["amount", "currency", "issued_on"]
 PROCESSING_MEMO = "AIで情報を抽出中です。完了した領収書から管理者画面に反映されます。"
+
+
+def definite_ai_rejection_reasons(receipt: Receipt, result) -> list[str]:
+    """AIが明確に不一致と判定した項目だけを再提出理由として返す。
+
+    読み取り不可・曖昧（None）は自動削除せず、管理者の手動確認対象として残す。
+    """
+
+    if result is None:
+        return []
+
+    reasons: list[str] = []
+    card_match = getattr(result, "card_last4_matches_target", None)
+    card_last4 = (getattr(result, "card_last4", "") or "")[-4:]
+    if card_match is False or (card_match is None and card_last4 and card_last4 != target_card_last4()):
+        reasons.append(
+            f"支払カード末尾が {target_card_last4()} と一致しません"
+            + (f"（読み取り値: {card_last4}）" if card_last4 else "")
+        )
+
+    if getattr(result, "service_payee_related", None) is False:
+        payee = (getattr(result, "payee", "") or "").strip()
+        reasons.append(
+            "登録サービスと領収書の払先が一致していません"
+            + (f"（払先: {payee}）" if payee else "")
+        )
+
+    if receipt.ai_period_check_status == ReceiptPeriodCheckStatus.MISMATCHED:
+        reasons.append(
+            f"領収書の対象月（{receipt.ai_receipt_month or '不明'}）が提出月（{receipt.submission.period_month:%Y-%m}）と一致しません"
+        )
+    return list(dict.fromkeys(reasons))
+
+
+def remove_receipt_for_automatic_resubmission(receipt_id: int, reasons: list[str]) -> bool:
+    """明確な不一致がある領収書を提出項目から外し、再提出依頼を残す。"""
+
+    if not reasons:
+        return False
+    with transaction.atomic():
+        receipt = (
+            Receipt.objects.select_for_update()
+            .select_related("submission", "submission__user")
+            .filter(pk=receipt_id)
+            .first()
+        )
+        if receipt is None:
+            return False
+        submission = receipt.submission
+        reason_text = "、".join(reasons)
+        ReceiptResubmissionRequest.objects.create(
+            user=submission.user,
+            period_month=submission.period_month,
+            service_name_snapshot=receipt.service_name_snapshot,
+            billing_type_snapshot=receipt.billing_type_snapshot,
+            original_receipt_id=receipt.pk,
+            original_filename=receipt.original_filename,
+            display_filename=receipt.display_filename,
+            message=(
+                f"自動確認の結果、{submission.period_month:%Y年%m月}分の "
+                f"{receipt.service_display_name_snapshot} の領収書に明確な不一致が見つかりました。"
+                f"理由: {reason_text}。該当ファイルは提出項目から取り下げました。"
+                "内容を確認し、正しい領収書を再度アップロードしてください。"
+            ),
+            created_by=None,
+        )
+        receipt.delete()
+        if submission.status == SubmissionStatus.SUBMITTED:
+            submission.status = SubmissionStatus.DRAFT
+            submission.submitted_at = None
+            submission.save(update_fields=["status", "submitted_at", "updated_at"])
+    return True
 
 
 def reset_ai_processing_state(receipt: Receipt, *, save: bool = False, clear_extracted_values: bool = False) -> list[str]:
@@ -200,6 +278,11 @@ def apply_ai_filename_to_receipt(receipt: Receipt):
         content_type=receipt.content_type,
         service_display_name=receipt.service_display_name_snapshot,
         user_filename_part=filename_user_part_from_user(receipt.submission.user),
+        service_match_hints=(
+            receipt.service.catalog_service.merchant_aliases
+            if receipt.service.catalog_service_id and receipt.service.catalog_service
+            else ""
+        ),
     )
 
     receipt.generated_filename = result.suggested_filename[:255] if result.suggested_filename else ""
@@ -232,6 +315,12 @@ def apply_ai_filename_to_receipt(receipt: Receipt):
             update_fields.append("currency")
 
     receipt.save(update_fields=list(dict.fromkeys(update_fields)))
+
+    # 明確な不一致だけは自動的に提出項目から取り下げる。
+    # 読み取り不可・曖昧な項目は削除せず、管理者画面の要確認ステータスに残す。
+    reasons = definite_ai_rejection_reasons(receipt, result)
+    if reasons:
+        remove_receipt_for_automatic_resubmission(receipt.pk, reasons)
     return result
 
 
@@ -307,18 +396,18 @@ def claim_pending_receipts_for_ai_processing(queryset: QuerySet, *, limit: int |
 
 
 def process_claimed_receipt(receipt_id: int):
-    receipt = Receipt.objects.select_related("submission", "submission__user", "service").get(pk=receipt_id)
+    receipt = Receipt.objects.select_related("submission", "submission__user", "service", "service__catalog_service").get(pk=receipt_id)
     if receipt.ai_filename_status != ReceiptFilenameStatus.PROCESSING:
         return None
     return apply_ai_filename_to_receipt(receipt)
 
 
 def process_claimed_receipts(receipt_ids: Iterable[int]) -> dict[str, int]:
-    summary = {"processed": 0, "generated": 0, "needs_review": 0, "failed": 0, "skipped": 0, "mismatched": 0}
+    summary = {"processed": 0, "generated": 0, "needs_review": 0, "failed": 0, "skipped": 0, "mismatched": 0, "rejected": 0}
     for receipt_id in receipt_ids:
         try:
             result = process_claimed_receipt(int(receipt_id))
-            receipt = Receipt.objects.only("ai_filename_status", "ai_period_check_status").get(pk=receipt_id)
+            receipt = Receipt.objects.only("ai_filename_status", "ai_period_check_status").filter(pk=receipt_id).first()
         except Exception as exc:  # pragma: no cover - スレッド内の最終防衛。
             logger.exception("Receipt %s AI processing failed unexpectedly", receipt_id)
             try:
@@ -330,6 +419,10 @@ def process_claimed_receipts(receipt_ids: Iterable[int]) -> dict[str, int]:
             continue
 
         summary["processed"] += 1
+        if receipt is None:
+            summary["rejected"] += 1
+            _ = result
+            continue
         if receipt.ai_filename_status == ReceiptFilenameStatus.GENERATED:
             summary["generated"] += 1
         elif receipt.ai_filename_status == ReceiptFilenameStatus.NEEDS_REVIEW:

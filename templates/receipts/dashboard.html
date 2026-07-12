@@ -27,10 +27,60 @@
         <strong>{{ submission.receipt_count }}</strong>
     </div>
     <div class="card">
+        <span class="label">提出対象の確認</span>
+        <strong>{{ monthly_summary.progress_label }}</strong>
+        {% if not monthly_summary.is_complete %}<span class="badge draft">未確認あり</span>{% else %}<span class="badge submitted">確認済み</span>{% endif %}
+    </div>
+    <div class="card">
         <span class="label">ファイル保存期限</span>
         <strong>最大{{ retention_months }}ヶ月</strong>
     </div>
 </section>
+
+{% if monthly_summary.metered_rows %}
+<section class="card section api-usage-section" data-tutorial-target="api-usage-section">
+    <div class="section-header">
+        <div>
+            <h2>従量課金 / API利用確認</h2>
+            <p class="muted">領収書が発生しなかったAPIサービスは「当月利用なし」を選択してください。利用があった場合は通常どおり領収書をアップロードします。</p>
+        </div>
+    </div>
+    <div class="table-wrap">
+        <table>
+            <thead><tr><th>サービス</th><th>当月ステータス</th><th>操作</th></tr></thead>
+            <tbody>
+                {% for row in monthly_summary.metered_rows %}
+                    <tr>
+                        <td><strong>{{ row.service.display_name }}</strong></td>
+                        <td><span class="badge {{ row.badge_class }}">{{ row.status_label }}</span></td>
+                        <td>
+                            {% if submission.is_submitted %}
+                                <span class="muted">提出済み</span>
+                            {% elif row.has_receipt %}
+                                <span class="muted">領収書登録済み</span>
+                            {% elif row.no_usage_declared %}
+                                <form method="post" class="inline-form">
+                                    {% csrf_token %}
+                                    <input type="hidden" name="action" value="clear_no_usage">
+                                    <input type="hidden" name="service_id" value="{{ row.service.pk }}">
+                                    <button type="submit" class="button small">利用なしを取り消す</button>
+                                </form>
+                            {% else %}
+                                <form method="post" class="inline-form" onsubmit="return confirm('この月はAPI利用がなく、領収書が発生していないことを記録しますか？');">
+                                    {% csrf_token %}
+                                    <input type="hidden" name="action" value="declare_no_usage">
+                                    <input type="hidden" name="service_id" value="{{ row.service.pk }}">
+                                    <button type="submit" class="button small">当月利用なし</button>
+                                </form>
+                            {% endif %}
+                        </td>
+                    </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</section>
+{% endif %}
 
 {% if open_resubmission_requests %}
     <section class="card section notice resubmission-request-box">

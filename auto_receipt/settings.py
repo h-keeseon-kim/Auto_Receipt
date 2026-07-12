@@ -150,6 +150,7 @@ OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
 OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "")
 RECEIPT_AI_FILENAME_ENABLED = bool_env("RECEIPT_AI_FILENAME_ENABLED", True)
 RECEIPT_CARD_LAST4 = os.environ.get("RECEIPT_CARD_LAST4", "7210")
+RECEIPT_AI_MANUAL_BATCH_SIZE = min(max(int_env("RECEIPT_AI_MANUAL_BATCH_SIZE", 100), 1), 500)
 try:
     RECEIPT_AI_TIMEOUT = float(os.environ.get("RECEIPT_AI_TIMEOUT", "30"))
 except ValueError:

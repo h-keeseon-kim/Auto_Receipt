@@ -1,0 +1,85 @@
+{% for statement in statements %}
+<section class="card section statement-card" id="statement-{{ statement.pk }}" data-statement-status="{{ statement.status }}">
+    <div class="section-header">
+        <div>
+            <h2>{{ statement.original_filename|default:"ご利用代金明細書" }}</h2>
+            <div class="actions">
+                <span class="badge {% if statement.status == 'completed' %}submitted{% elif statement.status == 'processing' %}processing{% else %}draft{% endif %}">{{ statement.get_status_display }}</span>
+                <span class="muted small">アップロード: {{ statement.uploaded_at|date:"Y-m-d H:i" }}</span>
+                {% if statement.processed_at %}<span class="muted small">解析完了: {{ statement.processed_at|date:"Y-m-d H:i" }}</span>{% endif %}
+            </div>
+        </div>
+        <div class="table-actions">
+            {% if statement.file_available %}<a class="button small" href="{% url 'staff_download_card_statement' statement.pk %}">明細DL</a>{% endif %}
+            <form method="post" action="{% url 'staff_delete_card_statement' statement.pk %}" onsubmit="return confirm('このカード明細ファイルと解析履歴を削除しますか？');">
+                {% csrf_token %}
+                <button type="submit" class="button small danger-outline">削除</button>
+            </form>
+        </div>
+    </div>
+
+    <section class="status-grid compact-grid">
+        <div class="card"><span class="label">カード下4桁（{{ target_card_last4 }}）</span><strong class="{% if statement.card_last4 and statement.card_last4 != target_card_last4 %}danger{% endif %}">{{ statement.card_last4|default:"解析待ち" }}</strong></div>
+        <div class="card"><span class="label">AI判定対象月</span><strong>{{ statement.statement_period|default:"解析待ち" }}</strong></div>
+        <div class="card"><span class="label">支払日</span><strong>{{ statement.payment_date|date:"Y-m-d"|default:"-" }}</strong></div>
+        <div class="card"><span class="label">領収書未提出項目</span><strong class="{% if statement.missing_receipt_count %}danger{% endif %}">{{ statement.missing_receipt_count }}</strong></div>
+        <div class="card"><span class="label">手動確認項目</span><strong class="{% if statement.manual_review_count %}danger{% endif %}">{{ statement.manual_review_count }}</strong></div>
+    </section>
+
+    {% if statement.ai_admin_memo %}
+        <div class="message {% if statement.status == 'completed' %}success{% elif statement.status == 'processing' %}notice{% else %}error{% endif %}">{{ statement.ai_admin_memo }}</div>
+    {% endif %}
+
+    {% if statement.status == 'processing' %}
+        <div class="message notice processing-text">AIで明細情報を抽出中です。解析が完了すると、この画面へ自動反映されます。</div>
+    {% elif statement.items.all %}
+        <div class="table-wrap scroll-box large table-scroll-wide">
+            <table class="statement-items-table">
+                <thead><tr><th>明細No.</th><th>利用日</th><th>ご利用先</th><th>金額</th><th>対応サービス</th><th>AI一致</th><th>領収書状況</th><th>確認メモ</th><th>管理者確認</th></tr></thead>
+                <tbody>
+                    {% for item in statement.items.all %}
+                        <tr class="{{ item.row_class }}">
+                            <td>{{ item.line_reference|default:item.sequence }}</td>
+                            <td>{{ item.transaction_date|date:"Y-m-d"|default:"-" }}</td>
+                            <td><strong>{{ item.merchant_name }}</strong></td>
+                            <td>
+                                {% if item.amount_jpy is not None %}¥{{ item.amount_jpy|floatformat:0 }}{% else %}-{% endif %}
+                                {% if item.original_amount is not None %}<div class="muted small">{{ item.original_amount|floatformat:-2 }} {{ item.original_currency }}</div>{% endif %}
+                            </td>
+                            <td>{{ item.matched_service.display_name|default:"-" }}</td>
+                            <td><span class="badge {% if item.match_status == 'matched' %}submitted{% elif item.match_status == 'ignored' %}neutral{% else %}draft{% endif %}">{{ item.get_match_status_display }}</span></td>
+                            <td><span class="badge {% if item.matched_receipt and item.matched_receipt.file_available %}submitted{% elif not item.receipt_required %}neutral{% else %}draft{% endif %}">{{ item.receipt_status_label }}</span></td>
+                            <td>{{ item.match_memo|default:"-" }}</td>
+                            <td>
+                                <form method="post" action="{% url 'staff_update_statement_item' item.pk %}" class="statement-item-form">
+                                    {% csrf_token %}
+                                    <select name="service_id" aria-label="対応サービス">
+                                        <option value="">サービスを選択</option>
+                                        {% for service in available_services %}
+                                            <option value="{{ service.pk }}" {% if item.matched_service_id == service.pk %}selected{% endif %}>{{ service.display_name }}</option>
+                                        {% endfor %}
+                                    </select>
+                                    <label class="inline-check"><input type="checkbox" name="receipt_required" {% if item.receipt_required %}checked{% endif %}> 領収書必要</label>
+                                    <div class="actions nowrap">
+                                        <button type="submit" name="item_action" value="match" class="button small">一致として保存</button>
+                                        <button type="submit" name="item_action" value="ignore" class="button small">対象外</button>
+                                    </div>
+                                </form>
+                            </td>
+                        </tr>
+                    {% empty %}
+                        <tr><td colspan="9" class="muted center">明細項目を抽出できませんでした。</td></tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+        <p class="muted small statement-highlight-legend"><span class="legend-swatch missing"></span> 黄色は領収書が必要なのに未提出の項目、<span class="legend-swatch review"></span> 薄橙色はサービス対応が曖昧で手動確認が必要な項目です。</p>
+    {% else %}
+        <p class="muted center">解析結果はありません。</p>
+    {% endif %}
+</section>
+{% empty %}
+<section class="card section">
+    <p class="muted center">このユーザー・対象月のご利用代金明細書はまだありません。</p>
+</section>
+{% endfor %}

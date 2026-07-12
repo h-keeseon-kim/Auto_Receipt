@@ -5,11 +5,7 @@
 <div class="page-title">
     <div>
         <h1>提出履歴</h1>
-        <p class="muted">ユーザー別の提出状況と、各ユーザーがアップロードした領収書ファイルを確認できます。</p>
-        <div class="actions">
-            <a class="button" href="{% url 'staff_user_create' %}">ユーザー管理</a>
-            <a class="button" href="{% url 'staff_services' %}">利用サービス管理</a>
-        </div>
+        <p class="muted">ユーザー別の提出進捗、未提出サービス、AI確認対象、アップロード済み領収書を確認できます。</p>
     </div>
     <form method="get" class="month-form" data-tutorial-target="staff-month-form">
         {{ month_form.month.label_tag }}
@@ -20,12 +16,12 @@
 
 <section class="status-grid">
     <div class="card"><span class="label">対象月</span><strong>{{ selected_month|date:"Y年m月" }}</strong></div>
-    <div class="card"><span class="label">対象ユーザー</span><strong>{{ stats.total_users }}</strong></div>
+    <div class="card"><span class="label">利用中ユーザー</span><strong>{{ stats.active_users }}</strong></div>
     <div class="card"><span class="label">提出済み</span><strong>{{ stats.submitted }}</strong></div>
-    <div class="card"><span class="label">下書き</span><strong>{{ stats.draft }}</strong></div>
-    <div class="card"><span class="label">未着手</span><strong>{{ stats.not_started }}</strong></div>
+    <div class="card"><span class="label">未提出ユーザー</span><strong class="{% if stats.incomplete_users %}danger{% endif %}">{{ stats.incomplete_users }}</strong></div>
+    <div class="card"><span class="label">領収書未提出サービス</span><strong class="{% if stats.missing_service_count %}danger{% endif %}">{{ stats.missing_service_count }}</strong></div>
+    <div class="card"><span class="label">API利用確認待ち</span><strong class="{% if stats.api_pending_count %}danger{% endif %}">{{ stats.api_pending_count }}</strong></div>
     <div class="card"><span class="label">領収書数</span><strong>{{ stats.receipt_count }}</strong></div>
-    <div class="card"><span class="label">保存中ファイル</span><strong>{{ stats.available_file_count }}</strong></div>
     <div class="card"><span class="label">AI未確認</span><strong data-ai-summary="ai_pending_count">{{ stats.ai_pending_count }}</strong></div>
     <div class="card"><span class="label">AI抽出中</span><strong data-ai-summary="ai_processing_count">{{ stats.ai_processing_count }}</strong></div>
     <div class="card"><span class="label">AI要確認</span><strong data-ai-summary="ai_review_count">{{ stats.ai_review_count }}</strong></div>
@@ -39,7 +35,7 @@
     <div class="section-header">
         <div>
             <h2>提出状況</h2>
-            <p class="muted">ユーザー名順に、対象月の提出状況を表示します。</p>
+            <p class="muted">ユーザー名順です。「月別状況」からサービス単位の提出状況とカード明細の照合結果を確認できます。</p>
         </div>
         <div class="actions nowrap">
             <a class="button primary" href="{% url 'staff_download_month' %}?month={{ selected_month|date:'Y-m' }}">提出済みZIP</a>
@@ -47,33 +43,31 @@
     </div>
     <div class="table-wrap scroll-box medium table-scroll-wide" aria-label="提出状況テーブル" data-tutorial-target="staff-status-table">
         <table class="staff-status-table">
-            <thead><tr><th>ユーザー</th><th>メール</th><th>利用中サービス</th><th>ユーザー登録</th><th>ユーザー停止</th><th>ステータス</th><th>領収書数</th><th>保存中</th><th>削除済み</th><th>操作</th></tr></thead>
+            <thead><tr><th>ユーザー</th><th>利用状態</th><th>提出</th><th>サービス確認</th><th>領収書未提出</th><th>API確認待ち</th><th>AI手動確認</th><th>領収書数</th><th>操作</th></tr></thead>
             <tbody>
                 {% for row in rows %}
-                    <tr>
-                        <td><strong>{{ row.user.username }}</strong></td>
-                        <td>{{ row.user.email|default:"-" }}</td>
-                        <td>{{ row.active_service_count }}</td>
-                        <td>{% if row.user_registered_count %}<span class="badge draft">{{ row.user_registered_count }}</span>{% else %}0{% endif %}</td>
-                        <td>{% if row.user_stopped_count %}<span class="badge draft">{{ row.user_stopped_count }}</span>{% else %}0{% endif %}</td>
+                    <tr class="{% if row.needs_attention %}attention-row{% endif %}">
+                        <td><strong>{{ row.user.username }}</strong><div class="muted small">{{ row.user.email|default:"-" }}</div></td>
+                        <td><span class="badge {% if row.user.profile.account_status == 'active' %}submitted{% else %}neutral{% endif %}">{{ row.user.profile.get_account_status_display }}</span></td>
                         <td><span class="badge {% if row.status == '提出済み' %}submitted{% elif row.status == '下書き' %}draft{% else %}neutral{% endif %}">{{ row.status }}</span></td>
+                        <td><strong>{{ row.monthly_summary.progress_label }}</strong> / {{ row.monthly_summary.total_services }}件</td>
+                        <td>{% if row.monthly_summary.missing_required_count %}<span class="badge draft">{{ row.monthly_summary.missing_required_count }}</span>{% else %}<span class="badge submitted">0</span>{% endif %}</td>
+                        <td>{% if row.monthly_summary.api_pending_count %}<span class="badge draft">{{ row.monthly_summary.api_pending_count }}</span>{% else %}<span class="badge submitted">0</span>{% endif %}</td>
+                        <td>{% if row.manual_review_count %}<span class="badge draft">{{ row.manual_review_count }}</span>{% else %}<span class="badge submitted">0</span>{% endif %}</td>
                         <td>{{ row.receipt_count }}</td>
-                        <td>{{ row.available_file_count }}</td>
-                        <td>{{ row.purged_file_count }}</td>
                         <td>
                             <div class="table-actions">
+                                <a class="button small primary" href="{% url 'staff_user_month_status' row.user.pk %}?month={{ selected_month|date:'Y-m' }}">月別状況</a>
                                 <a class="button small" href="{% url 'staff_services' %}?user={{ row.user.pk }}">サービス</a>
-                            {% if row.submission %}
-                                <a class="button small" href="{% url 'staff_submission_detail' row.submission.pk %}">詳細</a>
-                                <a class="button small" href="{% url 'staff_download_submission' row.submission.pk %}">ZIP</a>
-                            {% else %}
-                                <span class="muted">提出なし</span>
-                            {% endif %}
+                                {% if row.submission %}
+                                    <a class="button small" href="{% url 'staff_submission_detail' row.submission.pk %}">提出詳細</a>
+                                    <a class="button small" href="{% url 'staff_download_submission' row.submission.pk %}">ZIP</a>
+                                {% endif %}
                             </div>
                         </td>
                     </tr>
                 {% empty %}
-                    <tr><td colspan="10" class="muted center">対象ユーザーがいません。</td></tr>
+                    <tr><td colspan="9" class="muted center">対象ユーザーがいません。</td></tr>
                 {% endfor %}
             </tbody>
         </table>
@@ -111,14 +105,14 @@
     <div class="section-header">
         <div>
             <h2>アップロード済み領収書</h2>
-            <p class="muted">対象月にアップロードされた領収書ファイルをアップロード日時の新しい順にまとめて表示します。AI修正・検査は、管理者が必要なタイミングで実行します。</p>
+            <p class="muted">対象月の領収書をアップロード日時の新しい順に表示します。AI修正・検査は未確認ファイルだけを処理します。</p>
         </div>
         <form method="post" action="{% url 'staff_start_ai_processing' %}" class="ai-process-form" data-ai-process-form data-status-url="{% url 'staff_ai_processing_status' %}?month={{ selected_month|date:'Y-m' }}">
             {% csrf_token %}
             <input type="hidden" name="month" value="{{ selected_month|date:'Y-m' }}">
             <input type="hidden" name="limit" value="50">
             <button type="submit" class="button primary" data-ai-process-button>AIでファイル名を修正・検査</button>
-            <span class="muted small" data-ai-process-message>{% if stats.ai_processing_count %}AIで情報を抽出中です。完了した領収書から順番に反映されます。{% else %}未確認のみ実行します。処理済み項目はスキップされます。{% endif %}</span>
+            <span class="muted small" data-ai-process-message>{% if stats.ai_processing_count %}AIで情報を抽出中です。完了した領収書から順番に反映されます。{% else %}処理済み項目は再検査しません。{% endif %}</span>
         </form>
     </div>
     <div class="table-wrap scroll-box large table-scroll-wide" aria-label="アップロード済み領収書テーブル" data-tutorial-target="staff-receipt-table">
@@ -130,7 +124,6 @@
         </table>
     </div>
 </section>
-
 {% endblock %}
 
 {% block scripts %}

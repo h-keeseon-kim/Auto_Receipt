@@ -1,6 +1,18 @@
 from django.contrib import admin
 
-from .models import EmailDeliveryLog, EmailReminderSchedule, Receipt, ReceiptResubmissionRequest, RegisteredService, ServiceCatalog, Submission, UserProfile
+from .models import (
+    CardStatement,
+    CardStatementItem,
+    EmailDeliveryLog,
+    EmailReminderSchedule,
+    MonthlyServiceDeclaration,
+    Receipt,
+    ReceiptResubmissionRequest,
+    RegisteredService,
+    ServiceCatalog,
+    Submission,
+    UserProfile,
+)
 
 
 class ReceiptInline(admin.TabularInline):
@@ -65,7 +77,7 @@ class ReceiptInline(admin.TabularInline):
 class ServiceCatalogAdmin(admin.ModelAdmin):
     list_display = ("display_name", "name", "billing_type", "is_active", "created_by", "updated_at")
     list_filter = ("billing_type", "is_active")
-    search_fields = ("name", "memo", "created_by__username", "created_by__email")
+    search_fields = ("name", "merchant_aliases", "memo", "created_by__username", "created_by__email")
 
 
 @admin.register(RegisteredService)
@@ -183,6 +195,17 @@ class EmailDeliveryLogAdmin(admin.ModelAdmin):
 @admin.register(EmailReminderSchedule)
 class EmailReminderScheduleAdmin(admin.ModelAdmin):
     list_display = ("reminder_day", "warning_day", "updated_by", "updated_at")
+    fields = (
+        "reminder_day",
+        "warning_day",
+        "initial_subject_template",
+        "initial_body_template",
+        "urgent_subject_template",
+        "urgent_body_template",
+        "updated_by",
+        "created_at",
+        "updated_at",
+    )
     readonly_fields = ("created_at", "updated_at")
 
     def has_add_permission(self, request):
@@ -190,3 +213,67 @@ class EmailReminderScheduleAdmin(admin.ModelAdmin):
 
     def has_delete_permission(self, request, obj=None):
         return False
+
+
+@admin.register(MonthlyServiceDeclaration)
+class MonthlyServiceDeclarationAdmin(admin.ModelAdmin):
+    list_display = ("user", "period_month", "service", "no_usage", "declared_by", "updated_at")
+    list_filter = ("no_usage", "period_month", "service__billing_type")
+    search_fields = ("user__username", "user__email", "service__name", "note")
+    readonly_fields = ("declared_at", "updated_at")
+
+
+class CardStatementItemInline(admin.TabularInline):
+    model = CardStatementItem
+    extra = 0
+    fields = (
+        "sequence",
+        "line_reference",
+        "transaction_date",
+        "merchant_name",
+        "amount_jpy",
+        "original_amount",
+        "original_currency",
+        "matched_service",
+        "match_status",
+        "receipt_required",
+        "matched_receipt",
+        "match_memo",
+    )
+    readonly_fields = ("sequence", "line_reference", "transaction_date", "merchant_name", "amount_jpy", "original_amount", "original_currency")
+
+
+@admin.register(CardStatement)
+class CardStatementAdmin(admin.ModelAdmin):
+    list_display = (
+        "user",
+        "period_month",
+        "status",
+        "card_last4",
+        "statement_period",
+        "missing_receipt_count",
+        "manual_review_count",
+        "uploaded_at",
+        "file_deleted_at",
+    )
+    list_filter = ("status", "period_month", "file_deleted_at")
+    search_fields = ("user__username", "user__email", "original_filename", "ai_admin_memo", "items__merchant_name")
+    readonly_fields = ("uploaded_at", "processed_at", "expires_at", "file_deleted_at", "file_delete_reason", "updated_at")
+    inlines = [CardStatementItemInline]
+
+
+@admin.register(CardStatementItem)
+class CardStatementItemAdmin(admin.ModelAdmin):
+    list_display = (
+        "statement",
+        "line_reference",
+        "transaction_date",
+        "merchant_name",
+        "amount_jpy",
+        "matched_service",
+        "match_status",
+        "receipt_required",
+        "matched_receipt",
+    )
+    list_filter = ("match_status", "receipt_required", "statement__period_month")
+    search_fields = ("merchant_name", "line_reference", "statement__user__username", "matched_service__name", "match_memo")

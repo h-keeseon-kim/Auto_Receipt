@@ -49,6 +49,12 @@ def receipt_upload_path(instance: "Receipt", filename: str) -> str:
     return f"receipts/user_{instance.submission.user_id}/{period}/{uuid4().hex}{suffix}"
 
 
+def statement_upload_path(instance: "CardStatement", filename: str) -> str:
+    suffix = Path(filename).suffix.lower()
+    period = instance.period_month.strftime("%Y-%m")
+    return f"card_statements/user_{instance.user_id}/{period}/{uuid4().hex}{suffix}"
+
+
 class BillingType(models.TextChoices):
     SUBSCRIPTION = "subscription", "サブスク"
     METERED = "metered", "従量課金 / API"
@@ -100,6 +106,20 @@ class EmailDeliveryStatus(models.TextChoices):
     SKIPPED = "skipped", "スキップ"
 
 
+class CardStatementStatus(models.TextChoices):
+    PROCESSING = "processing", "AI解析中"
+    COMPLETED = "completed", "解析済み"
+    NEEDS_REVIEW = "needs_review", "要確認"
+    FAILED = "failed", "解析失敗"
+
+
+class StatementMatchStatus(models.TextChoices):
+    MATCHED = "matched", "サービス一致"
+    AMBIGUOUS = "ambiguous", "曖昧"
+    UNMATCHED = "unmatched", "未一致"
+    IGNORED = "ignored", "対象外"
+
+
 class ServiceRegistrationSource(models.TextChoices):
     ADMIN = "admin", "管理者登録"
     USER = "user", "ユーザー登録"
@@ -116,6 +136,11 @@ class ServiceCatalog(models.Model):
     name = models.CharField("サービス名", max_length=120)
     billing_type = models.CharField("支払い種別", max_length=20, choices=BillingType.choices)
     is_active = models.BooleanField("選択可能", default=True)
+    merchant_aliases = models.TextField(
+        "カード明細・払先の表記候補",
+        blank=True,
+        help_text="例: OPENAI *CHATGPT, OPENAI.COM。カンマまたは改行で複数指定できます。",
+    )
     memo = models.TextField("メモ", blank=True)
     created_by = models.ForeignKey(
         settings.AUTH_USER_MODEL,
@@ -364,8 +389,19 @@ class Submission(models.Model):
         return self.receipts.available_files().count()
 
     def submit(self):
-        if not self.receipts.available_files().exists():
-            raise ValidationError("領収書ファイルを1件以上アップロードしてから提出してください。")
+        from .monthly_status import build_user_month_summary
+
+        summary = build_user_month_summary(self.user, self.period_month)
+        if not summary.rows:
+            raise ValidationError("対象月に提出対象となる利用サービスがありません。利用サービスを確認してください。")
+        if not summary.is_complete:
+            unresolved = [row.service.display_name for row in (*summary.missing_required, *summary.api_pending)]
+            preview = "、".join(unresolved[:5])
+            if len(unresolved) > 5:
+                preview += f" ほか{len(unresolved) - 5}件"
+            raise ValidationError(
+                f"未確認のサービスがあります（{preview}）。領収書をアップロードするか、従量課金 / APIは『当月利用なし』を選択してください。"
+            )
         self.status = SubmissionStatus.SUBMITTED
         self.submitted_at = timezone.now()
         self.save(update_fields=["status", "submitted_at", "updated_at"])
@@ -756,6 +792,234 @@ class ReceiptResubmissionRequest(models.Model):
 
 
 
+class MonthlyServiceDeclaration(models.Model):
+    """従量課金/APIサービスについて、ユーザーが当月利用なしと申告した記録。"""
+
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="monthly_service_declarations")
+    service = models.ForeignKey(RegisteredService, on_delete=models.CASCADE, related_name="monthly_declarations")
+    period_month = models.DateField("対象月")
+    no_usage = models.BooleanField("当月利用なし", default=True)
+    note = models.TextField("補足", blank=True)
+    declared_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="service_usage_declarations_created",
+        verbose_name="申告者",
+    )
+    declared_at = models.DateTimeField("申告日時", auto_now_add=True)
+    updated_at = models.DateTimeField("更新日時", auto_now=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(fields=["user", "service", "period_month"], name="unique_monthly_service_declaration"),
+        ]
+        ordering = ["-period_month", "service__name"]
+        verbose_name = "月次サービス利用申告"
+        verbose_name_plural = "月次サービス利用申告"
+
+    def clean(self):
+        if self.period_month:
+            self.period_month = month_start(self.period_month)
+        if self.service_id and self.user_id and self.service.user_id != self.user_id:
+            raise ValidationError("自分に登録されたサービスだけを申告できます。")
+        if self.service_id and self.service.billing_type != BillingType.METERED:
+            raise ValidationError("当月利用なし申告は従量課金 / APIサービスだけで利用できます。")
+
+    def save(self, *args, **kwargs):
+        if self.period_month:
+            self.period_month = month_start(self.period_month)
+        super().save(*args, **kwargs)
+
+    def __str__(self) -> str:
+        return f"{self.user} / {self.period_month:%Y-%m} / {self.service.display_name} / 利用なし"
+
+
+class CardStatement(models.Model):
+    """管理者がアップロードするカードのご利用代金明細書。"""
+
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="card_statements")
+    period_month = models.DateField("対象月")
+    file = models.FileField(
+        "ご利用代金明細書",
+        upload_to=statement_upload_path,
+        validators=[
+            FileExtensionValidator(allowed_extensions=["pdf", "png", "jpg", "jpeg", "webp"]),
+            validate_upload_size,
+        ],
+    )
+    original_filename = models.CharField("元ファイル名", max_length=255, blank=True)
+    file_size = models.PositiveIntegerField("ファイルサイズ", null=True, blank=True)
+    content_type = models.CharField("Content-Type", max_length=120, blank=True)
+    status = models.CharField("解析ステータス", max_length=20, choices=CardStatementStatus.choices, default=CardStatementStatus.PROCESSING)
+    card_last4 = models.CharField("カード下4桁", max_length=4, blank=True)
+    statement_period = models.CharField("AI判定対象月", max_length=7, blank=True)
+    payment_date = models.DateField("支払日", null=True, blank=True)
+    ai_admin_memo = models.TextField("AI管理者メモ", blank=True)
+    uploaded_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="uploaded_card_statements",
+        verbose_name="アップロード管理者",
+    )
+    uploaded_at = models.DateTimeField("アップロード日時", auto_now_add=True)
+    processed_at = models.DateTimeField("解析完了日時", null=True, blank=True)
+    expires_at = models.DateTimeField("ファイル保存期限", null=True, blank=True)
+    file_deleted_at = models.DateTimeField("ファイル削除日時", null=True, blank=True)
+    file_delete_reason = models.CharField("ファイル削除理由", max_length=40, blank=True)
+    updated_at = models.DateTimeField("更新日時", auto_now=True)
+
+    class Meta:
+        ordering = ["-uploaded_at"]
+        indexes = [models.Index(fields=["user", "period_month", "status"])]
+        verbose_name = "ご利用代金明細書"
+        verbose_name_plural = "ご利用代金明細書"
+
+    def clean(self):
+        if self.period_month:
+            self.period_month = month_start(self.period_month)
+        if self.user_id and (self.user.is_staff or self.user.is_superuser):
+            raise ValidationError({"user": "一般ユーザーを選択してください。"})
+
+    def save(self, *args, **kwargs):
+        if self.period_month:
+            self.period_month = month_start(self.period_month)
+        if self.file and not self.expires_at:
+            self.expires_at = receipt_expiry_from(timezone.now())
+        super().save(*args, **kwargs)
+
+    @property
+    def file_available(self) -> bool:
+        return bool(self.file) and self.file_deleted_at is None
+
+    @property
+    def missing_receipt_count(self) -> int:
+        return self.items.filter(receipt_required=True).filter(
+            Q(matched_receipt__isnull=True)
+            | Q(matched_receipt__file_deleted_at__isnull=False)
+            | Q(matched_receipt__file="")
+        ).count()
+
+    @property
+    def manual_review_count(self) -> int:
+        return self.items.filter(match_status__in=[StatementMatchStatus.AMBIGUOUS, StatementMatchStatus.UNMATCHED]).count()
+
+    def purge_file(self, reason: str = "expired") -> bool:
+        if not self.file_available:
+            return False
+        storage = self.file.storage
+        name = self.file.name
+        if name and storage.exists(name):
+            storage.delete(name)
+        self.file = ""
+        self.file_deleted_at = timezone.now()
+        self.file_delete_reason = reason
+        self.save(update_fields=["file", "file_deleted_at", "file_delete_reason", "updated_at"])
+        return True
+
+    def __str__(self) -> str:
+        return f"{self.user} / {self.period_month:%Y-%m} / {self.get_status_display()}"
+
+
+class CardStatementItem(models.Model):
+    statement = models.ForeignKey(CardStatement, on_delete=models.CASCADE, related_name="items")
+    sequence = models.PositiveIntegerField("並び順", default=0)
+    line_reference = models.CharField("明細番号", max_length=40, blank=True)
+    transaction_date = models.DateField("利用日", null=True, blank=True)
+    merchant_name = models.CharField("ご利用先", max_length=255)
+    merchant_normalized = models.CharField("正規化ご利用先", max_length=255, blank=True)
+    amount_jpy = models.DecimalField("請求金額（円）", max_digits=14, decimal_places=2, null=True, blank=True)
+    original_amount = models.DecimalField("外貨金額", max_digits=14, decimal_places=2, null=True, blank=True)
+    original_currency = models.CharField("外貨通貨", max_length=3, blank=True)
+    matched_service = models.ForeignKey(
+        RegisteredService,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="statement_items",
+        verbose_name="一致サービス",
+    )
+    match_status = models.CharField("一致ステータス", max_length=20, choices=StatementMatchStatus.choices, default=StatementMatchStatus.UNMATCHED)
+    match_confidence = models.FloatField("一致信頼度", default=0)
+    match_memo = models.TextField("確認メモ", blank=True)
+    receipt_required = models.BooleanField("領収書が必要", default=False)
+    matched_receipt = models.ForeignKey(
+        Receipt,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="statement_items",
+        verbose_name="一致領収書",
+    )
+    created_at = models.DateTimeField("作成日時", auto_now_add=True)
+
+    class Meta:
+        ordering = ["sequence", "id"]
+        indexes = [models.Index(fields=["statement", "match_status", "receipt_required"])]
+        verbose_name = "カード明細項目"
+        verbose_name_plural = "カード明細項目"
+
+    @property
+    def receipt_status_label(self) -> str:
+        if not self.receipt_required:
+            return "対象外"
+        if self.matched_receipt_id and self.matched_receipt and self.matched_receipt.file_available:
+            return "領収書あり"
+        if self.matched_service_id:
+            return "領収書未提出"
+        return "要確認"
+
+    @property
+    def needs_highlight(self) -> bool:
+        return self.receipt_required and not (self.matched_receipt_id and self.matched_receipt and self.matched_receipt.file_available)
+
+    @property
+    def row_class(self) -> str:
+        if self.needs_highlight:
+            return "statement-missing-row"
+        if self.match_status in {StatementMatchStatus.AMBIGUOUS, StatementMatchStatus.UNMATCHED}:
+            return "manual-review-row"
+        return ""
+
+    def __str__(self) -> str:
+        return f"{self.statement} / {self.line_reference or self.sequence} / {self.merchant_name}"
+
+
+DEFAULT_INITIAL_SUBJECT = "{app_name}: {target_month}分の領収書アップロードをお願いします"
+DEFAULT_INITIAL_BODY = """{user_name} 様
+
+まだ領収書をアップロードしていない方にお送りします。
+{target_month}分について、以下のサービスの領収書をアップロードしてください。
+
+{missing_services}
+
+アップロードページ: {upload_url}
+
+アップロード後は、対象月の領収書が揃っていることを確認して「提出する」を押してください。
+
+{app_name}"""
+DEFAULT_URGENT_SUBJECT = "【重要】{app_name}: {target_month}分の領収書を本日中にアップロードしてください"
+DEFAULT_URGENT_BODY = """{user_name} 様
+
+まだ領収書をアップロードしていない方にお送りします。
+{target_month}分の確認が完了していません。本日中にご対応ください。
+
+未アップロードのサービス:
+{missing_services}
+
+従量課金 / APIの利用確認が必要なサービス:
+{api_pending_services}
+
+APIサービスを利用していない場合は、アップロードページで「今月は利用なし」を選択してください。
+
+アップロードページ: {upload_url}
+
+{app_name}"""
+
+
 class EmailReminderSchedule(models.Model):
     """Monthly reminder day settings managed from the staff email page.
 
@@ -766,6 +1030,10 @@ class EmailReminderSchedule(models.Model):
 
     reminder_day = models.PositiveSmallIntegerField("リマインダー日", default=4)
     warning_day = models.PositiveSmallIntegerField("警告日", default=10)
+    initial_subject_template = models.CharField("通常リマインダー件名", max_length=255, default=DEFAULT_INITIAL_SUBJECT)
+    initial_body_template = models.TextField("通常リマインダー本文", default=DEFAULT_INITIAL_BODY)
+    urgent_subject_template = models.CharField("重要リマインダー件名", max_length=255, default=DEFAULT_URGENT_SUBJECT)
+    urgent_body_template = models.TextField("重要リマインダー本文", default=DEFAULT_URGENT_BODY)
     updated_by = models.ForeignKey(
         settings.AUTH_USER_MODEL,
         on_delete=models.SET_NULL,
@@ -783,7 +1051,17 @@ class EmailReminderSchedule(models.Model):
 
     @classmethod
     def get_solo(cls) -> "EmailReminderSchedule":
-        obj, _created = cls.objects.get_or_create(pk=1, defaults={"reminder_day": 4, "warning_day": 10})
+        obj, _created = cls.objects.get_or_create(
+            pk=1,
+            defaults={
+                "reminder_day": 4,
+                "warning_day": 10,
+                "initial_subject_template": DEFAULT_INITIAL_SUBJECT,
+                "initial_body_template": DEFAULT_INITIAL_BODY,
+                "urgent_subject_template": DEFAULT_URGENT_SUBJECT,
+                "urgent_body_template": DEFAULT_URGENT_BODY,
+            },
+        )
         return obj
 
     def clean(self):
@@ -867,8 +1145,48 @@ def sync_user_account_status_after_service_delete(sender, instance: RegisteredSe
     sync_user_account_status_from_services(instance.user_id)
 
 
+@receiver(post_save, sender=Receipt)
+def sync_statement_items_after_receipt_save(sender, instance: Receipt, **kwargs):
+    if not instance.file_available:
+        return
+
+    # 同じ領収書を1つのカード明細内の複数行へ割り当てない。
+    # カード明細が複数アップロードされている場合は、各明細書につき未一致の先頭1行だけを更新する。
+    statement_ids = list(
+        CardStatementItem.objects.filter(
+            statement__user=instance.submission.user,
+            statement__period_month=instance.submission.period_month,
+            matched_service=instance.service,
+            receipt_required=True,
+        )
+        .values_list("statement_id", flat=True)
+        .distinct()
+    )
+    for statement_id in statement_ids:
+        if CardStatementItem.objects.filter(statement_id=statement_id, matched_receipt=instance).exists():
+            continue
+        item = (
+            CardStatementItem.objects.filter(
+                statement_id=statement_id,
+                matched_service=instance.service,
+                receipt_required=True,
+                matched_receipt__isnull=True,
+            )
+            .order_by("sequence", "pk")
+            .first()
+        )
+        if item is not None:
+            CardStatementItem.objects.filter(pk=item.pk).update(matched_receipt=instance)
+
+
 @receiver(post_delete, sender=Receipt)
 def delete_receipt_file(sender, instance: Receipt, **kwargs):
+    if instance.file:
+        instance.file.delete(save=False)
+
+
+@receiver(post_delete, sender=CardStatement)
+def delete_card_statement_file(sender, instance: CardStatement, **kwargs):
     if instance.file:
         instance.file.delete(save=False)
 

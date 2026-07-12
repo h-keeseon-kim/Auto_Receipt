@@ -17,8 +17,14 @@ from django.utils import timezone
 
 from .ai_filename import ReceiptFilenameResult, build_result_from_ai_payload, filename_user_part_from_user
 from .forms import ReceiptUploadForm
+from .monthly_status import build_user_month_summary
+from .statement_ai import StatementAnalysisItem, StatementAnalysisResult, build_statement_result_from_payload
+from .statement_processing import process_card_statement
 from .models import (
     BillingType,
+    CardStatement,
+    CardStatementItem,
+    CardStatementStatus,
     EmailDeliveryLog,
     EmailReminderSchedule,
     EmailDeliveryStatus,
@@ -28,10 +34,12 @@ from .models import (
     ReceiptPeriodCheckStatus,
     ReceiptResubmissionRequest,
     RegisteredService,
+    MonthlyServiceDeclaration,
     ResubmissionRequestStatus,
     ServiceCatalog,
     ServiceDeactivationSource,
     ServiceRegistrationSource,
+    StatementMatchStatus,
     Submission,
     SubmissionStatus,
     UserAccountStatus,
@@ -192,7 +200,7 @@ class ReceiptFlowTests(TestCase):
         mocked_generate.assert_called_once()
 
     @mock.patch("receipts.ai_processing.generate_ai_receipt_filename")
-    def test_background_ai_period_mismatch_keeps_receipt_and_records_admin_memo(self, mocked_generate):
+    def test_background_ai_period_mismatch_removes_receipt_and_requests_resubmission(self, mocked_generate):
         mocked_generate.return_value = ReceiptFilenameResult(
             status=ReceiptFilenameStatus.GENERATED,
             suggested_filename="260531_alice_OpenAI_220_USD.pdf",
@@ -220,18 +228,17 @@ class ReceiptFlowTests(TestCase):
         self.assertContains(response, "AIによるファイル名修正・検査は、管理者が実行")
 
         call_command("process_pending_receipts", "--limit", "10")
-        receipt = Receipt.objects.get()
-        self.assertEqual(receipt.ai_period_check_status, ReceiptPeriodCheckStatus.MISMATCHED)
-        self.assertEqual(receipt.ai_receipt_month, "2026-05")
-        self.assertIn("ユーザーへ再アップロードを依頼してください", receipt.ai_period_check_memo)
+        self.assertFalse(Receipt.objects.exists())
+        request_item = ReceiptResubmissionRequest.objects.get()
+        self.assertEqual(request_item.status, ResubmissionRequestStatus.OPEN)
+        self.assertIn("対象月", request_item.message)
+        self.assertIn("2026-05", request_item.message)
+        submission = Submission.objects.get(user=self.user, period_month=date(2026, 6, 1))
+        self.assertEqual(submission.status, SubmissionStatus.DRAFT)
 
-        admin = User.objects.create_superuser(username="admin", email="admin@example.com", password="admin-password-123")
-        self.client.logout()
-        self.client.login(username="admin", password="admin-password-123")
-        staff_response = self.client.get(reverse("history") + "?month=2026-06")
-        self.assertContains(staff_response, "提出月不一致")
-        self.assertContains(staff_response, "判定月: 2026-05")
-        self.assertContains(staff_response, "ユーザーへ再アップロード")
+        user_response = self.client.get(reverse("dashboard") + "?month=2026-06")
+        self.assertContains(user_response, "再提出依頼")
+        self.assertContains(user_response, "正しい領収書を再度アップロード")
 
     @mock.patch("receipts.ai_processing.generate_ai_receipt_filename")
     def test_ai_filename_review_memo_is_visible_to_staff_only(self, mocked_generate):
@@ -239,7 +246,8 @@ class ReceiptFlowTests(TestCase):
             status=ReceiptFilenameStatus.NEEDS_REVIEW,
             admin_memo="カード下4桁が7210として確認できませんでした。",
             payee="OpenAI",
-            card_last4="1234",
+            card_last4="",
+            card_last4_matches_target=None,
         )
         self.client.login(username="alice", password="password123")
         self.client.post(
@@ -286,8 +294,8 @@ class ReceiptFlowTests(TestCase):
             currency="USD",
             card_last4="7210",
             card_last4_matches_target=True,
-            service_payee_related=False,
-            service_payee_relation_reason="ChatGPTの想定払先はOpenAIだが、領収書の払先はAnthropic。",
+            service_payee_related=None,
+            service_payee_relation_reason="払先がAnthropicと読めますが、登録サービスとの関連性を断定できません。",
         )
         self.client.login(username="alice", password="password123")
         self.client.post(
@@ -420,7 +428,7 @@ class ReceiptFlowTests(TestCase):
         mocked_generate.assert_called_once()
 
     @mock.patch("receipts.ai_processing.generate_ai_receipt_filename")
-    def test_user_replace_receipt_file_keeps_new_file_even_if_background_detects_different_month(self, mocked_generate):
+    def test_user_replace_receipt_file_is_removed_if_background_detects_different_month(self, mocked_generate):
         mocked_generate.return_value = ReceiptFilenameResult(
             status=ReceiptFilenameStatus.GENERATED,
             suggested_filename="260531_alice_OpenAI_220_USD.pdf",
@@ -467,10 +475,11 @@ class ReceiptFlowTests(TestCase):
             self.assertEqual(fp.read(), b"%PDF-1.4 may")
 
         call_command("process_pending_receipts", "--limit", "10")
-        receipt.refresh_from_db()
-        self.assertEqual(receipt.ai_period_check_status, ReceiptPeriodCheckStatus.MISMATCHED)
-        self.assertEqual(receipt.ai_receipt_month, "2026-05")
-        self.assertIn("ユーザーへ再アップロードを依頼してください", receipt.ai_period_check_memo)
+        self.assertFalse(Receipt.objects.filter(pk=receipt.pk).exists())
+        request_item = ReceiptResubmissionRequest.objects.get(original_receipt_id=receipt.pk)
+        self.assertIn("対象月", request_item.message)
+        submission.refresh_from_db()
+        self.assertEqual(submission.status, SubmissionStatus.DRAFT)
 
     def test_submission_submit_allows_persisted_period_mismatch_for_staff_follow_up(self):
         submission = Submission.objects.create(user=self.user, period_month=date(2026, 6, 1))
@@ -531,8 +540,8 @@ class ReceiptFlowTests(TestCase):
             date_confirmed=True,
             amount_confirmed=True,
             currency_confirmed=True,
-            service_payee_related=False,
-            service_payee_relation_reason="ChatGPT の領収書として Anthropic は関連なしです。",
+            service_payee_related=None,
+            service_payee_relation_reason="ChatGPT と Anthropic の関連性を断定できません。",
         )
         self.client.login(username="alice", password="password123")
         self.client.post(
@@ -562,7 +571,7 @@ class ReceiptFlowTests(TestCase):
         self.assertContains(response, "manual-review-row")
         self.assertContains(response, "サービス/払先関連")
         self.assertContains(response, "再提出指示")
-        self.assertContains(response, "ChatGPT の領収書として Anthropic")
+        self.assertContains(response, "ChatGPT と Anthropic の関連性を断定できません")
 
     def test_staff_resubmission_request_deletes_receipt_keeps_draft_and_user_can_reupload(self):
         admin = User.objects.create_superuser(username="admin", email="admin@example.com", password="admin-password-123")
@@ -1050,7 +1059,7 @@ class StaffServiceAssignmentTests(TestCase):
         content = response.content.decode()
         upload_section = content[content.index("アップロード済み領収書"):]
         self.assertLess(upload_section.index("other.pdf"), upload_section.index("user.pdf"))
-        status_section = content[content.index("提出状況"):content.index("アップロード済み領収書")]
+        status_section = content[content.index("<h2>提出状況</h2>"):content.index("<h2>アップロード済み領収書</h2>")]
         self.assertLess(status_section.index("other@example.com"), status_section.index("user@example.com"))
         self.assertContains(response, "other.pdf")
         self.assertContains(response, "user.pdf")
@@ -1665,16 +1674,23 @@ class EmailReminderTests(TestCase):
         self.user_b = User.objects.create_user(username="b@example.com", email="b@example.com", password="password123")
         self.user_c = User.objects.create_user(username="c@example.com", email="c@example.com", password="password123")
         self.admin = User.objects.create_superuser(username="admin", email="admin@example.com", password="admin-password-123")
+        self.services = {}
         for account in [self.user_a, self.user_b, self.user_c]:
-            account.profile.account_status = UserAccountStatus.ACTIVE
-            account.profile.save(update_fields=["account_status", "updated_at"])
+            service = RegisteredService.objects.create(
+                user=account,
+                name="ReceiptHub Test Subscription",
+                billing_type=BillingType.SUBSCRIPTION,
+            )
+            self.services[account.pk] = service
+            account.profile.refresh_from_db()
+            self.assertEqual(account.profile.account_status, UserAccountStatus.ACTIVE)
 
     def test_initial_reminder_sends_to_all_general_users_once(self):
         call_command("send_receipt_reminders", "--kind", "initial", "--month", "2026-06")
 
         self.assertEqual(len(mail.outbox), 3)
         self.assertEqual(EmailDeliveryLog.objects.filter(email_type=EmailType.REMINDER_INITIAL, status=EmailDeliveryStatus.SENT).count(), 3)
-        self.assertIn("2026年06月分の領収書", mail.outbox[0].body)
+        self.assertIn("2026年06月分について", mail.outbox[0].body)
         self.assertIn("https://receipthub.example.com/dashboard/?month=2026-06", mail.outbox[0].body)
 
         call_command("send_receipt_reminders", "--kind", "initial", "--month", "2026-06")
@@ -1683,11 +1699,20 @@ class EmailReminderTests(TestCase):
         self.assertEqual(EmailDeliveryLog.objects.filter(email_type=EmailType.REMINDER_INITIAL).count(), 3)
 
     def test_urgent_reminder_sends_only_to_users_without_submitted_submission(self):
-        Submission.objects.create(
+        submitted = Submission.objects.create(
             user=self.user_b,
             period_month=date(2026, 6, 1),
             status=SubmissionStatus.SUBMITTED,
             submitted_at=timezone.now(),
+        )
+        Receipt.objects.create(
+            submission=submitted,
+            service=self.services[self.user_b.pk],
+            service_name_snapshot=self.services[self.user_b.pk].name,
+            billing_type_snapshot=BillingType.SUBSCRIPTION,
+            original_filename="submitted.pdf",
+            file="receipts/submitted.pdf",
+            expires_at=timezone.now() + timedelta(days=30),
         )
         Submission.objects.create(user=self.user_c, period_month=date(2026, 6, 1), status=SubmissionStatus.DRAFT)
 
@@ -1789,3 +1814,458 @@ class EmailReminderTests(TestCase):
             call_command("send_receipt_reminders", "--kind", "auto", "--month", "2026-06")
 
         self.assertEqual(len(mail.outbox), 0)
+
+
+@override_settings(
+    PASSWORD_HASHERS=FAST_PASSWORD_HASHERS,
+    EMAIL_BACKEND="django.core.mail.backends.locmem.EmailBackend",
+    DEFAULT_FROM_EMAIL="noreply@mkt-dev3.info",
+    APP_BASE_URL="https://receipthub.example.com",
+)
+class FinalWorkflowAcceptanceTests(TestCase):
+    """最終運用フローで追加された機能の受け入れテスト。"""
+
+    def setUp(self):
+        mail.outbox = []
+        self.media_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.media_dir.cleanup)
+        self.media_override = override_settings(MEDIA_ROOT=self.media_dir.name)
+        self.media_override.enable()
+        self.addCleanup(self.media_override.disable)
+
+        self.superuser = User.objects.create_superuser(
+            username="admin",
+            email="admin@example.com",
+            password="admin-password-123",
+        )
+        self.user = User.objects.create_user(
+            username="user@example.com",
+            email="user@example.com",
+            password="password123",
+        )
+        self.subscription_catalog = ServiceCatalog.objects.create(
+            name="ChatGPT",
+            billing_type=BillingType.SUBSCRIPTION,
+            merchant_aliases="OPENAI *CHATGPT, OPENAI.COM",
+            created_by=self.superuser,
+        )
+        self.api_catalog = ServiceCatalog.objects.create(
+            name="OpenAI API",
+            billing_type=BillingType.METERED,
+            merchant_aliases="OPENAI, OPENAI.COM",
+            created_by=self.superuser,
+        )
+        self.subscription = RegisteredService.objects.create(
+            user=self.user,
+            catalog_service=self.subscription_catalog,
+            name=self.subscription_catalog.name,
+            billing_type=self.subscription_catalog.billing_type,
+            registered_by=self.superuser,
+        )
+        self.api_service = RegisteredService.objects.create(
+            user=self.user,
+            catalog_service=self.api_catalog,
+            name=self.api_catalog.name,
+            billing_type=self.api_catalog.billing_type,
+            registered_by=self.superuser,
+        )
+        self.user.profile.refresh_from_db()
+        self.assertEqual(self.user.profile.account_status, UserAccountStatus.ACTIVE)
+
+    def create_receipt(self, *, service=None, month=date(2026, 6, 1), filename="receipt.pdf"):
+        service = service or self.subscription
+        submission, _ = Submission.objects.get_or_create(user=self.user, period_month=month)
+        return Receipt.objects.create(
+            submission=submission,
+            service=service,
+            service_name_snapshot=service.name,
+            billing_type_snapshot=service.billing_type,
+            original_filename=filename,
+            file=SimpleUploadedFile(filename, b"%PDF-1.4 test", content_type="application/pdf"),
+            expires_at=timezone.now() + timedelta(days=30),
+        )
+
+    def test_submission_requires_receipt_or_no_usage_for_every_service(self):
+        receipt = self.create_receipt(service=self.subscription)
+        submission = receipt.submission
+
+        summary = build_user_month_summary(self.user, date(2026, 6, 1))
+        self.assertEqual(summary.uploaded_count, 1)
+        self.assertEqual(summary.api_pending_count, 1)
+        self.assertFalse(summary.is_complete)
+        with self.assertRaises(ValidationError):
+            submission.submit()
+
+        MonthlyServiceDeclaration.objects.create(
+            user=self.user,
+            service=self.api_service,
+            period_month=date(2026, 6, 1),
+            no_usage=True,
+            declared_by=self.user,
+        )
+        submission.submit()
+        submission.refresh_from_db()
+        self.assertTrue(submission.is_submitted)
+        self.assertTrue(build_user_month_summary(self.user, date(2026, 6, 1)).is_complete)
+
+    def test_dashboard_allows_metered_no_usage_declaration(self):
+        self.client.login(username="user@example.com", password="password123")
+        response = self.client.post(
+            reverse("dashboard") + "?month=2026-06",
+            {"action": "declare_no_usage", "service_id": self.api_service.pk},
+            follow=True,
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(
+            MonthlyServiceDeclaration.objects.filter(
+                user=self.user,
+                service=self.api_service,
+                period_month=date(2026, 6, 1),
+                no_usage=True,
+            ).exists()
+        )
+        self.assertContains(response, "当月利用なし")
+
+    def test_normal_reminder_skips_api_only_pending_but_urgent_reminder_sends(self):
+        self.create_receipt(service=self.subscription)
+
+        call_command("send_receipt_reminders", "--kind", "initial", "--month", "2026-06")
+        self.assertEqual(len(mail.outbox), 0)
+
+        call_command("send_receipt_reminders", "--kind", "urgent", "--month", "2026-06")
+        self.assertEqual(len(mail.outbox), 1)
+        self.assertTrue(mail.outbox[0].subject.startswith("【重要】"))
+        self.assertIn("OpenAI API（従量課金 / API）", mail.outbox[0].body)
+        self.assertIn("本日中", mail.outbox[0].body)
+
+    def test_no_usage_declaration_suppresses_api_urgent_reminder(self):
+        self.create_receipt(service=self.subscription)
+        MonthlyServiceDeclaration.objects.create(
+            user=self.user,
+            service=self.api_service,
+            period_month=date(2026, 7, 1),
+            no_usage=True,
+            declared_by=self.user,
+        )
+        # 7月のサブスク領収書も登録済みにする。
+        self.create_receipt(service=self.subscription, month=date(2026, 7, 1), filename="july.pdf")
+
+        call_command("send_receipt_reminders", "--kind", "urgent", "--month", "2026-07")
+        self.assertEqual(len(mail.outbox), 0)
+
+    def test_admin_custom_email_templates_are_used(self):
+        schedule = EmailReminderSchedule.get_solo()
+        schedule.initial_subject_template = "{target_month} 未提出のお知らせ"
+        schedule.initial_body_template = "{user_name}\n不足:\n{missing_services}\n{upload_url}"
+        schedule.save()
+
+        call_command("send_receipt_reminders", "--kind", "initial", "--month", "2026-06")
+        self.assertEqual(len(mail.outbox), 1)
+        self.assertEqual(mail.outbox[0].subject, "2026年06月 未提出のお知らせ")
+        self.assertIn("ChatGPT（サブスク）", mail.outbox[0].body)
+        self.assertIn("https://receipthub.example.com/dashboard/?month=2026-06", mail.outbox[0].body)
+
+    def test_superuser_can_change_role_and_normal_admin_cannot(self):
+        self.client.login(username="admin", password="admin-password-123")
+        response = self.client.post(
+            reverse("staff_user_create"),
+            {"action": "update_role", "user_id": self.user.pk, "account_role": "admin"},
+        )
+        self.assertRedirects(response, reverse("staff_user_create"))
+        self.user.refresh_from_db()
+        self.assertTrue(self.user.is_staff)
+        self.assertFalse(self.user.is_superuser)
+
+        target = User.objects.create_user(
+            username="target@example.com",
+            email="target@example.com",
+            password="password123",
+        )
+        self.client.logout()
+        self.client.login(username="user@example.com", password="password123")
+        denied = self.client.post(
+            reverse("staff_user_create"),
+            {"action": "update_role", "user_id": target.pk, "account_role": "admin"},
+        )
+        self.assertEqual(denied.status_code, 403)
+        target.refresh_from_db()
+        self.assertFalse(target.is_staff)
+
+    def test_superuser_can_create_admin_account_with_forced_password_change(self):
+        self.client.login(username="admin", password="admin-password-123")
+        response = self.client.post(
+            reverse("staff_user_create"),
+            {
+                "email": "manager@example.com",
+                "account_role": "admin",
+                "account_status": UserAccountStatus.STOPPED,
+            },
+        )
+        self.assertEqual(response.status_code, 200)
+        account = User.objects.get(username="manager@example.com")
+        self.assertTrue(account.is_staff)
+        self.assertFalse(account.is_superuser)
+        self.assertTrue(account.profile.must_change_password)
+        self.assertIsNotNone(response.context["generated_password"])
+
+    def test_user_delete_removes_receipt_file_and_related_records(self):
+        receipt = self.create_receipt()
+        receipt_path = Path(receipt.file.path)
+        self.assertTrue(receipt_path.exists())
+
+        self.client.login(username="admin", password="admin-password-123")
+        response = self.client.post(
+            reverse("staff_user_create"),
+            {"action": "delete_user", "user_id": self.user.pk},
+        )
+        self.assertRedirects(response, reverse("staff_user_create"))
+        self.assertFalse(User.objects.filter(pk=self.user.pk).exists())
+        self.assertFalse(Receipt.objects.filter(pk=receipt.pk).exists())
+        self.assertFalse(receipt_path.exists())
+
+    def test_statement_payload_treats_payment_month_as_target_month(self):
+        result = build_statement_result_from_payload(
+            {
+                "card_last4": "7210",
+                "statement_period": "2026-06",
+                "payment_date": "2026-06-29",
+                "summary_reason": "2026年5月利用分を2026年6月に請求。",
+                "items": [
+                    {
+                        "line_reference": "0276",
+                        "transaction_date": "2026-05-03",
+                        "merchant_name": "OPENAI *CHATGPT",
+                        "amount_jpy": "35949",
+                        "original_amount": "220",
+                        "original_currency": "USD",
+                        "registered_service_id": self.subscription.pk,
+                        "match_status": StatementMatchStatus.MATCHED,
+                        "receipt_required": True,
+                        "confidence": 0.99,
+                        "reason": "ChatGPTの請求元として一致。",
+                    }
+                ],
+            },
+            target_month="2026-06",
+            allowed_service_ids={self.subscription.pk, self.api_service.pk},
+        )
+        self.assertEqual(result.status, CardStatementStatus.COMPLETED)
+        self.assertEqual(result.statement_period, "2026-06")
+        self.assertEqual(result.payment_date, date(2026, 6, 29))
+        self.assertEqual(result.items[0].transaction_date, date(2026, 5, 3))
+        self.assertEqual(result.items[0].registered_service_id, self.subscription.pk)
+
+    @mock.patch("receipts.statement_processing.generate_card_statement_analysis")
+    def test_statement_processing_highlights_missing_receipt_and_cancels_false_no_usage(self, mocked_analysis):
+        MonthlyServiceDeclaration.objects.create(
+            user=self.user,
+            service=self.api_service,
+            period_month=date(2026, 6, 1),
+            no_usage=True,
+            declared_by=self.user,
+        )
+        statement = CardStatement.objects.create(
+            user=self.user,
+            period_month=date(2026, 6, 1),
+            file=SimpleUploadedFile("statement.pdf", b"%PDF-1.4 statement", content_type="application/pdf"),
+            original_filename="statement.pdf",
+            content_type="application/pdf",
+            status=CardStatementStatus.PROCESSING,
+            uploaded_by=self.superuser,
+            expires_at=timezone.now() + timedelta(days=30),
+        )
+        mocked_analysis.return_value = StatementAnalysisResult(
+            status=CardStatementStatus.COMPLETED,
+            card_last4="7210",
+            statement_period="2026-06",
+            payment_date=date(2026, 6, 29),
+            items=(
+                StatementAnalysisItem(
+                    line_reference="0302",
+                    transaction_date=date(2026, 5, 16),
+                    merchant_name="OPENAI",
+                    amount_jpy=Decimal("8236"),
+                    original_amount=Decimal("49.92"),
+                    original_currency="USD",
+                    registered_service_id=self.api_service.pk,
+                    match_status=StatementMatchStatus.MATCHED,
+                    receipt_required=True,
+                    confidence=0.98,
+                    reason="OpenAI APIと一致。",
+                ),
+            ),
+        )
+
+        process_card_statement(statement.pk)
+        statement.refresh_from_db()
+        item = statement.items.get()
+        self.assertEqual(statement.status, CardStatementStatus.NEEDS_REVIEW)
+        self.assertFalse(
+            MonthlyServiceDeclaration.objects.filter(
+                user=self.user,
+                service=self.api_service,
+                period_month=date(2026, 6, 1),
+            ).exists()
+        )
+        self.assertTrue(item.needs_highlight)
+        self.assertEqual(item.receipt_status_label, "領収書未提出")
+        self.assertIn("当月利用なし", item.match_memo)
+        self.assertIn("利用なし", statement.ai_admin_memo)
+
+    @mock.patch("receipts.statement_processing.generate_card_statement_analysis")
+    def test_statement_processing_links_existing_receipt(self, mocked_analysis):
+        receipt = self.create_receipt(service=self.subscription)
+        statement = CardStatement.objects.create(
+            user=self.user,
+            period_month=date(2026, 6, 1),
+            file=SimpleUploadedFile("statement.pdf", b"%PDF-1.4 statement", content_type="application/pdf"),
+            original_filename="statement.pdf",
+            content_type="application/pdf",
+            status=CardStatementStatus.PROCESSING,
+            uploaded_by=self.superuser,
+            expires_at=timezone.now() + timedelta(days=30),
+        )
+        mocked_analysis.return_value = StatementAnalysisResult(
+            status=CardStatementStatus.COMPLETED,
+            card_last4="7210",
+            statement_period="2026-06",
+            payment_date=date(2026, 6, 29),
+            items=(
+                StatementAnalysisItem(
+                    line_reference="0276",
+                    transaction_date=date(2026, 5, 3),
+                    merchant_name="OPENAI *CHATGPT",
+                    amount_jpy=Decimal("35949"),
+                    original_amount=Decimal("220"),
+                    original_currency="USD",
+                    registered_service_id=self.subscription.pk,
+                    match_status=StatementMatchStatus.MATCHED,
+                    receipt_required=True,
+                    confidence=0.99,
+                    reason="一致。",
+                ),
+            ),
+        )
+
+        process_card_statement(statement.pk)
+        item = statement.items.get()
+        self.assertEqual(item.matched_receipt, receipt)
+        self.assertFalse(item.needs_highlight)
+        self.assertEqual(item.receipt_status_label, "領収書あり")
+
+    @mock.patch("receipts.statement_processing.generate_card_statement_analysis")
+    def test_statement_rows_use_distinct_receipts_and_keep_extra_charge_highlighted(self, mocked_analysis):
+        first_receipt = self.create_receipt(service=self.subscription, filename="first.pdf")
+        statement = CardStatement.objects.create(
+            user=self.user,
+            period_month=date(2026, 6, 1),
+            file=SimpleUploadedFile("statement.pdf", b"%PDF-1.4 statement", content_type="application/pdf"),
+            original_filename="statement.pdf",
+            content_type="application/pdf",
+            status=CardStatementStatus.PROCESSING,
+            uploaded_by=self.superuser,
+            expires_at=timezone.now() + timedelta(days=30),
+        )
+        mocked_analysis.return_value = StatementAnalysisResult(
+            status=CardStatementStatus.COMPLETED,
+            card_last4="7210",
+            statement_period="2026-06",
+            payment_date=date(2026, 6, 29),
+            items=(
+                StatementAnalysisItem(
+                    line_reference="0276",
+                    transaction_date=date(2026, 5, 3),
+                    merchant_name="OPENAI *CHATGPT",
+                    amount_jpy=Decimal("35949"),
+                    original_amount=Decimal("220"),
+                    original_currency="USD",
+                    registered_service_id=self.subscription.pk,
+                    match_status=StatementMatchStatus.MATCHED,
+                    receipt_required=True,
+                    confidence=0.99,
+                    reason="一致。",
+                ),
+                StatementAnalysisItem(
+                    line_reference="0277",
+                    transaction_date=date(2026, 5, 4),
+                    merchant_name="OPENAI *CHATGPT",
+                    amount_jpy=Decimal("3595"),
+                    original_amount=Decimal("22"),
+                    original_currency="USD",
+                    registered_service_id=self.subscription.pk,
+                    match_status=StatementMatchStatus.MATCHED,
+                    receipt_required=True,
+                    confidence=0.99,
+                    reason="一致。",
+                ),
+            ),
+        )
+
+        process_card_statement(statement.pk)
+        items = list(statement.items.order_by("sequence"))
+        self.assertEqual(items[0].matched_receipt, first_receipt)
+        self.assertIsNone(items[1].matched_receipt)
+        self.assertTrue(items[1].needs_highlight)
+
+        second_receipt = self.create_receipt(service=self.subscription, filename="second.pdf")
+        items = list(statement.items.order_by("sequence"))
+        self.assertEqual(items[0].matched_receipt, first_receipt)
+        self.assertEqual(items[1].matched_receipt, second_receipt)
+        self.assertNotEqual(items[0].matched_receipt_id, items[1].matched_receipt_id)
+
+    @mock.patch("receipts.views.start_background_statement_processing")
+    def test_staff_can_upload_statement_and_start_background_analysis(self, mocked_start):
+        self.client.login(username="admin", password="admin-password-123")
+        response = self.client.post(
+            reverse("staff_upload_card_statement", args=[self.user.pk]),
+            {
+                "month": "2026-06",
+                "file": SimpleUploadedFile(
+                    "lifecard_meisai_user1_202606.pdf",
+                    b"%PDF-1.4 statement",
+                    content_type="application/pdf",
+                ),
+            },
+        )
+        self.assertRedirects(
+            response,
+            reverse("staff_user_month_status", args=[self.user.pk]) + "?month=2026-06",
+        )
+        statement = CardStatement.objects.get()
+        self.assertEqual(statement.status, CardStatementStatus.PROCESSING)
+        self.assertEqual(statement.original_filename, "lifecard_meisai_user1_202606.pdf")
+        mocked_start.assert_called_once_with(statement.pk)
+
+    def test_staff_month_page_shows_missing_services_and_statement_upload(self):
+        self.client.login(username="admin", password="admin-password-123")
+        response = self.client.get(
+            reverse("staff_user_month_status", args=[self.user.pk]) + "?month=2026-06"
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "ChatGPT（サブスク）")
+        self.assertContains(response, "OpenAI API（従量課金 / API）")
+        self.assertContains(response, "領収書未提出")
+        self.assertContains(response, "API利用確認待ち")
+        self.assertContains(response, "ご利用代金明細書")
+
+    def test_expired_statement_file_is_purged_but_metadata_remains(self):
+        statement = CardStatement.objects.create(
+            user=self.user,
+            period_month=date(2026, 6, 1),
+            file=SimpleUploadedFile("expired.pdf", b"%PDF-1.4 statement", content_type="application/pdf"),
+            original_filename="expired.pdf",
+            status=CardStatementStatus.COMPLETED,
+            expires_at=timezone.now() - timedelta(days=1),
+        )
+        path = Path(statement.file.path)
+        self.assertTrue(path.exists())
+
+        call_command("purge_expired_receipts", "--noinput")
+        statement.refresh_from_db()
+        self.assertFalse(statement.file_available)
+        self.assertIsNotNone(statement.file_deleted_at)
+        self.assertFalse(path.exists())
+        self.assertTrue(CardStatement.objects.filter(pk=statement.pk).exists())
+
+    def test_version_file_is_present_without_web_display_requirement(self):
+        self.assertEqual(Path("VERSION").read_text(encoding="utf-8").strip(), "1.0.0")

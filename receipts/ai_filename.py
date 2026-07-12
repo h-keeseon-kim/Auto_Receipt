@@ -57,6 +57,7 @@ def generate_ai_receipt_filename(
     content_type: str,
     service_display_name: str,
     user_filename_part: str = "",
+    service_match_hints: str = "",
 ) -> ReceiptFilenameResult:
     """領収書ファイルからファイル名候補を作成する。
 
@@ -106,6 +107,7 @@ def generate_ai_receipt_filename(
                         content_type=content_type,
                         service_display_name=service_display_name,
                         user_filename_part=user_filename_part,
+                        service_match_hints=service_match_hints,
                     ),
                 },
             ],
@@ -132,6 +134,7 @@ def build_openai_content(
     content_type: str,
     service_display_name: str,
     user_filename_part: str = "",
+    service_match_hints: str = "",
 ) -> list[dict[str, Any]]:
     target = target_card_last4()
     return [
@@ -140,6 +143,7 @@ def build_openai_content(
             "type": "input_text",
             "text": (
                 f"対象の登録サービス名: {service_display_name}\n"
+                f"管理者が登録した払先・カード明細表記候補: {service_match_hints or '未設定'}\n"
                 f"ファイル名に使うユーザー名部分: {sanitize_filename_part(user_filename_part, fallback='user')}\n"
                 f"元ファイル名: {original_filename}\n"
                 f"必ず次の順番で確認してください。\n"

@@ -4,10 +4,7 @@
 <div class="page-title">
     <div>
         <h1>メール送信</h1>
-        <p class="muted">リマインダーメールの送信日設定、SMTP設定確認、テスト送信を行います。</p>
-    </div>
-    <div class="actions">
-        <a class="button" href="{% url 'history' %}">提出履歴へ</a>
+        <p class="muted">リマインダーの送信日・件名・本文、SMTP設定、テスト送信を管理します。</p>
     </div>
 </div>
 
@@ -23,68 +20,66 @@
 <section class="card section">
     <div class="section-header">
         <div>
-            <h2>リマインダー送信日</h2>
-            <p class="muted">通常リマインダーと【重要】警告メールを送る日付を変更できます。日付は毎月1〜28日の範囲で設定してください。</p>
+            <h2>リマインダー送信日・メール内容</h2>
+            <p class="muted">利用中ユーザーのうち未確認サービスがある人だけに送ります。通常リマインダーは未提出の非APIサービスがある場合、重要リマインダーはAPI利用確認待ちも対象です。</p>
         </div>
     </div>
     <section class="status-grid compact-grid">
         <div class="card"><span class="label">通常リマインダー</span><strong>毎月{{ reminder_schedule.reminder_day }}日</strong></div>
-        <div class="card"><span class="label">警告メール</span><strong>毎月{{ reminder_schedule.warning_day }}日</strong></div>
+        <div class="card"><span class="label">重要リマインダー</span><strong>毎月{{ reminder_schedule.warning_day }}日</strong></div>
     </section>
-    <form method="post" class="form-grid auth-card wide" novalidate>
+    <form method="post" class="form-grid reminder-template-form" novalidate>
         {% csrf_token %}
         <input type="hidden" name="action" value="update_reminder_schedule">
-        {{ schedule_form.as_p }}
-        <div class="actions">
-            <button type="submit" class="button primary">送信日を保存</button>
+        {{ schedule_form.non_field_errors }}
+        <div class="email-schedule-grid">
+            <div class="form-row">{{ schedule_form.reminder_day.errors }}{{ schedule_form.reminder_day.label_tag }}{{ schedule_form.reminder_day }}{% if schedule_form.reminder_day.help_text %}<span class="helptext">{{ schedule_form.reminder_day.help_text }}</span>{% endif %}</div>
+            <div class="form-row">{{ schedule_form.warning_day.errors }}{{ schedule_form.warning_day.label_tag }}{{ schedule_form.warning_day }}{% if schedule_form.warning_day.help_text %}<span class="helptext">{{ schedule_form.warning_day.help_text }}</span>{% endif %}</div>
         </div>
+        <div class="email-template-grid">
+            <section class="email-template-panel">
+                <h3>通常リマインダー</h3>
+                <div class="form-row">{{ schedule_form.initial_subject_template.errors }}{{ schedule_form.initial_subject_template.label_tag }}{{ schedule_form.initial_subject_template }}{% if schedule_form.initial_subject_template.help_text %}<span class="helptext">{{ schedule_form.initial_subject_template.help_text }}</span>{% endif %}</div>
+                <div class="form-row">{{ schedule_form.initial_body_template.errors }}{{ schedule_form.initial_body_template.label_tag }}{{ schedule_form.initial_body_template }}{% if schedule_form.initial_body_template.help_text %}<span class="helptext">{{ schedule_form.initial_body_template.help_text }}</span>{% endif %}</div>
+            </section>
+            <section class="email-template-panel urgent-panel">
+                <h3>重要リマインダー</h3>
+                <div class="form-row">{{ schedule_form.urgent_subject_template.errors }}{{ schedule_form.urgent_subject_template.label_tag }}{{ schedule_form.urgent_subject_template }}{% if schedule_form.urgent_subject_template.help_text %}<span class="helptext">{{ schedule_form.urgent_subject_template.help_text }}</span>{% endif %}</div>
+                <div class="form-row">{{ schedule_form.urgent_body_template.errors }}{{ schedule_form.urgent_body_template.label_tag }}{{ schedule_form.urgent_body_template }}{% if schedule_form.urgent_body_template.help_text %}<span class="helptext">{{ schedule_form.urgent_body_template.help_text }}</span>{% endif %}</div>
+            </section>
+        </div>
+        <div class="actions"><button type="submit" class="button primary">送信日・メール内容を保存</button></div>
     </form>
-    <p class="muted small">Railway Cronは毎日1回実行し、ここで設定した日付に一致した場合だけメールを送信します。</p>
+    <p class="muted small">Railway Cronは毎日1回実行し、設定日に一致した場合だけ該当メールを送信します。</p>
 </section>
 
 <section class="card section">
     <div class="section-header">
         <div>
             <h2>テストメール送信</h2>
-            <p class="muted">Resend SMTP設定が正しいか確認するため、任意のメールアドレスへテスト送信できます。送信先が停止中ユーザーの場合は送信せず、スキップとして記録します。</p>
+            <p class="muted">Resend SMTP設定が正しいか確認できます。送信先が停止中ユーザーの場合は送信せず、スキップとして記録します。</p>
         </div>
     </div>
     <form method="post" class="form-grid auth-card wide" novalidate>
         {% csrf_token %}
         <input type="hidden" name="action" value="send_test_email">
         {{ form.as_p }}
-        <div class="actions">
-            <button type="submit" class="button primary">テスト送信</button>
-        </div>
+        <div class="actions"><button type="submit" class="button primary">テスト送信</button></div>
     </form>
 </section>
 
 <section class="card section">
-    <div class="section-header">
-        <div>
-            <h2>最近のメール送信ログ</h2>
-            <p class="muted">テスト送信とリマインダー送信の直近結果です。</p>
-        </div>
-    </div>
+    <div class="section-header"><div><h2>最近のメール送信ログ</h2><p class="muted">テスト送信とリマインダー送信の直近結果です。</p></div></div>
     <div class="table-wrap scroll-box medium horizontal-scroll">
         <table class="status-table">
-            <thead>
-                <tr><th>日時</th><th>種別</th><th>対象月</th><th>送信先</th><th>件名</th><th>ステータス</th><th>エラー</th></tr>
-            </thead>
+            <thead><tr><th>日時</th><th>種別</th><th>対象月</th><th>送信先</th><th>件名</th><th>ステータス</th><th>エラー</th></tr></thead>
             <tbody>
                 {% for log in recent_logs %}
                     <tr>
-                        <td>{{ log.created_at|date:"Y-m-d H:i" }}</td>
-                        <td>{{ log.get_email_type_display }}</td>
-                        <td>{% if log.target_month %}{{ log.target_month|date:"Y-m" }}{% else %}-{% endif %}</td>
-                        <td>{{ log.to_email }}</td>
-                        <td>{{ log.subject }}</td>
-                        <td><span class="badge {% if log.status == 'sent' %}submitted{% elif log.status == 'failed' %}draft{% else %}neutral{% endif %}">{{ log.get_status_display }}</span></td>
-                        <td class="danger small">{{ log.error|default:"-" }}</td>
+                        <td>{{ log.created_at|date:"Y-m-d H:i" }}</td><td>{{ log.get_email_type_display }}</td><td>{% if log.target_month %}{{ log.target_month|date:"Y-m" }}{% else %}-{% endif %}</td><td>{{ log.to_email }}</td><td>{{ log.subject }}</td>
+                        <td><span class="badge {% if log.status == 'sent' %}submitted{% elif log.status == 'failed' %}draft{% else %}neutral{% endif %}">{{ log.get_status_display }}</span></td><td class="danger small">{{ log.error|default:"-" }}</td>
                     </tr>
-                {% empty %}
-                    <tr><td colspan="7" class="center muted">送信ログはまだありません。</td></tr>
-                {% endfor %}
+                {% empty %}<tr><td colspan="7" class="center muted">送信ログはまだありません。</td></tr>{% endfor %}
             </tbody>
         </table>
     </div>

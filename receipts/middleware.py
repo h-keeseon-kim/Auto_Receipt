@@ -7,7 +7,7 @@ from django.urls import NoReverseMatch, reverse
 
 
 class ForcePasswordChangeMiddleware:
-    """初期パスワードのままの一般ユーザーをパスワード変更ページへ固定する。"""
+    """初期パスワードのままの一般・管理者ユーザーをパスワード変更ページへ固定する。"""
 
     def __init__(self, get_response):
         self.get_response = get_response
@@ -22,7 +22,7 @@ class ForcePasswordChangeMiddleware:
         user = getattr(request, "user", None)
         if user is None or not user.is_authenticated:
             return None
-        if user.is_staff:
+        if user.is_superuser:
             return None
 
         profile = getattr(user, "profile", None)

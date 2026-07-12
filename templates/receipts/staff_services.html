@@ -18,12 +18,13 @@
     </div>
     <div class="table-wrap">
         <table>
-            <thead><tr><th>サービス</th><th>種別</th><th>状態</th><th>利用中ユーザー</th><th>割当合計</th><th>メモ</th><th>操作</th></tr></thead>
+            <thead><tr><th>サービス</th><th>種別</th><th>カード明細・払先候補</th><th>状態</th><th>利用中ユーザー</th><th>割当合計</th><th>メモ</th><th>操作</th></tr></thead>
             <tbody>
                 {% for catalog in catalog_page_obj %}
                     <tr>
                         <td><strong>{{ catalog.display_name }}</strong></td>
                         <td>{{ catalog.get_billing_type_display }}</td>
+                        <td>{{ catalog.merchant_aliases|default:"-"|linebreaksbr|truncatechars_html:120 }}</td>
                         <td>{% if catalog.is_active %}<span class="badge submitted">選択可能</span>{% else %}<span class="badge neutral">停止中</span>{% endif %}</td>
                         <td>{{ catalog.active_user_count }}</td>
                         <td>{{ catalog.assigned_count }}</td>
@@ -46,7 +47,7 @@
                         </td>
                     </tr>
                 {% empty %}
-                    <tr><td colspan="7" class="muted center">サービスマスターがまだ登録されていません。</td></tr>
+                    <tr><td colspan="8" class="muted center">サービスマスターがまだ登録されていません。</td></tr>
                 {% endfor %}
             </tbody>
         </table>

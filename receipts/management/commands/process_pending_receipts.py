@@ -55,6 +55,6 @@ class Command(BaseCommand):
                 "AI領収書処理が完了しました: "
                 f"processed={summary['processed']}, generated={summary['generated']}, "
                 f"needs_review={summary['needs_review']}, mismatched={summary['mismatched']}, "
-                f"skipped={summary['skipped']}, failed={summary['failed']}"
+                f"rejected={summary['rejected']}, skipped={summary['skipped']}, failed={summary['failed']}"
             )
         )

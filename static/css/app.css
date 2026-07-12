@@ -508,3 +508,128 @@ body.tutorial-open { overflow-x: hidden; }
     width: 150px;
     min-width: 150px;
 }
+
+/* Monthly service reconciliation and card statement review */
+.attention-row td {
+    background: #fff9e8;
+}
+.monthly-service-status-table {
+    min-width: 920px;
+}
+.statement-upload-form {
+    max-width: 720px;
+}
+.statement-card {
+    scroll-margin-top: 5.5rem;
+}
+.statement-items-table {
+    min-width: 1720px;
+}
+.statement-items-table th:nth-child(3),
+.statement-items-table td:nth-child(3) {
+    min-width: 15rem;
+}
+.statement-items-table th:nth-child(5),
+.statement-items-table td:nth-child(5) {
+    min-width: 15rem;
+}
+.statement-items-table th:nth-child(8),
+.statement-items-table td:nth-child(8) {
+    min-width: 20rem;
+}
+.statement-items-table th:last-child,
+.statement-items-table td:last-child {
+    min-width: 30rem;
+}
+.statement-missing-row td {
+    background: #fff4c2;
+}
+.statement-missing-row td:last-child {
+    background: #fff4c2;
+}
+.statement-items-table .manual-review-row td {
+    background: #fff0dd;
+}
+.statement-items-table .manual-review-row td:last-child {
+    background: #fff0dd;
+}
+.statement-item-form {
+    display: grid;
+    grid-template-columns: minmax(13rem, 1fr) auto;
+    gap: 0.45rem;
+    align-items: center;
+}
+.statement-item-form .actions {
+    grid-column: 1 / -1;
+}
+.inline-check {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.35rem;
+    margin: 0;
+    white-space: nowrap;
+    font-size: 0.88rem;
+}
+.statement-highlight-legend {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    flex-wrap: wrap;
+    margin-top: 0.8rem;
+    margin-bottom: 0;
+}
+.legend-swatch {
+    display: inline-block;
+    width: 1.2rem;
+    height: 0.8rem;
+    border: 1px solid var(--border);
+    border-radius: 3px;
+}
+.legend-swatch.missing { background: #fff4c2; }
+.legend-swatch.review { background: #fff0dd; }
+.api-usage-section table { min-width: 680px; }
+
+.role-badge-admin {
+    background: #eef4ff;
+    color: var(--primary);
+}
+.user-management-table {
+    min-width: 1620px;
+}
+.user-management-table th:last-child,
+.user-management-table td:last-child {
+    min-width: 12rem;
+}
+.delete-user-form { margin: 0; }
+
+.email-schedule-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 1rem;
+}
+.email-template-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 1rem;
+    margin-bottom: 1rem;
+}
+.email-template-panel {
+    padding: 1rem;
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    background: #fafcff;
+}
+.email-template-panel.urgent-panel {
+    background: #fff8f5;
+    border-color: #f3cdc8;
+}
+.email-template-panel textarea {
+    min-height: 16rem;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: 0.9rem;
+}
+.reminder-template-form { margin-top: 1rem; }
+@media (max-width: 900px) {
+    .email-schedule-grid,
+    .email-template-grid { grid-template-columns: 1fr; }
+}

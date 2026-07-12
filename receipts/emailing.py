@@ -12,12 +12,23 @@ from django.db.models import Q
 from django.urls import reverse
 from django.utils import timezone
 
-from .models import EmailDeliveryLog, EmailDeliveryStatus, EmailType, Submission, SubmissionStatus, UserAccountStatus, add_months, month_start
+from .models import (
+    DEFAULT_INITIAL_BODY,
+    DEFAULT_INITIAL_SUBJECT,
+    DEFAULT_URGENT_BODY,
+    DEFAULT_URGENT_SUBJECT,
+    EmailDeliveryLog,
+    EmailDeliveryStatus,
+    EmailReminderSchedule,
+    EmailType,
+    UserAccountStatus,
+    add_months,
+    month_start,
+)
+from .monthly_status import UserMonthSummary, build_user_month_summary
 
 
 def current_target_month(offset: int | None = None) -> date:
-    """Return the first day of the reminder target month."""
-
     today = timezone.localdate()
     first_day = today.replace(day=1)
     if offset is None:
@@ -68,13 +79,33 @@ def user_allows_receipt_email(user: User | None) -> bool:
         return False
 
 
-def users_without_submitted_submission(target_month: date) -> Iterable[User]:
+@dataclass(frozen=True)
+class ReminderRecipient:
+    user: User
+    summary: UserMonthSummary
+
+
+def reminder_candidates(email_type: str, target_month: date) -> list[ReminderRecipient]:
     target_month = month_start(target_month)
-    submitted_user_ids = Submission.objects.filter(
-        period_month=target_month,
-        status=SubmissionStatus.SUBMITTED,
-    ).values_list("user_id", flat=True)
-    return active_general_users().exclude(pk__in=submitted_user_ids)
+    candidates: list[ReminderRecipient] = []
+    for user in active_general_users():
+        summary = build_user_month_summary(user, target_month)
+        if email_type == EmailType.REMINDER_INITIAL:
+            # 通常リマインダーでは、APIのみ未確認のユーザーには送らない。
+            selected = summary.missing_required_count > 0
+        elif email_type == EmailType.REMINDER_URGENT:
+            selected = summary.missing_required_count > 0 or summary.api_pending_count > 0
+        else:
+            raise ValueError("email_type must be reminder_initial or reminder_urgent")
+        if selected:
+            candidates.append(ReminderRecipient(user=user, summary=summary))
+    return candidates
+
+
+def users_without_submitted_submission(target_month: date) -> Iterable[User]:
+    """旧関数名との互換用。現在は未解決サービスがあるユーザーを返す。"""
+
+    return [item.user for item in reminder_candidates(EmailType.REMINDER_URGENT, target_month)]
 
 
 def build_app_url(path: str) -> str:
@@ -92,36 +123,68 @@ def upload_url_for_month(target_month: date) -> str:
     return build_app_url(f"{reverse('dashboard')}?month={target_month:%Y-%m}")
 
 
-def reminder_subject(email_type: str, target_month: date) -> str:
-    app_name = getattr(settings, "APP_NAME", "ReceiptHub")
-    label = month_label(target_month)
-    if email_type == EmailType.REMINDER_URGENT:
-        return f"【重要】{app_name}: {label}分の領収書を至急アップロードしてください"
-    return f"{app_name}: {label}分の領収書アップロードをお願いします"
+def service_list_text(rows) -> str:
+    values = [f"・{row.service.display_name}" for row in rows]
+    return "\n".join(values) if values else "・なし"
 
 
-def reminder_body(user: User, email_type: str, target_month: date) -> str:
-    app_name = getattr(settings, "APP_NAME", "ReceiptHub")
-    label = month_label(target_month)
-    url = upload_url_for_month(target_month)
-    name = user.get_full_name() or user.get_username()
+def reminder_template_context(user: User, target_month: date, summary: UserMonthSummary | None) -> dict[str, str]:
+    return {
+        "app_name": getattr(settings, "APP_NAME", "ReceiptHub"),
+        "user_name": user.get_full_name() or user.get_username(),
+        "target_month": month_label(target_month),
+        "upload_url": upload_url_for_month(target_month),
+        "missing_services": service_list_text(summary.missing_required if summary else ()),
+        "api_pending_services": service_list_text(summary.api_pending if summary else ()),
+    }
+
+
+class _TemplateValues(dict):
+    def __missing__(self, key):
+        return "{" + key + "}"
+
+
+def render_email_template(template: str, context: dict[str, str]) -> str:
+    try:
+        return (template or "").format_map(_TemplateValues(context))
+    except (ValueError, KeyError):
+        return template or ""
+
+
+def reminder_subject(
+    email_type: str,
+    target_month: date,
+    *,
+    user: User | None = None,
+    summary: UserMonthSummary | None = None,
+    schedule: EmailReminderSchedule | None = None,
+) -> str:
+    schedule = schedule or EmailReminderSchedule.get_solo()
+    fallback_user = user or User(username="user")
+    context = reminder_template_context(fallback_user, target_month, summary)
     if email_type == EmailType.REMINDER_URGENT:
-        lead = f"{label}分の領収書提出がまだ確認できていません。至急、領収書をアップロードして提出してください。"
+        subject = render_email_template(schedule.urgent_subject_template or DEFAULT_URGENT_SUBJECT, context).strip()
+        if not subject.startswith("【重要】"):
+            subject = f"【重要】{subject}"
+        return subject[:255]
+    return render_email_template(schedule.initial_subject_template or DEFAULT_INITIAL_SUBJECT, context).strip()[:255]
+
+
+def reminder_body(
+    user: User,
+    email_type: str,
+    target_month: date,
+    *,
+    summary: UserMonthSummary | None = None,
+    schedule: EmailReminderSchedule | None = None,
+) -> str:
+    schedule = schedule or EmailReminderSchedule.get_solo()
+    context = reminder_template_context(user, target_month, summary)
+    if email_type == EmailType.REMINDER_URGENT:
+        template = schedule.urgent_body_template or DEFAULT_URGENT_BODY
     else:
-        lead = f"{label}分の領収書をアップロードしてください。"
-    return "\n".join(
-        [
-            f"{name} 様",
-            "",
-            lead,
-            "",
-            f"アップロードページ: {url}",
-            "",
-            "アップロード後は、対象月の領収書が揃っていることを確認して「提出する」を押してください。",
-            "",
-            f"{app_name}",
-        ]
-    )
+        template = schedule.initial_body_template or DEFAULT_INITIAL_BODY
+    return render_email_template(template, context)
 
 
 def reminder_idempotency_key(email_type: str, target_month: date, user: User, to_email: str) -> str:
@@ -140,12 +203,6 @@ def send_logged_email(
     created_by: User | None = None,
     force: bool = False,
 ) -> tuple[EmailDeliveryLog, bool]:
-    """Send one email and persist the result.
-
-    Returns (log, did_send). For idempotent reminder emails, previously sent logs are
-    returned with did_send=False.
-    """
-
     target_month = month_start(target_month) if target_month else None
     to_email = (to_email or "").strip().lower()
     log_to_update = None
@@ -161,46 +218,26 @@ def send_logged_email(
     if not user_allows_receipt_email(user):
         status = EmailDeliveryStatus.SKIPPED
         error = "停止中ユーザーのため送信しませんでした。"
+        values = {
+            "email_type": email_type,
+            "user": user,
+            "target_month": target_month,
+            "to_email": to_email,
+            "subject": subject,
+            "status": status,
+            "message": body,
+            "error": error,
+            "sent_at": None,
+            "created_by": created_by,
+        }
         if log_to_update is not None:
-            log_to_update.email_type = email_type
-            log_to_update.user = user
-            log_to_update.target_month = target_month
-            log_to_update.to_email = to_email
-            log_to_update.subject = subject
-            log_to_update.status = status
-            log_to_update.message = body
-            log_to_update.error = error
-            log_to_update.sent_at = None
-            log_to_update.created_by = created_by or log_to_update.created_by
-            log_to_update.save(
-                update_fields=[
-                    "email_type",
-                    "user",
-                    "target_month",
-                    "to_email",
-                    "subject",
-                    "status",
-                    "message",
-                    "error",
-                    "sent_at",
-                    "created_by",
-                ]
-            )
+            for key, value in values.items():
+                if key == "created_by" and value is None:
+                    continue
+                setattr(log_to_update, key, value)
+            log_to_update.save()
             return log_to_update, False
-        log = EmailDeliveryLog.objects.create(
-            email_type=email_type,
-            user=user,
-            target_month=target_month,
-            to_email=to_email,
-            subject=subject,
-            status=status,
-            message=body,
-            error=error,
-            idempotency_key=effective_key,
-            sent_at=None,
-            created_by=created_by,
-        )
-        return log, False
+        return EmailDeliveryLog.objects.create(idempotency_key=effective_key, **values), False
 
     headers = {}
     if effective_key:
@@ -219,51 +256,32 @@ def send_logged_email(
         )
         message.send(fail_silently=False)
         sent_at = timezone.now()
-    except Exception as exc:  # pragma: no cover - exact SMTP errors depend on provider/network
+    except Exception as exc:  # pragma: no cover
         status = EmailDeliveryStatus.FAILED
         error = str(exc)
 
+    values = {
+        "email_type": email_type,
+        "user": user,
+        "target_month": target_month,
+        "to_email": to_email,
+        "subject": subject,
+        "status": status,
+        "message": body,
+        "error": error,
+        "sent_at": sent_at,
+        "created_by": created_by,
+    }
     if log_to_update is not None:
-        log_to_update.email_type = email_type
-        log_to_update.user = user
-        log_to_update.target_month = target_month
-        log_to_update.to_email = to_email
-        log_to_update.subject = subject
-        log_to_update.status = status
-        log_to_update.message = body
-        log_to_update.error = error
-        log_to_update.sent_at = sent_at
-        log_to_update.created_by = created_by or log_to_update.created_by
-        log_to_update.save(
-            update_fields=[
-                "email_type",
-                "user",
-                "target_month",
-                "to_email",
-                "subject",
-                "status",
-                "message",
-                "error",
-                "sent_at",
-                "created_by",
-            ]
-        )
+        for key, value in values.items():
+            if key == "created_by" and value is None:
+                continue
+            setattr(log_to_update, key, value)
+        log_to_update.save()
         return log_to_update, status == EmailDeliveryStatus.SENT
 
     try:
-        log = EmailDeliveryLog.objects.create(
-            email_type=email_type,
-            user=user,
-            target_month=target_month,
-            to_email=to_email,
-            subject=subject,
-            status=status,
-            message=body,
-            error=error,
-            idempotency_key=effective_key,
-            sent_at=sent_at,
-            created_by=created_by,
-        )
+        log = EmailDeliveryLog.objects.create(idempotency_key=effective_key, **values)
     except IntegrityError:
         log = EmailDeliveryLog.objects.get(idempotency_key=effective_key)
         return log, False
@@ -291,21 +309,29 @@ def send_receipt_reminders(
     created_by: User | None = None,
 ) -> ReminderRunResult:
     target_month = month_start(target_month or current_target_month())
-    if email_type == EmailType.REMINDER_URGENT:
-        users = list(users_without_submitted_submission(target_month))
-    elif email_type == EmailType.REMINDER_INITIAL:
-        users = list(active_general_users())
-    else:
-        raise ValueError("email_type must be reminder_initial or reminder_urgent")
-
-    result = ReminderRunResult(email_type=email_type, target_month=target_month, selected_count=len(users))
-    for user in users:
+    candidates = reminder_candidates(email_type, target_month)
+    schedule = EmailReminderSchedule.get_solo()
+    result = ReminderRunResult(email_type=email_type, target_month=target_month, selected_count=len(candidates))
+    for candidate in candidates:
+        user = candidate.user
         to_email = user_email(user)
         if not to_email:
             result.skipped_count += 1
             continue
-        subject = reminder_subject(email_type, target_month)
-        body = reminder_body(user, email_type, target_month)
+        subject = reminder_subject(
+            email_type,
+            target_month,
+            user=user,
+            summary=candidate.summary,
+            schedule=schedule,
+        )
+        body = reminder_body(
+            user,
+            email_type,
+            target_month,
+            summary=candidate.summary,
+            schedule=schedule,
+        )
         key = reminder_idempotency_key(email_type, target_month, user, to_email)
         if dry_run:
             result.dry_run_count += 1
@@ -322,7 +348,7 @@ def send_receipt_reminders(
             force=force,
         )
         result.logs.append(log)
-        if not did_send and log.status == EmailDeliveryStatus.SENT:
+        if not did_send and log.status in {EmailDeliveryStatus.SENT, EmailDeliveryStatus.SKIPPED}:
             result.skipped_count += 1
         elif log.status == EmailDeliveryStatus.SENT:
             result.sent_count += 1

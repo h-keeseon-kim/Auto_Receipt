@@ -15,6 +15,8 @@ from django.utils import timezone
 from django.utils.crypto import get_random_string
 
 from .models import (
+    BillingType,
+    CardStatement,
     EmailReminderSchedule,
     Receipt,
     RegisteredService,
@@ -23,6 +25,7 @@ from .models import (
     ServiceRegistrationSource,
     UserAccountStatus,
     UserProfile,
+    sync_user_account_status_from_services,
     validate_upload_size,
 )
 
@@ -123,9 +126,15 @@ class ServiceCatalogForm(forms.ModelForm):
 
     class Meta:
         model = ServiceCatalog
-        fields = ["name", "billing_type", "is_active", "memo"]
+        fields = ["name", "billing_type", "is_active", "merchant_aliases", "memo"]
         widgets = {
-            "name": forms.TextInput(attrs={"placeholder": "例: OpenAI API / Notion / AWS"}),
+            "name": forms.TextInput(attrs={"placeholder": "例: ChatGPT / Claude / AWS"}),
+            "merchant_aliases": forms.Textarea(
+                attrs={
+                    "rows": 3,
+                    "placeholder": "例: OPENAI *CHATGPT, OPENAI.COM\nClaudeの場合: CLAUDE.AI SUBSCR, ANTHROPIC.COM",
+                }
+            ),
             "memo": forms.Textarea(attrs={"rows": 3, "placeholder": "任意: ユーザー向け補足、契約メモなど"}),
         }
         help_texts = {
@@ -405,6 +414,23 @@ class ReceiptFileReplaceForm(forms.Form):
         apply_design_classes(self)
 
 
+class CardStatementUploadForm(forms.ModelForm):
+    class Meta:
+        model = CardStatement
+        fields = ["file"]
+        widgets = {
+            "file": forms.ClearableFileInput(attrs={"accept": ".pdf,.png,.jpg,.jpeg,.webp"}),
+        }
+        labels = {"file": "ご利用代金明細書"}
+        help_texts = {
+            "file": "PDF / PNG / JPG / JPEG / WEBP。最大10MB。ファイル本体は最大3ヶ月保存されます。",
+        }
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        apply_design_classes(self)
+
+
 class RegisterForm(UserCreationForm):
     username = forms.EmailField(
         label="メールアドレス",
@@ -437,11 +463,22 @@ class RegisterForm(UserCreationForm):
 
 
 class StaffUserCreateForm(forms.Form):
+    ROLE_GENERAL = "general"
+    ROLE_ADMIN = "admin"
+    ROLE_CHOICES = ((ROLE_GENERAL, "一般ユーザー"), (ROLE_ADMIN, "管理者ユーザー"))
+
     email = forms.EmailField(
         label="新しく登録するユーザー名（メールアドレス）",
         max_length=150,
         widget=forms.EmailInput(attrs={"autocomplete": "off", "placeholder": "user@example.com"}),
         help_text="このメールアドレスをログイン時のアカウント名として使います。",
+    )
+    account_role = forms.ChoiceField(
+        label="権限",
+        choices=ROLE_CHOICES,
+        initial=ROLE_GENERAL,
+        required=False,
+        help_text="管理者ユーザーを発行できるのはスーパーアカウントだけです。",
     )
     account_status = forms.ChoiceField(
         label="初期ステータス",
@@ -451,8 +488,11 @@ class StaffUserCreateForm(forms.Form):
         help_text="停止中ユーザーにはリマインダーメール・テストメールを送信しません。サービス利用開始時は自動で利用中に切り替わります。",
     )
 
-    def __init__(self, *args, **kwargs):
+    def __init__(self, *args, allow_admin_role: bool = False, **kwargs):
+        self.allow_admin_role = allow_admin_role
         super().__init__(*args, **kwargs)
+        if not allow_admin_role:
+            self.fields.pop("account_role", None)
         apply_design_classes(self)
 
     def clean_email(self):
@@ -460,19 +500,34 @@ class StaffUserCreateForm(forms.Form):
         ensure_unique_account_email(email)
         return email
 
+    def clean_account_role(self):
+        role = self.cleaned_data.get("account_role") or self.ROLE_GENERAL
+        if role == self.ROLE_ADMIN and not self.allow_admin_role:
+            raise forms.ValidationError("管理者ユーザーを発行する権限がありません。")
+        return role
+
     def clean_account_status(self):
         return self.cleaned_data.get("account_status") or UserAccountStatus.STOPPED
 
     def save(self, *, created_by: User) -> tuple[User, str]:
         email = self.cleaned_data["email"]
-        user = User(username=email, email=email, is_active=True, is_staff=False, is_superuser=False)
+        role = self.cleaned_data.get("account_role") or self.ROLE_GENERAL
+        user = User(
+            username=email,
+            email=email,
+            is_active=True,
+            is_staff=role == self.ROLE_ADMIN,
+            is_superuser=False,
+        )
         password = generate_initial_password(user=user)
         user.set_password(password)
         user.full_clean()
         user.save()
 
         profile = user.profile
-        profile.account_status = self.cleaned_data["account_status"]
+        profile.account_status = (
+            UserAccountStatus.STOPPED if user.is_staff else self.cleaned_data["account_status"]
+        )
         profile.must_change_password = True
         profile.created_by = created_by
         profile.mark_initial_password_generated()
@@ -525,7 +580,7 @@ class StaffUserPasswordResetForm(forms.Form):
     def clean_user_id(self):
         user_id = self.cleaned_data["user_id"]
         try:
-            user = User.objects.get(pk=user_id, is_active=True, is_staff=False, is_superuser=False)
+            user = User.objects.get(pk=user_id, is_active=True, is_superuser=False)
         except User.DoesNotExist as exc:
             raise forms.ValidationError("対象ユーザーが見つかりません。") from exc
         UserProfile.objects.get_or_create(user=user)
@@ -562,6 +617,34 @@ class StaffUserPasswordResetForm(forms.Form):
         return user, password, generated_random
 
 
+class StaffUserRoleForm(forms.Form):
+    ROLE_GENERAL = StaffUserCreateForm.ROLE_GENERAL
+    ROLE_ADMIN = StaffUserCreateForm.ROLE_ADMIN
+    user_id = forms.IntegerField(widget=forms.HiddenInput)
+    account_role = forms.ChoiceField(label="権限", choices=StaffUserCreateForm.ROLE_CHOICES)
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        apply_design_classes(self)
+
+    def clean_user_id(self):
+        user_id = self.cleaned_data["user_id"]
+        try:
+            return User.objects.get(pk=user_id, is_active=True, is_superuser=False)
+        except User.DoesNotExist as exc:
+            raise forms.ValidationError("対象ユーザーが見つかりません。") from exc
+
+    def save(self) -> User:
+        user = self.cleaned_data["user_id"]
+        role = self.cleaned_data["account_role"]
+        user.is_staff = role == self.ROLE_ADMIN
+        user.save(update_fields=["is_staff"])
+        UserProfile.objects.get_or_create(user=user)
+        if not user.is_staff:
+            sync_user_account_status_from_services(user.pk)
+        return user
+
+
 class EmailOrUsernameAuthenticationForm(AuthenticationForm):
     username = forms.CharField(
         label="メールアドレス / 管理者ユーザー名",
@@ -589,26 +672,65 @@ class StyledPasswordChangeForm(PasswordChangeForm):
 
 
 class EmailReminderScheduleForm(forms.ModelForm):
+    ALLOWED_PLACEHOLDERS = {
+        "app_name",
+        "user_name",
+        "target_month",
+        "upload_url",
+        "missing_services",
+        "api_pending_services",
+    }
+
     reminder_day = forms.IntegerField(
         label="リマインダー日",
         min_value=1,
         max_value=28,
-        help_text="毎月この日に、利用中ユーザー全員へ通常リマインダーを送信します。",
+        help_text="未アップロードのサブスク等がある利用中ユーザーへ送信します。APIのみ未確認の場合は送信しません。",
     )
     warning_day = forms.IntegerField(
         label="警告日",
         min_value=1,
         max_value=28,
-        help_text="毎月この日に、利用中かつ未提出のユーザーへ【重要】メールを送信します。",
+        help_text="未アップロード項目またはAPI利用確認待ちがある利用中ユーザーへ送信します。",
     )
 
     class Meta:
         model = EmailReminderSchedule
-        fields = ("reminder_day", "warning_day")
+        fields = (
+            "reminder_day",
+            "warning_day",
+            "initial_subject_template",
+            "initial_body_template",
+            "urgent_subject_template",
+            "urgent_body_template",
+        )
+        widgets = {
+            "initial_body_template": forms.Textarea(attrs={"rows": 10}),
+            "urgent_body_template": forms.Textarea(attrs={"rows": 12}),
+        }
+        help_texts = {
+            "initial_subject_template": "利用可能な変数: {app_name} {target_month} {user_name}",
+            "initial_body_template": "利用可能な変数: {app_name} {user_name} {target_month} {upload_url} {missing_services}",
+            "urgent_subject_template": "【重要】は未入力でも送信時に自動付与されます。",
+            "urgent_body_template": "利用可能な変数: {app_name} {user_name} {target_month} {upload_url} {missing_services} {api_pending_services}",
+        }
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         apply_design_classes(self)
+
+    def _validate_placeholders(self, field_name: str):
+        import string
+
+        value = self.cleaned_data.get(field_name) or ""
+        try:
+            names = {name for _literal, name, _format_spec, _conversion in string.Formatter().parse(value) if name}
+        except ValueError as exc:
+            self.add_error(field_name, f"テンプレートの波括弧が正しくありません: {exc}")
+            return
+        unknown = sorted(names - self.ALLOWED_PLACEHOLDERS)
+        if unknown:
+            self.add_error(field_name, "利用できない変数があります: " + ", ".join(unknown))
 
     def clean(self):
         cleaned_data = super().clean()
@@ -616,6 +738,13 @@ class EmailReminderScheduleForm(forms.ModelForm):
         warning_day = cleaned_data.get("warning_day")
         if reminder_day and warning_day and warning_day <= reminder_day:
             self.add_error("warning_day", "警告日はリマインダー日より後の日付にしてください。")
+        for field_name in (
+            "initial_subject_template",
+            "initial_body_template",
+            "urgent_subject_template",
+            "urgent_body_template",
+        ):
+            self._validate_placeholders(field_name)
         return cleaned_data
 
 
