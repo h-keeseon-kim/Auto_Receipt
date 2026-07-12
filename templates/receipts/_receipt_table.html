@@ -3,7 +3,7 @@
     <table>
         <thead>
             <tr>
-                <th>サービス</th>
+                <th>サービス / 項目</th>
                 <th>種別</th>
                 <th>金額</th>
                 <th>発行日/支払日</th>
@@ -17,6 +17,7 @@
                 <tr class="{% if user.is_staff and receipt.is_ai_processing %}ai-processing-row{% elif user.is_staff and receipt.needs_manual_review %}manual-review-row{% endif %}">
                     <td>
                         <strong>{{ receipt.service_display_name_snapshot }}</strong>
+                        {% if receipt.is_extra %}<span class="badge neutral">追加</span>{% endif %}
                         {% if receipt.memo %}<div class="muted small">{{ receipt.memo|linebreaksbr }}</div>{% endif %}
                     </td>
                     <td>{{ receipt.get_billing_type_snapshot_display }}</td>

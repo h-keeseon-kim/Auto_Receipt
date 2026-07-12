@@ -392,9 +392,10 @@ class Submission(models.Model):
         from .monthly_status import build_user_month_summary
 
         summary = build_user_month_summary(self.user, self.period_month)
-        if not summary.rows:
+        has_extra_receipt = self.receipts.available_files().filter(is_extra=True).exists()
+        if not summary.rows and not has_extra_receipt:
             raise ValidationError("対象月に提出対象となる利用サービスがありません。利用サービスを確認してください。")
-        if not summary.is_complete:
+        if summary.rows and not summary.is_complete:
             unresolved = [row.service.display_name for row in (*summary.missing_required, *summary.api_pending)]
             preview = "、".join(unresolved[:5])
             if len(unresolved) > 5:
@@ -502,7 +503,19 @@ class ReceiptQuerySet(models.QuerySet):
 
 class Receipt(models.Model):
     submission = models.ForeignKey(Submission, on_delete=models.CASCADE, related_name="receipts")
-    service = models.ForeignKey(RegisteredService, on_delete=models.PROTECT, related_name="receipts", verbose_name="登録サービス")
+    service = models.ForeignKey(
+        RegisteredService,
+        on_delete=models.PROTECT,
+        null=True,
+        blank=True,
+        related_name="receipts",
+        verbose_name="登録サービス",
+    )
+    is_extra = models.BooleanField(
+        "登録外の追加領収書",
+        default=False,
+        help_text="返金・プラン変更など、登録サービスに紐づかない『その他』の領収書です。",
+    )
     service_name_snapshot = models.CharField("提出時サービス名", max_length=120)
     billing_type_snapshot = models.CharField("提出時支払い種別", max_length=20, choices=BillingType.choices)
     amount = models.DecimalField("金額", max_digits=12, decimal_places=2, validators=[MinValueValidator(0)], null=True, blank=True)
@@ -559,19 +572,47 @@ class Receipt(models.Model):
 
     class Meta:
         ordering = ["service_name_snapshot", "uploaded_at"]
+        constraints = [
+            models.CheckConstraint(
+                condition=(
+                    Q(is_extra=True, service__isnull=True)
+                    | Q(is_extra=False, service__isnull=False)
+                ),
+                name="receipt_extra_service_consistency",
+            ),
+            models.CheckConstraint(
+                condition=Q(is_extra=False) | ~Q(memo=""),
+                name="receipt_extra_memo_required",
+            ),
+        ]
         verbose_name = "領収書"
         verbose_name_plural = "領収書"
 
     def clean(self):
         if self.submission_id and self.submission.is_submitted:
             raise ValidationError("提出済みの領収書は変更できません。")
-        if self.service_id and self.submission_id and self.service.user_id != self.submission.user_id:
-            raise ValidationError("自分の利用サービスだけを選択できます。")
-        if self.service_id and self.submission_id and not self.service.is_uploadable_for(self.submission.period_month):
-            raise ValidationError("この提出月では選択できないサービスです。利用停止済みの場合は、最終領収書月までしか選択できません。")
+        self.memo = (self.memo or "").strip()
+        if self.is_extra:
+            self.service = None
+            self.service_name_snapshot = "その他"
+            self.billing_type_snapshot = BillingType.OTHER
+            if not self.memo:
+                raise ValidationError({"memo": "その他の領収書では、どのような領収書かをメモに入力してください。"})
+        else:
+            if not self.service_id:
+                raise ValidationError({"service": "登録サービスを選択してください。"})
+            if self.submission_id and self.service.user_id != self.submission.user_id:
+                raise ValidationError("自分の利用サービスだけを選択できます。")
+            if self.submission_id and not self.service.is_uploadable_for(self.submission.period_month):
+                raise ValidationError("この提出月では選択できないサービスです。利用停止済みの場合は、最終領収書月までしか選択できません。")
 
     def save(self, *args, **kwargs):
-        if self.service_id:
+        self.memo = (self.memo or "").strip()
+        if self.is_extra:
+            self.service = None
+            self.service_name_snapshot = "その他"
+            self.billing_type_snapshot = BillingType.OTHER
+        elif self.service_id:
             self.service_name_snapshot = self.service.name
             self.billing_type_snapshot = self.service.billing_type
         if self.currency:
@@ -582,6 +623,8 @@ class Receipt(models.Model):
 
     @property
     def service_display_name_snapshot(self) -> str:
+        if self.is_extra:
+            return "その他"
         return f"{self.service_name_snapshot}（{self.get_billing_type_snapshot_display()}）"
 
     @property
@@ -622,10 +665,11 @@ class Receipt(models.Model):
 
     @property
     def ai_check_items(self) -> list[tuple[str, bool]]:
+        relation_label = "メモ/領収書関連" if self.is_extra else "サービス/払先関連"
         return [
             ("カード末尾7210", self.ai_check_card_last4),
             ("払先", self.ai_check_payee),
-            ("サービス/払先関連", self.ai_check_service_payee_related),
+            (relation_label, self.ai_check_service_payee_related),
             ("日付", self.ai_check_date),
             ("金額", self.ai_check_amount),
             ("通貨", self.ai_check_currency),
@@ -717,7 +761,10 @@ class Receipt(models.Model):
         return True
 
     def __str__(self) -> str:
-        return f"{self.service_name_snapshot} ({self.submission})"
+        label = self.service_display_name_snapshot
+        if self.is_extra and self.memo:
+            label = f"{label}: {self.memo[:40]}"
+        return f"{label} ({self.submission})"
 
 
 class ReceiptResubmissionRequest(models.Model):
@@ -730,6 +777,8 @@ class ReceiptResubmissionRequest(models.Model):
     period_month = models.DateField("提出月")
     service_name_snapshot = models.CharField("対象サービス名", max_length=120)
     billing_type_snapshot = models.CharField("対象支払い種別", max_length=20, choices=BillingType.choices)
+    is_extra = models.BooleanField("登録外の追加領収書", default=False)
+    receipt_memo_snapshot = models.TextField("領収書メモ", blank=True)
     original_receipt_id = models.PositiveIntegerField("元領収書ID", null=True, blank=True)
     original_filename = models.CharField("元ファイル名", max_length=255, blank=True)
     display_filename = models.CharField("表示ファイル名", max_length=255, blank=True)
@@ -774,6 +823,8 @@ class ReceiptResubmissionRequest(models.Model):
 
     @property
     def service_display_name_snapshot(self) -> str:
+        if self.is_extra:
+            return "その他"
         return f"{self.service_name_snapshot}（{self.get_billing_type_snapshot_display()}）"
 
     @property
@@ -1147,7 +1198,7 @@ def sync_user_account_status_after_service_delete(sender, instance: RegisteredSe
 
 @receiver(post_save, sender=Receipt)
 def sync_statement_items_after_receipt_save(sender, instance: Receipt, **kwargs):
-    if not instance.file_available:
+    if not instance.file_available or instance.service_id is None:
         return
 
     # 同じ領収書を1つのカード明細内の複数行へ割り当てない。

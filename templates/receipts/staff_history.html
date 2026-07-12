@@ -26,7 +26,7 @@
     <div class="card"><span class="label">AI抽出中</span><strong data-ai-summary="ai_processing_count">{{ stats.ai_processing_count }}</strong></div>
     <div class="card"><span class="label">AI要確認</span><strong data-ai-summary="ai_review_count">{{ stats.ai_review_count }}</strong></div>
     <div class="card"><span class="label">手動確認対象</span><strong data-ai-summary="manual_review_count">{{ stats.manual_review_count }}</strong></div>
-    <div class="card"><span class="label">サービス/払先要確認</span><strong data-ai-summary="service_payee_review_count">{{ stats.service_payee_review_count }}</strong></div>
+    <div class="card"><span class="label">サービス/メモ関連要確認</span><strong data-ai-summary="service_payee_review_count">{{ stats.service_payee_review_count }}</strong></div>
     <div class="card"><span class="label">提出月不一致</span><strong data-ai-summary="period_mismatch_count">{{ stats.period_mismatch_count }}</strong></div>
     <div class="card"><span class="label">再提出待ち</span><strong>{{ stats.open_resubmission_request_count }}</strong></div>
 </section>
@@ -89,7 +89,10 @@
                 {% for request_item in open_resubmission_requests %}
                     <tr>
                         <td><strong>{{ request_item.user.username }}</strong></td>
-                        <td>{{ request_item.service_display_name_snapshot }}</td>
+                        <td>
+                            <strong>{{ request_item.service_display_name_snapshot }}</strong>
+                            {% if request_item.receipt_memo_snapshot %}<div class="muted small">{{ request_item.receipt_memo_snapshot|linebreaksbr }}</div>{% endif %}
+                        </td>
                         <td>{{ request_item.display_filename|default:request_item.original_filename|default:"-" }}</td>
                         <td>{{ request_item.created_at|date:"Y-m-d H:i" }}</td>
                         <td>{{ request_item.message }}</td>

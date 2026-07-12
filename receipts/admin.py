@@ -46,9 +46,11 @@ class ReceiptInline(admin.TabularInline):
         "file_deleted_at",
     )
     fields = (
+        "is_extra",
         "service",
         "service_name_snapshot",
         "billing_type_snapshot",
+        "memo",
         "amount",
         "currency",
         "issued_on",
@@ -119,6 +121,7 @@ class SubmissionAdmin(admin.ModelAdmin):
 class ReceiptAdmin(admin.ModelAdmin):
     list_display = (
         "service_name_snapshot",
+        "is_extra",
         "billing_type_snapshot",
         "submission",
         "amount",
@@ -132,8 +135,8 @@ class ReceiptAdmin(admin.ModelAdmin):
         "ai_check_period_match",
         "file_status",
     )
-    list_filter = ("billing_type_snapshot", "currency", "ai_filename_status", "ai_period_check_status", "ai_check_service_payee_related", "ai_check_period_match", "submission__period_month", "file_deleted_at")
-    search_fields = ("service_name_snapshot", "submission__user__username", "original_filename", "generated_filename", "ai_extracted_payee", "ai_filename_admin_memo", "ai_period_check_memo", "ai_service_payee_check_memo")
+    list_filter = ("is_extra", "billing_type_snapshot", "currency", "ai_filename_status", "ai_period_check_status", "ai_check_service_payee_related", "ai_check_period_match", "submission__period_month", "file_deleted_at")
+    search_fields = ("service_name_snapshot", "memo", "submission__user__username", "original_filename", "generated_filename", "ai_extracted_payee", "ai_filename_admin_memo", "ai_period_check_memo", "ai_service_payee_check_memo")
     readonly_fields = (
         "service_name_snapshot",
         "billing_type_snapshot",
@@ -178,9 +181,9 @@ class UserProfileAdmin(admin.ModelAdmin):
 
 @admin.register(ReceiptResubmissionRequest)
 class ReceiptResubmissionRequestAdmin(admin.ModelAdmin):
-    list_display = ("user", "period_month", "service_name_snapshot", "billing_type_snapshot", "status", "created_by", "created_at", "resolved_at")
-    list_filter = ("status", "period_month", "billing_type_snapshot", "created_at", "resolved_at")
-    search_fields = ("user__username", "user__email", "service_name_snapshot", "original_filename", "display_filename", "message")
+    list_display = ("user", "period_month", "service_name_snapshot", "is_extra", "billing_type_snapshot", "status", "created_by", "created_at", "resolved_at")
+    list_filter = ("status", "is_extra", "period_month", "billing_type_snapshot", "created_at", "resolved_at")
+    search_fields = ("user__username", "user__email", "service_name_snapshot", "receipt_memo_snapshot", "original_filename", "display_filename", "message")
     readonly_fields = ("created_at", "resolved_at")
 
 

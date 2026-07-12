@@ -110,7 +110,8 @@ def process_card_statement(statement_id: int):
     )
     receipts_by_service: dict[int, list[Receipt]] = {}
     for receipt in receipts:
-        receipts_by_service.setdefault(receipt.service_id, []).append(receipt)
+        if receipt.service_id is not None:
+            receipts_by_service.setdefault(receipt.service_id, []).append(receipt)
 
     no_usage_service_ids = set(
         MonthlyServiceDeclaration.objects.filter(

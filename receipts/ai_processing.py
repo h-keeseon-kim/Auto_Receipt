@@ -70,7 +70,11 @@ def definite_ai_rejection_reasons(receipt: Receipt, result) -> list[str]:
     if getattr(result, "service_payee_related", None) is False:
         payee = (getattr(result, "payee", "") or "").strip()
         reasons.append(
-            "登録サービスと領収書の払先が一致していません"
+            (
+                "入力メモと領収書の内容が一致していません"
+                if receipt.is_extra
+                else "登録サービスと領収書の払先が一致していません"
+            )
             + (f"（払先: {payee}）" if payee else "")
         )
 
@@ -97,17 +101,22 @@ def remove_receipt_for_automatic_resubmission(receipt_id: int, reasons: list[str
             return False
         submission = receipt.submission
         reason_text = "、".join(reasons)
+        receipt_context = receipt.service_display_name_snapshot
+        if receipt.is_extra and receipt.memo:
+            receipt_context = f"{receipt_context}（{receipt.memo}）"
         ReceiptResubmissionRequest.objects.create(
             user=submission.user,
             period_month=submission.period_month,
             service_name_snapshot=receipt.service_name_snapshot,
             billing_type_snapshot=receipt.billing_type_snapshot,
+            is_extra=receipt.is_extra,
+            receipt_memo_snapshot=receipt.memo,
             original_receipt_id=receipt.pk,
             original_filename=receipt.original_filename,
             display_filename=receipt.display_filename,
             message=(
                 f"自動確認の結果、{submission.period_month:%Y年%m月}分の "
-                f"{receipt.service_display_name_snapshot} の領収書に明確な不一致が見つかりました。"
+                f"{receipt_context} の領収書に明確な不一致が見つかりました。"
                 f"理由: {reason_text}。該当ファイルは提出項目から取り下げました。"
                 "内容を確認し、正しい領収書を再度アップロードしてください。"
             ),
@@ -179,9 +188,17 @@ def apply_ai_checklist_to_receipt(receipt: Receipt, result) -> list[str]:
 
     relation_reason = (getattr(result, "service_payee_relation_reason", "") or "").strip()
     if service_payee_related is False and not relation_reason:
-        relation_reason = "登録サービス名と領収書上の払先が関連しない可能性があります。"
+        relation_reason = (
+            "入力メモと領収書内容が関連しない可能性があります。"
+            if receipt.is_extra
+            else "登録サービス名と領収書上の払先が関連しない可能性があります。"
+        )
     elif service_payee_related is None:
-        relation_reason = relation_reason or "登録サービス名と領収書上の払先の関連性をAIで確認できませんでした。"
+        relation_reason = relation_reason or (
+            "入力メモと領収書内容の関連性をAIで確認できませんでした。"
+            if receipt.is_extra
+            else "登録サービス名と領収書上の払先の関連性をAIで確認できませんでした。"
+        )
 
     receipt.ai_check_card_last4 = card_matches is True
     receipt.ai_check_payee = bool(getattr(result, "payee", "")) or bool(getattr(result, "payee_confirmed", False))
@@ -280,9 +297,11 @@ def apply_ai_filename_to_receipt(receipt: Receipt):
         user_filename_part=filename_user_part_from_user(receipt.submission.user),
         service_match_hints=(
             receipt.service.catalog_service.merchant_aliases
-            if receipt.service.catalog_service_id and receipt.service.catalog_service
+            if receipt.service_id and receipt.service.catalog_service_id and receipt.service.catalog_service
             else ""
         ),
+        receipt_memo=receipt.memo,
+        is_extra=receipt.is_extra,
     )
 
     receipt.generated_filename = result.suggested_filename[:255] if result.suggested_filename else ""

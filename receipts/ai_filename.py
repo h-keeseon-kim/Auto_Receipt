@@ -24,6 +24,7 @@ class ReceiptFilenameResult:
     suggested_filename: str = ""
     admin_memo: str = ""
     payee: str = ""
+    filename_label: str = ""
     payment_date: date | None = None
     amount: Decimal | None = None
     currency: str = ""
@@ -58,6 +59,8 @@ def generate_ai_receipt_filename(
     service_display_name: str,
     user_filename_part: str = "",
     service_match_hints: str = "",
+    receipt_memo: str = "",
+    is_extra: bool = False,
 ) -> ReceiptFilenameResult:
     """領収書ファイルからファイル名候補を作成する。
 
@@ -108,6 +111,8 @@ def generate_ai_receipt_filename(
                         service_display_name=service_display_name,
                         user_filename_part=user_filename_part,
                         service_match_hints=service_match_hints,
+                        receipt_memo=receipt_memo,
+                        is_extra=is_extra,
                     ),
                 },
             ],
@@ -119,6 +124,7 @@ def generate_ai_receipt_filename(
             payload,
             original_filename=original_filename,
             user_filename_part=user_filename_part,
+            is_extra=is_extra,
         )
     except Exception as exc:
         return ReceiptFilenameResult(
@@ -135,34 +141,69 @@ def build_openai_content(
     service_display_name: str,
     user_filename_part: str = "",
     service_match_hints: str = "",
+    receipt_memo: str = "",
+    is_extra: bool = False,
 ) -> list[dict[str, Any]]:
     target = target_card_last4()
+    if is_extra:
+        context_lines = (
+            "対象項目: その他（登録サービス外の追加領収書）\n"
+            f"ユーザーが入力した必須メモ: {receipt_memo or '未入力'}\n"
+            "このメモは、返金・プラン変更・追加請求など領収書の背景を理解するための参考情報です。"
+            "ただし、払先、日付、金額、通貨、カード番号など領収書ファイル内の明確な記載を常に最優先してください。"
+            "メモと領収書の内容が明確に矛盾する場合は、メモに合わせて推測せず service_payee_related を false にしてください。"
+            "関連性を断定できない場合は null にしてください。\n"
+        )
+        relation_instruction = (
+            "3. ユーザーのメモと、領収書上の払先・取引内容が同一または合理的に関連しているか確認する。"
+            "例えば『OpenAIからの返金』というメモとOpenAIの返金領収書は関連あり、"
+            "同じメモなのにAnthropicの通常請求書であれば関連なしとする。"
+            "曖昧または確認できない場合は service_payee_related を null にする。\n"
+        )
+        filename_instruction = (
+            "5. filename_label は、領収書本体で確認できた払先・取引内容を中心に、必須メモを補助情報として使って、"
+            "ファイル名に適した短い名称を返す。例: OpenAI返金、ChatGPTプラン変更。"
+            "領収書上の明確な払先と矛盾する名称をメモだけから作らない。"
+            "メモ全体をそのままコピーせず、企業名または企業名+短い取引種別に要約する。\n"
+        )
+        relation_name = "メモと領収書内容"
+    else:
+        context_lines = (
+            f"対象の登録サービス名: {service_display_name}\n"
+            f"管理者が登録した払先・カード明細表記候補: {service_match_hints or '未設定'}\n"
+        )
+        relation_instruction = (
+            "3. 対象の登録サービス名と領収書上の払先が同一または合理的に関連しているか確認する。"
+            "完全一致だけで判定せず、ChatGPT と OpenAI、Claude と Anthropic のような運営会社・請求元の関係は関連ありとする。"
+            "一方で ChatGPT の登録サービスなのに Anthropic の領収書、Claude の登録サービスなのに OpenAI の領収書のような組み合わせは関連なしとする。"
+            "判断が曖昧、または払先やサービスとの関係を確認できない場合は service_payee_related を null にする。\n"
+        )
+        filename_instruction = (
+            "5. filename_label は登録サービス名ではなく、領収書上の実際の払先から Inc. / LLC / PBC などの法人格表記を除いた短い企業名を返す。\n"
+        )
+        relation_name = "登録サービス名と払先"
+
     return [
         build_file_input_item(file_bytes=file_bytes, filename=original_filename, content_type=content_type),
         {
             "type": "input_text",
             "text": (
-                f"対象の登録サービス名: {service_display_name}\n"
-                f"管理者が登録した払先・カード明細表記候補: {service_match_hints or '未設定'}\n"
-                f"ファイル名に使うユーザー名部分: {sanitize_filename_part(user_filename_part, fallback='user')}\n"
-                f"元ファイル名: {original_filename}\n"
-                f"必ず次の順番で確認してください。\n"
-                f"1. 領収書内の支払カードまたは支払方法に表示されるカード末尾4桁が {target} で終わるか確認する。"
-                f"カード末尾が読めない場合は null、違う場合は読めた末尾4桁を返す。\n"
-                f"2. 領収書内の実際の払先・販売者・請求元・merchant/payee を確認する。"
-                f"登録サービス名は参考情報であり、ファイル名の払先としてそのまま使わない。"
-                f"例えば ChatGPT（サブスク）の払先は OpenAI、Claude（サブスク）の払先は Anthropic のように、"
-                f"領収書に表示された請求元を優先する。\n"
-                f"3. 対象の登録サービス名と領収書上の払先が同一または合理的に関連しているか確認する。"
-                f"完全一致だけで判定せず、ChatGPT と OpenAI、Claude と Anthropic のような運営会社・請求元の関係は関連ありとする。"
-                f"一方で ChatGPT の登録サービスなのに Anthropic の領収書、Claude の登録サービスなのに OpenAI の領収書のような組み合わせは関連なしとする。"
-                f"判断が曖昧、または払先やサービスとの関係を確認できない場合は service_payee_related を null にする。\n"
-                f"4. 支払日または領収書日付、合計金額、通貨を確認する。\n"
-                f"5. ファイル名はアプリ側で YYMMDD_ユーザー名_企業名_金額_通貨 の形式に整形する。"
-                f"企業名は登録サービス名ではなく、領収書上の払先から Inc. / LLC / PBC などの法人格表記を除いた名称を使う。\n"
-                f"6. can_create_filename は、カード末尾が {target} と確認でき、払先・日付・金額・通貨のすべてを高い確度で読め、"
-                f"さらに登録サービス名と払先が関連すると確認できる場合だけ true にする。"
-                f"作成が難しい場合は false にし、reason に管理者が確認すべき理由を日本語で短く書く。"
+                context_lines
+                + f"ファイル名に使うユーザー名部分: {sanitize_filename_part(user_filename_part, fallback='user')}\n"
+                + f"元ファイル名: {original_filename}\n"
+                + "必ず次の順番で確認してください。\n"
+                + f"1. 領収書内の支払カードまたは支払方法に表示されるカード末尾4桁が {target} で終わるか確認する。"
+                + "カード末尾が読めない場合は null、違う場合は読めた末尾4桁を返す。\n"
+                + "2. 領収書内の実際の払先・販売者・請求元・merchant/payee を確認する。"
+                + "画面上のサービス名やユーザー入力メモより、領収書に表示された請求元を優先する。"
+                + "例えば ChatGPT（サブスク）の払先は OpenAI、Claude（サブスク）の払先は Anthropic のように判断する。\n"
+                + relation_instruction
+                + "4. 支払日または領収書日付、合計金額、通貨を確認する。\n"
+                + filename_instruction
+                + "6. ファイル名はアプリ側で YYMMDD_ユーザー名_filename_label_金額_通貨 の形式に整形する。\n"
+                + f"7. can_create_filename は、カード末尾が {target} と確認でき、払先・filename_label・日付・金額・通貨を高い確度で読め、"
+                + f"さらに{relation_name}が関連すると確認できる場合だけ true にする。"
+                + "作成が難しい場合は false にし、reason に管理者が確認すべき理由を日本語で短く書く。"
             ),
         },
     ]
@@ -196,8 +237,9 @@ def receipt_filename_schema() -> dict[str, Any]:
                 "card_last4": {"type": ["string", "null"], "description": "領収書に表示された支払カード末尾4桁。読めない場合は null。"},
                 "card_last4_matches_target": {"type": ["boolean", "null"], "description": "カード末尾が指定された末尾4桁と一致するか。読めない場合は null。"},
                 "payee": {"type": ["string", "null"], "description": "実際の払先・販売者・請求元。登録サービス名ではなく領収書上の相手先。"},
-                "service_payee_related": {"type": ["boolean", "null"], "description": "対象の登録サービス名と領収書上の払先が同一または合理的に関連しているか。曖昧・確認不可の場合は null。"},
-                "service_payee_relation_reason": {"type": "string", "description": "サービス名と払先の関連性について、管理者が確認すべき理由や根拠。"},
+                "filename_label": {"type": ["string", "null"], "description": "ファイル名に使う短い名称。通常は払先企業名。その他領収書では領収書内容を優先しつつ必須メモを補助情報にした企業名または企業名+短い取引種別。"},
+                "service_payee_related": {"type": ["boolean", "null"], "description": "通常領収書では登録サービスと払先、その他領収書では必須メモと領収書内容が合理的に関連しているか。曖昧・確認不可の場合は null。"},
+                "service_payee_relation_reason": {"type": "string", "description": "関連性について管理者が確認すべき理由や根拠。"},
                 "payment_date": {"type": ["string", "null"], "description": "支払日または領収書日付。YYYY-MM-DD。"},
                 "amount": {"type": ["number", "string", "null"], "description": "合計支払金額。"},
                 "currency": {"type": ["string", "null"], "description": "ISO 4217通貨コード。例: JPY, USD。"},
@@ -209,6 +251,7 @@ def receipt_filename_schema() -> dict[str, Any]:
                 "card_last4",
                 "card_last4_matches_target",
                 "payee",
+                "filename_label",
                 "service_payee_related",
                 "service_payee_relation_reason",
                 "payment_date",
@@ -247,7 +290,13 @@ def extract_response_text(response: Any) -> str:
     raise ValueError("OpenAI response did not contain output_text")
 
 
-def build_result_from_payload(payload: dict[str, Any], *, original_filename: str, user_filename_part: str = "") -> ReceiptFilenameResult:
+def build_result_from_payload(
+    payload: dict[str, Any],
+    *,
+    original_filename: str,
+    user_filename_part: str = "",
+    is_extra: bool = False,
+) -> ReceiptFilenameResult:
     target = target_card_last4()
     card_last4 = normalize_card_last4(payload.get("card_last4"))
     card_matches = payload.get("card_last4_matches_target")
@@ -263,6 +312,7 @@ def build_result_from_payload(payload: dict[str, Any], *, original_filename: str
     service_relation_reason = str(payload.get("service_payee_relation_reason") or "").strip()
 
     payee = normalize_payee(payload.get("payee") or "")
+    filename_label = normalize_filename_label(payload.get("filename_label") or payee)
     payment_date = parse_iso_date(payload.get("payment_date"))
     amount = parse_amount(payload.get("amount"))
     currency = normalize_currency(payload.get("currency") or "")
@@ -278,11 +328,21 @@ def build_result_from_payload(payload: dict[str, Any], *, original_filename: str
             issues.append(f"カード末尾 {target} を確認できませんでした。")
     if not payee:
         issues.append("払先を確認できませんでした。")
+    if not filename_label:
+        issues.append("ファイル名に使う名称を確認できませんでした。")
     if service_relation_supplied and service_payee_related is not True:
         if service_payee_related is False:
-            issues.append("登録サービス名と領収書の払先が関連していない可能性があります。")
+            issues.append(
+                "入力メモと領収書内容が関連していない可能性があります。"
+                if is_extra
+                else "登録サービス名と領収書の払先が関連していない可能性があります。"
+            )
         else:
-            issues.append("登録サービス名と領収書の払先の関連性を確認できませんでした。")
+            issues.append(
+                "入力メモと領収書内容の関連性を確認できませんでした。"
+                if is_extra
+                else "登録サービス名と領収書の払先の関連性を確認できませんでした。"
+            )
         if service_relation_reason:
             issues.append(service_relation_reason)
     if payment_date is None:
@@ -297,11 +357,11 @@ def build_result_from_payload(payload: dict[str, Any], *, original_filename: str
         issues.append(f"抽出信頼度が低いです（{confidence:.2f}）。")
 
     suggested_filename = ""
-    if payee and payment_date is not None and amount is not None and currency:
+    if filename_label and payment_date is not None and amount is not None and currency:
         suggested_filename = build_receipt_filename(
             payment_date=payment_date,
             user_filename_part=user_filename_part,
-            payee=payee,
+            payee=filename_label,
             amount=amount,
             currency=currency,
             extension=Path(original_filename).suffix.lower() or ".pdf",
@@ -310,6 +370,7 @@ def build_result_from_payload(payload: dict[str, Any], *, original_filename: str
     result_kwargs = dict(
         suggested_filename=suggested_filename if can_create and not issues else "",
         payee=payee,
+        filename_label=filename_label,
         payment_date=payment_date,
         amount=amount,
         currency=currency,
@@ -338,10 +399,21 @@ def build_result_from_payload(payload: dict[str, Any], *, original_filename: str
     )
 
 
-def build_result_from_ai_payload(payload: dict[str, Any], *, original_filename: str, user_filename_part: str = "") -> ReceiptFilenameResult:
+def build_result_from_ai_payload(
+    payload: dict[str, Any],
+    *,
+    original_filename: str,
+    user_filename_part: str = "",
+    is_extra: bool = False,
+) -> ReceiptFilenameResult:
     """旧テスト・旧実装名との互換用。"""
 
-    return build_result_from_payload(payload, original_filename=original_filename, user_filename_part=user_filename_part)
+    return build_result_from_payload(
+        payload,
+        original_filename=original_filename,
+        user_filename_part=user_filename_part,
+        is_extra=is_extra,
+    )
 
 
 def build_receipt_filename(
@@ -402,6 +474,14 @@ def normalize_payee(value: str) -> str:
     value = unicodedata.normalize("NFKC", value or "").strip()
     value = re.sub(r"\s+", " ", value)
     value = re.sub(r"^(merchant|payee|seller|vendor|billed by|paid to)\s*[:：]\s*", "", value, flags=re.I)
+    return value[:160]
+
+
+def normalize_filename_label(value: str) -> str:
+    """AIが返したファイル名用ラベルを表示可能な短い文字列へ正規化する。"""
+
+    value = unicodedata.normalize("NFKC", value or "").strip()
+    value = re.sub(r"\s+", " ", value)
     return value[:160]
 
 

@@ -128,7 +128,8 @@ def build_user_month_summary(user: User, period_month: date) -> UserMonthSummary
             .select_related("service")
             .order_by("uploaded_at", "pk")
         ):
-            receipts_by_service.setdefault(receipt.service_id, []).append(receipt)
+            if receipt.service_id is not None:
+                receipts_by_service.setdefault(receipt.service_id, []).append(receipt)
 
     declaration_service_ids = set(
         MonthlyServiceDeclaration.objects.filter(

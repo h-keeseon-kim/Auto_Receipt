@@ -3,7 +3,11 @@
         <td><strong>{{ receipt.submission.user.username }}</strong></td>
         <td>{{ receipt.submission.period_month|date:"Y年m月" }}</td>
         <td><span class="badge {{ receipt.submission.status }}">{{ receipt.submission.get_status_display }}</span></td>
-        <td>{{ receipt.service_display_name_snapshot }}</td>
+        <td>
+            <strong>{{ receipt.service_display_name_snapshot }}</strong>
+            {% if receipt.is_extra %}<span class="badge neutral">追加</span>{% endif %}
+            {% if receipt.memo %}<div class="muted small">{{ receipt.memo|linebreaksbr }}</div>{% endif %}
+        </td>
         <td>
             <div><strong>{{ receipt.display_filename|default:"-" }}</strong></div>
             {% if receipt.generated_filename and receipt.original_filename %}<div class="muted small">元: {{ receipt.original_filename }}</div>{% endif %}

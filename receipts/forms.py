@@ -398,6 +398,70 @@ class ReceiptUploadForm(forms.ModelForm):
         return uploaded_file
 
 
+class ExtraReceiptUploadForm(forms.ModelForm):
+    """登録サービスに紐づかない返金・プラン変更等の追加領収書フォーム。"""
+
+    memo = forms.CharField(
+        label="領収書の内容メモ",
+        required=True,
+        max_length=500,
+        widget=forms.Textarea(
+            attrs={
+                "rows": 3,
+                "placeholder": "例: ChatGPTプラン変更に伴う追加請求 / OpenAIからの返金領収書",
+            }
+        ),
+        help_text="必須。どのような領収書かを具体的に記載してください。AIはこのメモを参考にしますが、領収書ファイル内の情報を優先して確認します。",
+    )
+
+    class Meta:
+        model = Receipt
+        fields = ["memo", "file"]
+        widgets = {
+            "file": forms.ClearableFileInput(attrs={"accept": ".pdf,.png,.jpg,.jpeg,.webp"}),
+        }
+        labels = {
+            "file": "領収書ファイルアップロード",
+        }
+        help_texts = {
+            "file": "PDF / PNG / JPG / JPEG / WEBP。最大10MB。ファイル本体は最大3ヶ月保存されます。",
+        }
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.instance.is_extra = True
+        self.instance.service = None
+        self.instance.service_name_snapshot = "その他"
+        self.instance.billing_type_snapshot = BillingType.OTHER
+        self.fields["file"].required = True
+        apply_design_classes(self)
+
+    def clean_memo(self):
+        memo = (self.cleaned_data.get("memo") or "").strip()
+        if not memo:
+            raise forms.ValidationError("どのような領収書かをメモに入力してください。")
+        return memo
+
+    def clean_file(self):
+        uploaded_file = self.cleaned_data.get("file")
+        if not uploaded_file:
+            return uploaded_file
+        max_size = getattr(settings, "MAX_UPLOAD_SIZE", 10 * 1024 * 1024)
+        if uploaded_file.size > max_size:
+            raise forms.ValidationError(f"ファイルサイズは {max_size // 1024 // 1024}MB 以下にしてください。")
+        return uploaded_file
+
+    def save(self, commit=True):
+        receipt = super().save(commit=False)
+        receipt.is_extra = True
+        receipt.service = None
+        receipt.service_name_snapshot = "その他"
+        receipt.billing_type_snapshot = BillingType.OTHER
+        if commit:
+            receipt.save()
+        return receipt
+
+
 class ReceiptFileReplaceForm(forms.Form):
     file = forms.FileField(
         label="修正後ファイル",

@@ -59,6 +59,14 @@
         },
         {
             pageName: "dashboard",
+            selector: "[data-tutorial-target='extra-receipt-button']",
+            title: "登録外の領収書も追加できます",
+            body: "返金、プラン変更、追加請求など、登録サービスにない領収書が発生した場合は「＋ その他の領収書」を押します。内容メモは必須で、AIはメモを参考にしながら領収書ファイル内の情報を優先して確認します。",
+            placement: "left",
+            scrollBlock: "nearest",
+        },
+        {
+            pageName: "dashboard",
             selector: "[data-tutorial-target='uploaded-receipts-section']",
             title: "アップロード済み領収書を確認して提出します",
             body: "アップロードした領収書はここに追加されます。内容を確認し、月内の領収書が揃ったら「提出する」を押します。提出後も、間違えたファイルは修正できます。",

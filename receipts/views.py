@@ -33,6 +33,7 @@ from .emailing import send_test_email
 from .forms import (
     MonthSelectForm,
     CardStatementUploadForm,
+    ExtraReceiptUploadForm,
     ReceiptFileReplaceForm,
     ReceiptUploadForm,
     RegisterForm,
@@ -122,16 +123,27 @@ def resolve_matching_resubmission_requests(receipt: Receipt, *, by) -> int:
     """再提出依頼と同じ月・サービスの領収書が再アップロードされたら対応済みにする。"""
 
     now = timezone.now()
-    return (
-        ReceiptResubmissionRequest.objects.filter(
-            user=receipt.submission.user,
-            period_month=receipt.submission.period_month,
-            service_name_snapshot=receipt.service_name_snapshot,
-            billing_type_snapshot=receipt.billing_type_snapshot,
-            status=ResubmissionRequestStatus.OPEN,
-        )
-        .update(status=ResubmissionRequestStatus.RESOLVED, resolved_at=now, resolved_by=by)
+    requests = ReceiptResubmissionRequest.objects.filter(
+        user=receipt.submission.user,
+        period_month=receipt.submission.period_month,
+        status=ResubmissionRequestStatus.OPEN,
     )
+    if receipt.is_extra:
+        requests = requests.filter(is_extra=True)
+        exact = requests.filter(receipt_memo_snapshot__iexact=receipt.memo).order_by("created_at").first()
+        target = exact or requests.order_by("created_at").first()
+        if target is None:
+            return 0
+        return ReceiptResubmissionRequest.objects.filter(pk=target.pk).update(
+            status=ResubmissionRequestStatus.RESOLVED,
+            resolved_at=now,
+            resolved_by=by,
+        )
+    return requests.filter(
+        is_extra=False,
+        service_name_snapshot=receipt.service_name_snapshot,
+        billing_type_snapshot=receipt.billing_type_snapshot,
+    ).update(status=ResubmissionRequestStatus.RESOLVED, resolved_at=now, resolved_by=by)
 
 
 def managed_users_queryset():
@@ -197,6 +209,8 @@ def dashboard(request):
     ).order_by("service_name_snapshot", "created_at")
 
     receipt_form = ReceiptUploadForm(user=request.user, period_month=selected_month)
+    extra_receipt_form = ExtraReceiptUploadForm()
+    extra_form_open = False
     if request.method == "POST":
         action = request.POST.get("action")
 
@@ -233,11 +247,47 @@ def dashboard(request):
                     messages.success(request, f"{service.display_name} の『当月利用なし』を取り消しました。")
             return redirect(f"{reverse('dashboard')}?month={month_query(selected_month)}")
 
-        if submission.is_submitted:
+        if action == "add_extra_receipt":
+            extra_form_open = True
+            extra_receipt_form = ExtraReceiptUploadForm(request.POST, request.FILES)
+            if extra_receipt_form.is_valid():
+                upload = request.FILES["file"]
+                receipt = extra_receipt_form.save(commit=False)
+                receipt.submission = submission
+                receipt.original_filename = upload.name
+                receipt.file_size = upload.size
+                receipt.content_type = getattr(upload, "content_type", "") or ""
+                receipt.expires_at = receipt_expiry_from(timezone.now())
+                was_submitted = submission.is_submitted
+                try:
+                    with transaction.atomic():
+                        if was_submitted:
+                            submission.status = SubmissionStatus.DRAFT
+                            submission.submitted_at = None
+                            submission.save(update_fields=["status", "submitted_at", "updated_at"])
+                        receipt.full_clean()
+                        receipt.save()
+                except ValidationError as exc:
+                    if was_submitted:
+                        submission.refresh_from_db(fields=["status", "submitted_at", "updated_at"])
+                    add_validation_errors(extra_receipt_form, exc)
+                else:
+                    resolved_count = resolve_matching_resubmission_requests(receipt, by=request.user)
+                    if resolved_count:
+                        messages.success(request, "その他の領収書の再提出依頼を対応済みにしました。")
+                    if was_submitted:
+                        messages.info(request, "追加領収書を登録したため、この月を下書きに戻しました。内容を確認して再度提出してください。")
+                    messages.success(
+                        request,
+                        "その他の領収書を追加しました。メモはAIの参考情報として使われますが、領収書ファイル内の情報を優先してファイル名修正・検査を行います。",
+                    )
+                    return redirect(f"{reverse('dashboard')}?month={month_query(selected_month)}")
+
+        elif submission.is_submitted:
             messages.error(request, "この提出月はすでに提出済みのため編集できません。")
             return redirect(submission.get_absolute_url())
 
-        if action == "add_receipt":
+        elif action == "add_receipt":
             receipt_form = ReceiptUploadForm(request.POST, request.FILES, user=request.user, period_month=selected_month)
             if receipt_form.is_valid():
                 upload = request.FILES["file"]
@@ -286,6 +336,8 @@ def dashboard(request):
         {
             "month_form": month_form,
             "receipt_form": receipt_form,
+            "extra_receipt_form": extra_receipt_form,
+            "extra_form_open": extra_form_open,
             "submission": submission,
             "receipts": receipts,
             "uploadable_services": uploadable_services,
@@ -663,11 +715,12 @@ def replace_receipt_file(request, pk: int):
             # ストレージ削除に失敗しても、ユーザーの差し替え処理自体は完了させる。
             pass
 
-    MonthlyServiceDeclaration.objects.filter(
-        user=receipt.submission.user,
-        service=receipt.service,
-        period_month=receipt.submission.period_month,
-    ).delete()
+    if receipt.service_id:
+        MonthlyServiceDeclaration.objects.filter(
+            user=receipt.submission.user,
+            service=receipt.service,
+            period_month=receipt.submission.period_month,
+        ).delete()
     messages.success(request, f"{receipt.service_display_name_snapshot} の領収書ファイルを修正しました。AIによるファイル名修正・検査は、管理者が再実行した後に反映されます。")
     return redirect_back_or(request, fallback_url)
 
@@ -732,9 +785,12 @@ def staff_request_receipt_resubmission(request, pk: int):
         selected_month = submission.period_month
         username = submission.user.get_username()
         service_name = receipt.service_display_name_snapshot
+        receipt_context = service_name
+        if receipt.is_extra and receipt.memo:
+            receipt_context = f"{service_name}（{receipt.memo}）"
         display_filename = receipt.display_filename
         message = (
-            f"管理者確認の結果、{selected_month:%Y年%m月}分の {service_name} の領収書について再提出が必要になりました。"
+            f"管理者確認の結果、{selected_month:%Y年%m月}分の {receipt_context} の領収書について再提出が必要になりました。"
             "該当ファイルは提出項目から削除済みです。正しい領収書ファイルを再度アップロードして、提出してください。"
         )
         ReceiptResubmissionRequest.objects.create(
@@ -742,6 +798,8 @@ def staff_request_receipt_resubmission(request, pk: int):
             period_month=selected_month,
             service_name_snapshot=receipt.service_name_snapshot,
             billing_type_snapshot=receipt.billing_type_snapshot,
+            is_extra=receipt.is_extra,
+            receipt_memo_snapshot=receipt.memo,
             original_receipt_id=receipt.pk,
             original_filename=receipt.original_filename,
             display_filename=display_filename,
@@ -1426,6 +1484,7 @@ def receipt_manifest_csv(submissions) -> str:
         "email",
         "submission_status",
         "submitted_at",
+        "receipt_kind",
         "service_name",
         "billing_type",
         "amount",
@@ -1462,6 +1521,7 @@ def receipt_manifest_csv(submissions) -> str:
                 submission.user.email,
                 submission.get_status_display(),
                 submission.submitted_at.isoformat() if submission.submitted_at else "",
+                "extra" if receipt.is_extra else "registered_service",
                 receipt.service_name_snapshot,
                 receipt.get_billing_type_snapshot_display(),
                 receipt.amount if receipt.amount is not None else "",

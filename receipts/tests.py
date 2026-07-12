@@ -15,8 +15,13 @@ from django.test import TestCase, override_settings
 from django.urls import reverse
 from django.utils import timezone
 
-from .ai_filename import ReceiptFilenameResult, build_result_from_ai_payload, filename_user_part_from_user
-from .forms import ReceiptUploadForm
+from .ai_filename import (
+    ReceiptFilenameResult,
+    build_openai_content,
+    build_result_from_ai_payload,
+    filename_user_part_from_user,
+)
+from .forms import ExtraReceiptUploadForm, ReceiptUploadForm
 from .monthly_status import build_user_month_summary
 from .statement_ai import StatementAnalysisItem, StatementAnalysisResult, build_statement_result_from_payload
 from .statement_processing import process_card_statement
@@ -328,7 +333,7 @@ class ReceiptFlowTests(TestCase):
         self.client.login(username="admin", password="admin-password-123")
         staff_response = self.client.get(reverse("history") + "?month=2026-06")
         self.assertContains(staff_response, "manual-review-row")
-        self.assertContains(staff_response, "サービス/払先要確認")
+        self.assertContains(staff_response, "サービス/メモ関連要確認")
         self.assertContains(staff_response, "再提出指示")
         self.assertContains(staff_response, "Anthropic")
 
@@ -727,6 +732,179 @@ class ReceiptFlowTests(TestCase):
         self.assertEqual(form.fields["service"].label, "サービス選択（登録サービス）")
         self.assertEqual(form.fields["file"].label, "領収書ファイルアップロード")
         self.assertTrue(form.fields["file"].required)
+
+    def test_dashboard_has_plus_button_for_unexpected_extra_receipt(self):
+        self.client.login(username="alice", password="password123")
+
+        response = self.client.get(reverse("dashboard") + "?month=2026-06")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "data-extra-receipt-toggle")
+        self.assertContains(response, "＋</span> その他の領収書")
+        self.assertContains(response, "data-extra-upload-form")
+        self.assertContains(response, "領収書の内容メモ")
+
+    def test_extra_receipt_form_requires_memo(self):
+        form = ExtraReceiptUploadForm(
+            data={"memo": ""},
+            files={"file": SimpleUploadedFile("refund.pdf", b"%PDF-1.4 refund", content_type="application/pdf")},
+        )
+
+        self.assertEqual(list(form.fields), ["memo", "file"])
+        self.assertFalse(form.is_valid())
+        self.assertIn("memo", form.errors)
+
+    def test_user_can_upload_extra_receipt_without_registered_service(self):
+        self.client.login(username="alice", password="password123")
+
+        response = self.client.post(
+            reverse("dashboard") + "?month=2026-06",
+            {
+                "action": "add_extra_receipt",
+                "memo": "OpenAIからの返金領収書",
+                "file": SimpleUploadedFile("refund.pdf", b"%PDF-1.4 refund", content_type="application/pdf"),
+            },
+        )
+
+        self.assertEqual(response.status_code, 302)
+        receipt = Receipt.objects.get()
+        self.assertTrue(receipt.is_extra)
+        self.assertIsNone(receipt.service_id)
+        self.assertEqual(receipt.service_name_snapshot, "その他")
+        self.assertEqual(receipt.billing_type_snapshot, BillingType.OTHER)
+        self.assertEqual(receipt.service_display_name_snapshot, "その他")
+        self.assertEqual(receipt.memo, "OpenAIからの返金領収書")
+        summary = build_user_month_summary(self.user, date(2026, 6, 1))
+        self.assertEqual(summary.api_pending_count, 1, "その他領収書は登録サービスの提出済み判定に流用しない")
+
+    def test_submission_with_only_extra_receipt_is_allowed_when_no_registered_services_exist(self):
+        extra_only_user = User.objects.create_user(username="extra-only@example.com", password="password123")
+        submission = Submission.objects.create(user=extra_only_user, period_month=date(2026, 6, 1))
+        Receipt.objects.create(
+            submission=submission,
+            service=None,
+            is_extra=True,
+            service_name_snapshot="その他",
+            billing_type_snapshot=BillingType.OTHER,
+            memo="OpenAIからの返金領収書",
+            original_filename="refund.pdf",
+            file=SimpleUploadedFile("refund.pdf", b"%PDF-1.4 refund", content_type="application/pdf"),
+            expires_at=timezone.now() + timedelta(days=30),
+        )
+
+        submission.submit()
+
+        submission.refresh_from_db()
+        self.assertEqual(submission.status, SubmissionStatus.SUBMITTED)
+        self.assertIsNotNone(submission.submitted_at)
+
+    def test_extra_receipt_added_after_submission_reopens_month_as_draft(self):
+        submission = Submission.objects.create(
+            user=self.user,
+            period_month=date(2026, 6, 1),
+            status=SubmissionStatus.SUBMITTED,
+            submitted_at=timezone.now(),
+        )
+        self.client.login(username="alice", password="password123")
+
+        response = self.client.post(
+            reverse("dashboard") + "?month=2026-06",
+            {
+                "action": "add_extra_receipt",
+                "memo": "プラン変更による追加請求",
+                "file": SimpleUploadedFile("adjustment.pdf", b"%PDF-1.4 adjustment", content_type="application/pdf"),
+            },
+        )
+
+        self.assertEqual(response.status_code, 302)
+        submission.refresh_from_db()
+        self.assertEqual(submission.status, SubmissionStatus.DRAFT)
+        self.assertIsNone(submission.submitted_at)
+        self.assertTrue(submission.receipts.get().is_extra)
+
+    @mock.patch("receipts.ai_processing.generate_ai_receipt_filename")
+    def test_extra_receipt_ai_uses_required_memo_as_hint_and_receipt_content_as_priority(self, mocked_generate):
+        submission = Submission.objects.create(user=self.user, period_month=date(2026, 6, 1))
+        receipt = Receipt.objects.create(
+            submission=submission,
+            service=None,
+            is_extra=True,
+            service_name_snapshot="その他",
+            billing_type_snapshot=BillingType.OTHER,
+            memo="OpenAIからの返金領収書",
+            original_filename="refund.pdf",
+            file=SimpleUploadedFile("refund.pdf", b"%PDF-1.4 refund", content_type="application/pdf"),
+            expires_at=timezone.now() + timedelta(days=30),
+        )
+        mocked_generate.return_value = ReceiptFilenameResult(
+            status=ReceiptFilenameStatus.GENERATED,
+            suggested_filename="260602_alice_OpenAI返金_220_USD.pdf",
+            payee="OpenAI, LLC",
+            filename_label="OpenAI返金",
+            payment_date=date(2026, 6, 2),
+            amount=Decimal("220.00"),
+            currency="USD",
+            card_last4="7210",
+            card_last4_matches_target=True,
+            service_payee_related=True,
+        )
+
+        call_command("process_pending_receipts", "--limit", "10")
+
+        receipt.refresh_from_db()
+        self.assertEqual(receipt.generated_filename, "260602_alice_OpenAI返金_220_USD.pdf")
+        self.assertTrue(receipt.ai_check_service_payee_related)
+        call_kwargs = mocked_generate.call_args.kwargs
+        self.assertTrue(call_kwargs["is_extra"])
+        self.assertEqual(call_kwargs["receipt_memo"], "OpenAIからの返金領収書")
+        self.assertEqual(call_kwargs["service_display_name"], "その他")
+
+        prompt = build_openai_content(
+            file_bytes=b"%PDF-1.4 refund",
+            original_filename="refund.pdf",
+            content_type="application/pdf",
+            service_display_name="その他",
+            receipt_memo="OpenAIからの返金領収書",
+            is_extra=True,
+        )[1]["text"]
+        self.assertIn("ユーザーが入力した必須メモ: OpenAIからの返金領収書", prompt)
+        self.assertIn("領収書ファイル内の明確な記載を常に最優先", prompt)
+
+    @mock.patch("receipts.ai_processing.generate_ai_receipt_filename")
+    def test_clear_extra_memo_receipt_mismatch_removes_item_and_keeps_resubmission_context(self, mocked_generate):
+        submission = Submission.objects.create(user=self.user, period_month=date(2026, 6, 1))
+        receipt = Receipt.objects.create(
+            submission=submission,
+            service=None,
+            is_extra=True,
+            service_name_snapshot="その他",
+            billing_type_snapshot=BillingType.OTHER,
+            memo="OpenAIからの返金領収書",
+            original_filename="wrong.pdf",
+            file=SimpleUploadedFile("wrong.pdf", b"%PDF-1.4 wrong", content_type="application/pdf"),
+            expires_at=timezone.now() + timedelta(days=30),
+        )
+        mocked_generate.return_value = ReceiptFilenameResult(
+            status=ReceiptFilenameStatus.NEEDS_REVIEW,
+            admin_memo="メモと領収書内容が不一致です。",
+            payee="Anthropic",
+            filename_label="Anthropic",
+            payment_date=date(2026, 6, 2),
+            amount=Decimal("220.00"),
+            currency="USD",
+            card_last4="7210",
+            card_last4_matches_target=True,
+            service_payee_related=False,
+            service_payee_relation_reason="メモはOpenAI返金だが領収書はAnthropicの通常請求です。",
+        )
+
+        call_command("process_pending_receipts", "--limit", "10")
+
+        self.assertFalse(Receipt.objects.filter(pk=receipt.pk).exists())
+        request_item = ReceiptResubmissionRequest.objects.get()
+        self.assertTrue(request_item.is_extra)
+        self.assertEqual(request_item.receipt_memo_snapshot, "OpenAIからの返金領収書")
+        self.assertIn("入力メモと領収書の内容が一致していません", request_item.message)
 
     def test_purge_expired_receipts_deletes_file_but_keeps_metadata(self):
         submission = Submission.objects.create(user=self.user, period_month=date(2026, 6, 1))
@@ -2268,4 +2446,4 @@ class FinalWorkflowAcceptanceTests(TestCase):
         self.assertTrue(CardStatement.objects.filter(pk=statement.pk).exists())
 
     def test_version_file_is_present_without_web_display_requirement(self):
-        self.assertEqual(Path("VERSION").read_text(encoding="utf-8").strip(), "1.0.0")
+        self.assertEqual(Path("VERSION").read_text(encoding="utf-8").strip(), "1.1.0")
