@@ -144,7 +144,7 @@ class ServiceCatalogForm(forms.ModelForm):
             "memo": forms.Textarea(attrs={"rows": 3, "placeholder": "任意: ユーザー向け補足、契約メモなど"}),
         }
         help_texts = {
-            "is_active": "OFFにすると、例外申請承認時の自動紐づけと管理者の割り当て候補から外れます。既存の利用履歴は残ります。",
+            "is_active": "OFFにすると、ユーザーのサービス利用登録と管理者の割り当て候補から外れます。既存の利用履歴は残ります。",
         }
 
     def __init__(self, *args, **kwargs):
@@ -267,8 +267,84 @@ class StaffServiceForm(forms.ModelForm):
 RegisteredServiceForm = StaffServiceForm
 
 
+class UserServiceRegistrationForm(forms.Form):
+    """サービスマスターに登録済みのサービスをユーザー自身が利用開始するフォーム。"""
+
+    catalog_service = forms.ModelChoiceField(
+        label="利用を開始するサービス",
+        queryset=ServiceCatalog.objects.none(),
+        empty_label="サービスを選択",
+        help_text="管理者が登録したサービスマスターから選択します。一覧にない新規サービスだけ、別の例外申請を利用してください。",
+    )
+    memo = forms.CharField(
+        label="メモ",
+        required=False,
+        widget=forms.Textarea(attrs={"rows": 3, "placeholder": "任意: 用途、担当案件、補足など"}),
+    )
+
+    def __init__(self, *args, user: User, **kwargs):
+        self.user = user
+        super().__init__(*args, **kwargs)
+        queryset = ServiceCatalog.objects.filter(is_active=True).order_by("name", "billing_type")
+        active_services = list(RegisteredService.objects.filter(user=user, is_active=True))
+        exclude_query = Q()
+        has_exclusions = False
+        active_catalog_ids = [service.catalog_service_id for service in active_services if service.catalog_service_id]
+        if active_catalog_ids:
+            exclude_query |= Q(pk__in=active_catalog_ids)
+            has_exclusions = True
+        for service in active_services:
+            exclude_query |= Q(name__iexact=service.name, billing_type=service.billing_type)
+            has_exclusions = True
+        if has_exclusions:
+            queryset = queryset.exclude(exclude_query)
+        self.fields["catalog_service"].queryset = queryset
+        self.fields["catalog_service"].label_from_instance = lambda catalog: catalog.display_name
+        apply_design_classes(self)
+
+    def clean_catalog_service(self):
+        catalog = self.cleaned_data["catalog_service"]
+        if RegisteredService.objects.filter(user=self.user, is_active=True).filter(
+            same_service_identity_q(catalog)
+        ).exists():
+            raise forms.ValidationError("このサービス・支払い方法はすでに利用中です。")
+        return catalog
+
+    def save(self) -> RegisteredService:
+        catalog = self.cleaned_data["catalog_service"]
+        memo = (self.cleaned_data.get("memo") or "").strip()
+        service = (
+            RegisteredService.objects.filter(user=self.user)
+            .filter(same_service_identity_q(catalog))
+            .order_by("id")
+            .first()
+        )
+        if service is None:
+            service = RegisteredService(
+                user=self.user,
+                name=catalog.name,
+                catalog_service=catalog,
+                billing_type=catalog.billing_type,
+            )
+        service.catalog_service = catalog
+        service.name = catalog.name
+        service.billing_type = catalog.billing_type
+        service.is_active = True
+        service.memo = memo or service.memo
+        service.registration_source = ServiceRegistrationSource.USER
+        service.registered_by = self.user
+        service.deactivation_source = ""
+        service.deactivated_by = None
+        service.deactivated_at = None
+        service.final_receipt_month = None
+        service.stop_note = ""
+        service.full_clean()
+        service.save()
+        return service
+
+
 class ServiceExceptionRequestForm(forms.ModelForm):
-    """一般ユーザーが新しいサービスの利用開始前に提出する例外申請。"""
+    """サービスマスターに存在しない新規サービスだけを申請するフォーム。"""
 
     class Meta:
         model = ServiceExceptionRequest
@@ -288,7 +364,7 @@ class ServiceExceptionRequestForm(forms.ModelForm):
             ),
         }
         help_texts = {
-            "service_name": "正式なサービス名を入力してください。",
+            "service_name": "サービス利用登録の一覧に存在しないことを確認し、正式なサービス名を入力してください。",
             "billing_type": "サブスク、従量課金 / API、一回払い、その他から選択します。",
             "purpose": "誰が読んでも利用理由を判断できるように具体的に記載してください。",
         }
@@ -324,6 +400,26 @@ class ServiceExceptionRequestForm(forms.ModelForm):
             is_active=True,
         ).exists():
             self.add_error("service_name", "このサービス・支払い方法はすでに利用中です。")
+
+        matching_catalog = (
+            ServiceCatalog.objects.filter(
+                name__iexact=service_name,
+                billing_type=billing_type,
+            )
+            .order_by("pk")
+            .first()
+        )
+        if matching_catalog is not None:
+            if matching_catalog.is_active:
+                self.add_error(
+                    "service_name",
+                    "このサービス・支払い方法はサービスマスターに登録済みです。「サービス利用登録」から選択してください。",
+                )
+            else:
+                self.add_error(
+                    "service_name",
+                    "このサービス・支払い方法はサービスマスターに登録済みですが、現在は選択停止中です。管理者へ再開を依頼してください。",
+                )
 
         if ServiceExceptionRequest.objects.filter(
             user=self.user,

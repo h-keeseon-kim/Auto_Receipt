@@ -138,7 +138,7 @@ class ServiceExceptionRequestStatus(models.TextChoices):
 
 
 class ServiceCatalog(models.Model):
-    """管理者が登録するサービスマスター。例外申請の承認または管理者割り当てで利用サービスに紐づける。"""
+    """ユーザーの直接登録、管理者割り当て、例外申請承認で利用するサービスマスター。"""
 
     name = models.CharField("サービス名", max_length=120)
     billing_type = models.CharField("支払い種別", max_length=20, choices=BillingType.choices)
@@ -366,7 +366,7 @@ class RegisteredService(models.Model):
 
 
 class ServiceExceptionRequest(models.Model):
-    """ユーザーが新しいサービスを利用開始する前に行う例外申請。"""
+    """サービスマスターに存在しない新規サービスの利用例外申請。"""
 
     user = models.ForeignKey(
         settings.AUTH_USER_MODEL,

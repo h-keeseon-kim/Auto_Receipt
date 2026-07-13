@@ -3,18 +3,29 @@
 {% block content %}
 <section class="auth-card wide">
     <h1>{{ title }}</h1>
-    <p class="muted">新しいサービスを利用開始する前に、サービス名・支払い方法・用途を記載して申請してください。管理者が承認すると利用サービスへ自動で追加されます。</p>
+    <p class="muted">管理者がサービスマスターに登録した一覧から、現在利用しているサービスを選択します。ここでの登録に管理者承認は必要ありません。</p>
     <div class="notice section compact-notice">
-        <strong>申請前に確認してください</strong>
-        <p class="muted small">承認前にサービスの契約・課金を開始しないでください。却下された場合は管理者コメントを確認してください。</p>
+        <strong>一覧にサービスがない場合</strong>
+        <p class="muted small">この画面では自由入力せず、利用サービス画面に戻って「新規サービス例外申請」を利用してください。</p>
     </div>
-    <form method="post" class="stack">
-        {% csrf_token %}
-        {{ form.as_p }}
-        <div class="actions">
-            <button type="submit" class="button primary">{{ submit_label|default:"登録する" }}</button>
-            <a href="{{ back_url }}" class="button">戻る</a>
+    {% if available_catalog_count %}
+        <form method="post" class="stack">
+            {% csrf_token %}
+            {{ form.as_p }}
+            <div class="actions">
+                <button type="submit" class="button primary">{{ submit_label|default:"登録する" }}</button>
+                <a href="{{ back_url }}" class="button">戻る</a>
+            </div>
+        </form>
+    {% else %}
+        <div class="empty-state">
+            <p>現在、新しく利用登録できるサービスはありません。</p>
+            <p class="muted small">すでにすべて登録済みか、必要なサービスがサービスマスターに存在しません。新規サービスの場合は例外申請を行ってください。</p>
+            <div class="actions">
+                <a href="{% url 'service_exception_request_create' %}" class="button primary">新規サービス例外申請</a>
+                <a href="{{ back_url }}" class="button">戻る</a>
+            </div>
         </div>
-    </form>
+    {% endif %}
 </section>
 {% endblock %}

@@ -1,7 +1,7 @@
 (function () {
     "use strict";
 
-    const STATE_KEY = "receipthub:tutorial-state:v2";
+    const STATE_KEY = "receipthub:tutorial-state:v3";
     const STATE_MAX_AGE_MS = 1000 * 60 * 60 * 2;
 
     const USER_STEPS = [
@@ -15,15 +15,22 @@
         {
             pageName: "user_services",
             selector: "[data-tutorial-target='service-registration-button']",
-            title: "新しいサービスは例外申請します",
-            body: "新しいサービスを利用開始する前に「新規サービス例外申請」を押し、サービス名、支払い方法、用途を申請します。管理者の承認後に利用中サービスへ追加されます。",
+            title: "登録済みサービスはここから追加します",
+            body: "管理者がサービスマスターに登録したサービスは「サービス利用登録」から選択し、すぐに利用中サービスへ追加できます。管理者承認は必要ありません。",
+            placement: "left",
+        },
+        {
+            pageName: "user_services",
+            selector: "[data-tutorial-target='service-exception-button']",
+            title: "一覧にない新規サービスだけ例外申請します",
+            body: "サービス利用登録の一覧に存在しないサービスを使いたい場合だけ、サービス名、支払い方法、用途を記載して例外申請します。管理者の承認後にサービスマスターと利用サービスへ追加されます。",
             placement: "left",
         },
         {
             pageName: "user_services",
             selector: "[data-tutorial-target='service-exception-history-section']",
             title: "例外申請の状態を確認します",
-            body: "確認待ち、承認済み、却下の状態と管理者コメントをここで確認できます。承認前に契約や課金を開始しないでください。",
+            body: "サービスマスターにない新規サービスについて、確認待ち、承認済み、却下の状態と管理者コメントをここで確認できます。",
             placement: "above",
             scrollBlock: "nearest",
         },
@@ -31,7 +38,7 @@
             pageName: "user_services",
             selector: "[data-tutorial-target='active-services-section']",
             title: "利用中サービスを確認します",
-            body: "領収書アップロード時に選べるサービスは、ここに表示される利用中サービスです。管理者登録または例外申請の承認によって追加されたことも確認できます。",
+            body: "領収書アップロード時に選べるサービスは、ここに表示される利用中サービスです。ユーザー登録、管理者登録、例外申請承認のどの方法で追加されたかも確認できます。",
             placement: "above",
             scrollBlock: "nearest",
         },
@@ -157,14 +164,14 @@
             pageName: "staff_exception_requests",
             selector: "[data-tutorial-target='staff-exception-requests-nav']",
             title: "サービス例外申請を確認します",
-            body: "ユーザーから届いた新規サービスの例外申請を確認し、承認または却下します。確認待ち件数はメニューのバッジにも表示されます。",
+            body: "サービスマスターに存在しない新規サービスについて、ユーザーから届いた例外申請を確認し、承認または却下します。確認待ち件数はメニューのバッジにも表示されます。",
             placement: "below",
         },
         {
             pageName: "staff_exception_requests",
             selector: "[data-tutorial-target='staff-exception-request-list']",
             title: "承認すると利用サービスへ追加されます",
-            body: "承認するとサービスマスターを作成または再利用し、対象ユーザーの利用サービスへ自動で追加します。却下時は理由を入力します。",
+            body: "承認すると新しいサービスマスターを作成し、対象ユーザーの利用サービスへ自動で追加します。却下時は理由を入力します。",
             placement: "above",
         },
         {

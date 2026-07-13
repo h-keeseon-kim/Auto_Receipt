@@ -21,7 +21,13 @@ from .ai_filename import (
     build_result_from_ai_payload,
     filename_user_part_from_user,
 )
-from .forms import ExtraReceiptUploadForm, ReceiptBatchUploadForm, ReceiptUploadForm, ServiceExceptionRequestForm
+from .forms import (
+    ExtraReceiptUploadForm,
+    ReceiptBatchUploadForm,
+    ReceiptUploadForm,
+    ServiceExceptionRequestForm,
+    UserServiceRegistrationForm,
+)
 from .monthly_status import build_user_month_summary
 from .statement_ai import StatementAnalysisItem, StatementAnalysisResult, build_statement_result_from_payload
 from .statement_processing import process_card_statement
@@ -1737,6 +1743,150 @@ class UserServiceRegistrationTests(TestCase):
             },
         )
 
+    def test_user_registers_existing_service_master_without_exception_approval(self):
+        self.client.login(username="user@example.com", password="password123")
+
+        response = self.client.get(reverse("user_service_create"))
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "サービス利用登録")
+        self.assertContains(response, "Slack（サブスク）")
+        self.assertNotContains(response, 'name="service_name"')
+        self.assertNotContains(response, 'name="billing_type"')
+
+        response = self.client.post(
+            reverse("user_service_create"),
+            {"catalog_service": self.catalog.pk, "memo": "チーム連絡に利用"},
+        )
+
+        self.assertRedirects(response, reverse("user_services"))
+        service = RegisteredService.objects.get(user=self.user, catalog_service=self.catalog)
+        self.assertTrue(service.is_active)
+        self.assertEqual(service.registration_source, ServiceRegistrationSource.USER)
+        self.assertEqual(service.registered_by, self.user)
+        self.assertEqual(service.memo, "チーム連絡に利用")
+        self.assertFalse(ServiceExceptionRequest.objects.filter(user=self.user).exists())
+
+    def test_service_registration_and_exception_request_are_separate_actions(self):
+        self.client.login(username="user@example.com", password="password123")
+        response = self.client.get(reverse("user_services"))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "サービス利用登録")
+        self.assertContains(response, "新規サービス例外申請")
+        self.assertContains(response, "サービス登録と例外申請は別の手続きです")
+        self.assertContains(response, 'data-tutorial-target="service-registration-button"')
+        self.assertContains(response, 'data-tutorial-target="service-exception-button"')
+
+    def test_exception_request_rejects_service_already_in_active_catalog(self):
+        self.client.login(username="user@example.com", password="password123")
+        response = self.client.post(
+            reverse("service_exception_request_create"),
+            {
+                "service_name": "slack",
+                "billing_type": BillingType.SUBSCRIPTION,
+                "purpose": "チーム連絡",
+            },
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "サービスマスターに登録済みです")
+        self.assertContains(response, "サービス利用登録")
+        self.assertFalse(ServiceExceptionRequest.objects.filter(user=self.user).exists())
+
+    def test_exception_request_rejects_inactive_catalog_and_asks_admin_reactivation(self):
+        ServiceCatalog.objects.create(
+            name="Old Service",
+            billing_type=BillingType.OTHER,
+            is_active=False,
+            created_by=self.admin,
+        )
+        self.client.login(username="user@example.com", password="password123")
+        response = self.client.post(
+            reverse("service_exception_request_create"),
+            {
+                "service_name": "old service",
+                "billing_type": BillingType.OTHER,
+                "purpose": "既存契約の再開",
+            },
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "現在は選択停止中です")
+        self.assertFalse(ServiceExceptionRequest.objects.filter(user=self.user).exists())
+
+    def test_user_service_registration_form_excludes_active_and_inactive_catalogs(self):
+        inactive_catalog = ServiceCatalog.objects.create(
+            name="Inactive Tool",
+            billing_type=BillingType.OTHER,
+            is_active=False,
+            created_by=self.admin,
+        )
+        active_service = RegisteredService.objects.create(
+            user=self.user,
+            catalog_service=self.catalog,
+            name=self.catalog.name,
+            billing_type=self.catalog.billing_type,
+            registration_source=ServiceRegistrationSource.USER,
+            registered_by=self.user,
+        )
+
+        form = UserServiceRegistrationForm(user=self.user)
+        catalog_ids = set(form.fields["catalog_service"].queryset.values_list("id", flat=True))
+
+        self.assertNotIn(active_service.catalog_service_id, catalog_ids)
+        self.assertNotIn(inactive_catalog.pk, catalog_ids)
+
+    def test_user_can_register_same_service_name_with_different_billing_types(self):
+        subscription = ServiceCatalog.objects.create(
+            name="ChatGPT",
+            billing_type=BillingType.SUBSCRIPTION,
+            created_by=self.admin,
+        )
+        metered = ServiceCatalog.objects.create(
+            name="ChatGPT",
+            billing_type=BillingType.METERED,
+            created_by=self.admin,
+        )
+        self.client.login(username="user@example.com", password="password123")
+
+        first = self.client.post(reverse("user_service_create"), {"catalog_service": subscription.pk})
+        second = self.client.post(reverse("user_service_create"), {"catalog_service": metered.pk})
+
+        self.assertRedirects(first, reverse("user_services"))
+        self.assertRedirects(second, reverse("user_services"))
+        services = RegisteredService.objects.filter(user=self.user, name="ChatGPT")
+        self.assertEqual(services.count(), 2)
+        self.assertEqual(
+            set(services.values_list("billing_type", flat=True)),
+            {BillingType.SUBSCRIPTION, BillingType.METERED},
+        )
+
+    def test_user_registration_reactivates_stopped_service_without_exception_request(self):
+        stopped = RegisteredService.objects.create(
+            user=self.user,
+            catalog_service=self.catalog,
+            name=self.catalog.name,
+            billing_type=self.catalog.billing_type,
+            is_active=False,
+            registration_source=ServiceRegistrationSource.USER,
+            registered_by=self.user,
+            deactivation_source=ServiceDeactivationSource.USER,
+            deactivated_by=self.user,
+            final_receipt_month=date(2026, 6, 1),
+            stop_note="一時停止",
+        )
+        self.client.login(username="user@example.com", password="password123")
+
+        response = self.client.post(reverse("user_service_create"), {"catalog_service": self.catalog.pk})
+
+        self.assertRedirects(response, reverse("user_services"))
+        stopped.refresh_from_db()
+        self.assertTrue(stopped.is_active)
+        self.assertEqual(stopped.deactivation_source, "")
+        self.assertIsNone(stopped.final_receipt_month)
+        self.assertEqual(stopped.stop_note, "")
+        self.assertFalse(ServiceExceptionRequest.objects.filter(user=self.user).exists())
+
     def test_exception_application_form_requires_service_payment_method_and_purpose(self):
         form = ServiceExceptionRequestForm(
             data={"service_name": "", "billing_type": "", "purpose": ""},
@@ -1762,9 +1912,9 @@ class UserServiceRegistrationTests(TestCase):
 
         page = self.client.get(reverse("user_services"))
         self.assertContains(page, "新規サービス例外申請")
+        self.assertContains(page, "サービス利用登録")
         self.assertContains(page, "確認待ち")
         self.assertContains(page, "Figma")
-        self.assertNotContains(page, "サービス利用登録")
 
     def test_staff_gets_pending_notice_and_can_approve_request(self):
         self.submit_exception_request(name="Figma", purpose="UIデザインと共同編集")
@@ -1799,15 +1949,15 @@ class UserServiceRegistrationTests(TestCase):
         self.user.profile.refresh_from_db()
         self.assertEqual(self.user.profile.account_status, UserAccountStatus.ACTIVE)
 
-    def test_approval_reuses_and_reactivates_matching_catalog(self):
+    def test_approval_reuses_catalog_created_after_exception_submission(self):
+        self.submit_exception_request(name="figma")
+        request_item = ServiceExceptionRequest.objects.get(user=self.user)
         inactive_catalog = ServiceCatalog.objects.create(
             name="Figma",
             billing_type=BillingType.SUBSCRIPTION,
             is_active=False,
             created_by=self.admin,
         )
-        self.submit_exception_request(name="figma")
-        request_item = ServiceExceptionRequest.objects.get(user=self.user)
         self.client.logout()
         self.client.login(username="admin", password="admin-password-123")
 
@@ -1953,6 +2103,7 @@ class TutorialTests(TestCase):
         self.assertContains(response, 'data-auto-start="true"')
         self.assertContains(response, 'data-tutorial-target="user-services-nav"')
         self.assertContains(response, 'data-tutorial-target="service-registration-button"')
+        self.assertContains(response, 'data-tutorial-target="service-exception-button"')
         self.assertNotContains(response, "完了後も右上の「?」からいつでも再表示できます。")
         self.assertNotContains(response, "data-tutorial-hint")
         self.assertNotContains(response, "tutorial-note")
@@ -2974,4 +3125,4 @@ class FinalWorkflowAcceptanceTests(TestCase):
         self.assertEqual(response.status_code, 404)
 
     def test_version_file_is_present_without_web_display_requirement(self):
-        self.assertEqual(Path("VERSION").read_text(encoding="utf-8").strip(), "1.4.0")
+        self.assertEqual(Path("VERSION").read_text(encoding="utf-8").strip(), "1.4.1")

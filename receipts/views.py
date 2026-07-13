@@ -49,6 +49,7 @@ from .forms import (
     EmailReminderScheduleForm,
     StaffEmailTestForm,
     StyledPasswordChangeForm,
+    UserServiceRegistrationForm,
     UserServiceStopForm,
     current_month,
 )
@@ -407,6 +408,9 @@ def user_services(request):
     services = RegisteredService.objects.filter(user=request.user).select_related("catalog_service", "registered_by", "deactivated_by").order_by("-is_active", "name", "billing_type")
     active_services = [service for service in services if service.is_active]
     stopped_services = [service for service in services if not service.is_active]
+    available_catalog_count = UserServiceRegistrationForm(user=request.user).fields[
+        "catalog_service"
+    ].queryset.count()
     exception_requests = ServiceExceptionRequest.objects.filter(user=request.user).select_related(
         "reviewed_by",
         "approved_registered_service",
@@ -419,6 +423,7 @@ def user_services(request):
             "services": services,
             "active_services": active_services,
             "stopped_services": stopped_services,
+            "available_catalog_count": available_catalog_count,
             "exception_requests": exception_requests,
             "pending_exception_count": pending_exception_count,
         },
@@ -427,6 +432,44 @@ def user_services(request):
 
 @login_required
 def user_service_create(request):
+    if request.user.is_staff:
+        return redirect("staff_services")
+    if request.method == "POST":
+        form = UserServiceRegistrationForm(request.POST, user=request.user)
+        if form.is_valid():
+            try:
+                with transaction.atomic():
+                    service = form.save()
+            except ValidationError as exc:
+                add_validation_errors(form, exc)
+            except IntegrityError:
+                # 二重クリックや同時POSTでも500にせず、すでに登録済みとして案内する。
+                form.add_error(None, "このサービス・支払い方法はすでに利用サービスへ登録されています。")
+            else:
+                messages.success(
+                    request,
+                    f"{service.display_name} を利用サービスとして登録しました。管理者画面にもユーザー登録として記録されます。",
+                )
+                return redirect("user_services")
+    else:
+        form = UserServiceRegistrationForm(user=request.user)
+    return render(
+        request,
+        "receipts/user_service_form.html",
+        {
+            "title": "サービス利用登録",
+            "form": form,
+            "submit_label": "利用サービスへ登録する",
+            "back_url": reverse("user_services"),
+            "available_catalog_count": form.fields["catalog_service"].queryset.count(),
+        },
+    )
+
+
+@login_required
+def service_exception_request_create(request):
+    """サービスマスターに存在しないサービスについてのみ例外申請を受け付ける。"""
+
     if request.user.is_staff:
         return redirect("staff_exception_requests")
     if request.method == "POST":
@@ -448,12 +491,13 @@ def user_service_create(request):
         form = ServiceExceptionRequestForm(user=request.user)
     return render(
         request,
-        "receipts/user_service_form.html",
+        "receipts/service_exception_request_form.html",
         {
             "title": "新規サービス例外申請",
             "form": form,
             "submit_label": "例外申請を提出する",
             "back_url": reverse("user_services"),
+            "service_registration_url": reverse("user_service_create"),
         },
     )
 

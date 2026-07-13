@@ -4,13 +4,14 @@
 <div class="page-title" data-tutorial-target="user-services-page">
     <div>
         <h1>利用サービス管理</h1>
-        <p class="muted">新しいサービスを利用開始する前に例外申請を提出します。管理者の承認後に利用中サービスへ追加されます。</p>
+        <p class="muted">サービスマスターに登録済みのサービスは自分で利用登録できます。一覧にない新規サービスだけ、例外申請を行ってください。</p>
     </div>
 </div>
 
 <section class="status-grid">
     <div class="card"><span class="label">利用中サービス</span><strong>{{ active_services|length }}</strong></div>
     <div class="card"><span class="label">停止済みサービス</span><strong>{{ stopped_services|length }}</strong></div>
+    <div class="card"><span class="label">利用登録できるサービス</span><strong>{{ available_catalog_count }}</strong></div>
     <div class="card"><span class="label">確認待ちの例外申請</span><strong>{{ pending_exception_count }}</strong></div>
 </section>
 
@@ -21,7 +22,7 @@
             <p class="muted">領収書アップロード時に通常表示されるサービスです。</p>
         </div>
         <div class="actions">
-            <a class="button primary" href="{% url 'service_exception_request_create' %}" data-tutorial-target="service-registration-button">新規サービス例外申請</a>
+            <a class="button primary" href="{% url 'user_service_create' %}" data-tutorial-target="service-registration-button">サービス利用登録</a>
         </div>
     </div>
     <div class="table-wrap">
@@ -39,10 +40,26 @@
                         </td>
                     </tr>
                 {% empty %}
-                    <tr><td colspan="5" class="muted center">利用中サービスはありません。</td></tr>
+                    <tr><td colspan="5" class="muted center">利用中サービスはありません。「サービス利用登録」からサービスマスターに登録済みのサービスを選択してください。</td></tr>
                 {% endfor %}
             </tbody>
         </table>
+    </div>
+</section>
+
+<section class="card section" data-tutorial-target="service-exception-section">
+    <div class="section-header">
+        <div>
+            <h2>サービスマスターにない新規サービス</h2>
+            <p class="muted">「サービス利用登録」の一覧に存在しないサービスを新たに使いたい場合だけ、例外申請を提出します。</p>
+        </div>
+        <div class="actions">
+            <a class="button" href="{% url 'service_exception_request_create' %}" data-tutorial-target="service-exception-button">新規サービス例外申請</a>
+        </div>
+    </div>
+    <div class="notice compact-notice">
+        <strong>サービス登録と例外申請は別の手続きです</strong>
+        <p class="muted small">サービスマスターにあるサービスは「サービス利用登録」から即時登録します。サービスマスターにない新規サービスだけ、サービス名・支払い方法・用途を記載して管理者へ申請してください。</p>
     </div>
 </section>
 
@@ -50,7 +67,7 @@
     <div class="section-header">
         <div>
             <h2>例外申請履歴</h2>
-            <p class="muted">確認待ち、承認済み、却下の状態と管理者コメントを確認できます。</p>
+            <p class="muted">サービスマスターに存在しなかった新規サービスについて、確認待ち・承認済み・却下と管理者コメントを確認できます。</p>
         </div>
     </div>
     <div class="table-wrap">

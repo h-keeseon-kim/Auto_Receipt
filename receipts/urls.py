@@ -8,7 +8,11 @@ urlpatterns = [
     path("dashboard/", views.dashboard, name="dashboard"),
     path("my/services/", views.user_services, name="user_services"),
     path("my/services/add/", views.user_service_create, name="user_service_create"),
-    path("my/services/exception-request/", views.user_service_create, name="service_exception_request_create"),
+    path(
+        "my/services/exception-request/",
+        views.service_exception_request_create,
+        name="service_exception_request_create",
+    ),
     path("my/services/<int:pk>/stop/", views.user_service_stop, name="user_service_stop"),
     # 旧URL互換。一般ユーザー画面からは表示せず、管理者専用画面へ移行済み。
     path("services/new/", views.service_create, name="service_create"),
