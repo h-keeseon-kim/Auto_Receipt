@@ -22,6 +22,8 @@ from .models import (
     RegisteredService,
     ServiceCatalog,
     ServiceDeactivationSource,
+    ServiceExceptionRequest,
+    ServiceExceptionRequestStatus,
     ServiceRegistrationSource,
     UserAccountStatus,
     UserProfile,
@@ -142,7 +144,7 @@ class ServiceCatalogForm(forms.ModelForm):
             "memo": forms.Textarea(attrs={"rows": 3, "placeholder": "任意: ユーザー向け補足、契約メモなど"}),
         }
         help_texts = {
-            "is_active": "OFFにすると、ユーザーの新規利用登録画面と管理者の割り当て画面から外れます。既存の利用履歴は残ります。",
+            "is_active": "OFFにすると、例外申請承認時の自動紐づけと管理者の割り当て候補から外れます。既存の利用履歴は残ります。",
         }
 
     def __init__(self, *args, **kwargs):
@@ -265,71 +267,124 @@ class StaffServiceForm(forms.ModelForm):
 RegisteredServiceForm = StaffServiceForm
 
 
-class UserServiceRegistrationForm(forms.Form):
-    catalog_service = forms.ModelChoiceField(
-        label="新しく利用するサービス",
-        queryset=ServiceCatalog.objects.none(),
-        empty_label="サービスを選択",
-        help_text="管理者が登録したサービスマスターから選択します。一覧にない場合は管理者へ追加を依頼してください。",
-    )
-    memo = forms.CharField(
-        label="メモ",
-        required=False,
-        widget=forms.Textarea(attrs={"rows": 3, "placeholder": "任意: 用途、補足など"}),
-    )
+class ServiceExceptionRequestForm(forms.ModelForm):
+    """一般ユーザーが新しいサービスの利用開始前に提出する例外申請。"""
+
+    class Meta:
+        model = ServiceExceptionRequest
+        fields = ["service_name", "billing_type", "purpose"]
+        labels = {
+            "service_name": "サービス名",
+            "billing_type": "支払い方法",
+            "purpose": "用途",
+        }
+        widgets = {
+            "service_name": forms.TextInput(attrs={"placeholder": "例: ChatGPT / Claude / Figma"}),
+            "purpose": forms.Textarea(
+                attrs={
+                    "rows": 5,
+                    "placeholder": "例: 広告クリエイティブ制作における画像生成と検証に使用します。",
+                }
+            ),
+        }
+        help_texts = {
+            "service_name": "正式なサービス名を入力してください。",
+            "billing_type": "サブスク、従量課金 / API、一回払い、その他から選択します。",
+            "purpose": "誰が読んでも利用理由を判断できるように具体的に記載してください。",
+        }
 
     def __init__(self, *args, user: User, **kwargs):
         self.user = user
         super().__init__(*args, **kwargs)
-        queryset = ServiceCatalog.objects.filter(is_active=True).order_by("name", "billing_type")
-        active_services = list(RegisteredService.objects.filter(user=user, is_active=True))
-        exclude_query = Q()
-        has_exclusions = False
-        active_catalog_ids = [service.catalog_service_id for service in active_services if service.catalog_service_id]
-        if active_catalog_ids:
-            exclude_query |= Q(pk__in=active_catalog_ids)
-            has_exclusions = True
-        for service in active_services:
-            exclude_query |= Q(name__iexact=service.name, billing_type=service.billing_type)
-            has_exclusions = True
-        if has_exclusions:
-            queryset = queryset.exclude(exclude_query)
-        self.fields["catalog_service"].queryset = queryset
-        self.fields["catalog_service"].label_from_instance = lambda catalog: catalog.display_name
         apply_design_classes(self)
 
-    def clean_catalog_service(self):
-        catalog = self.cleaned_data["catalog_service"]
-        active_duplicate = RegisteredService.objects.filter(user=self.user, is_active=True).filter(same_service_identity_q(catalog))
-        if active_duplicate.exists():
-            raise forms.ValidationError("このサービス・支払い種別はすでに利用中です。")
-        return catalog
+    def clean_service_name(self):
+        name = " ".join((self.cleaned_data.get("service_name") or "").strip().split())
+        if not name:
+            raise forms.ValidationError("サービス名を入力してください。")
+        return name
 
-    def save(self) -> RegisteredService:
-        catalog = self.cleaned_data["catalog_service"]
-        memo = self.cleaned_data.get("memo", "")
-        service = RegisteredService.objects.filter(user=self.user).filter(same_service_identity_q(catalog)).order_by("id").first()
-        if service is None:
-            service = RegisteredService(
-                user=self.user,
-                name=catalog.name,
-                catalog_service=catalog,
-                billing_type=catalog.billing_type,
+    def clean_purpose(self):
+        purpose = (self.cleaned_data.get("purpose") or "").strip()
+        if not purpose:
+            raise forms.ValidationError("利用目的を入力してください。")
+        return purpose
+
+    def clean(self):
+        cleaned = super().clean()
+        service_name = cleaned.get("service_name")
+        billing_type = cleaned.get("billing_type")
+        if not service_name or not billing_type:
+            return cleaned
+
+        if RegisteredService.objects.filter(
+            user=self.user,
+            name__iexact=service_name,
+            billing_type=billing_type,
+            is_active=True,
+        ).exists():
+            self.add_error("service_name", "このサービス・支払い方法はすでに利用中です。")
+
+        if ServiceExceptionRequest.objects.filter(
+            user=self.user,
+            service_name__iexact=service_name,
+            billing_type=billing_type,
+            status=ServiceExceptionRequestStatus.PENDING,
+        ).exists():
+            self.add_error("service_name", "同じサービス・支払い方法の例外申請がすでに確認待ちです。")
+        return cleaned
+
+    def save(self, commit=True):
+        request_item = super().save(commit=False)
+        request_item.user = self.user
+        request_item.status = ServiceExceptionRequestStatus.PENDING
+        if commit:
+            request_item.full_clean()
+            request_item.save()
+        return request_item
+
+
+class StaffServiceExceptionReviewForm(forms.Form):
+    DECISION_APPROVE = "approve"
+    DECISION_REJECT = "reject"
+    DECISION_CHOICES = (
+        (DECISION_APPROVE, "承認"),
+        (DECISION_REJECT, "却下"),
+    )
+
+    request_id = forms.IntegerField(widget=forms.HiddenInput)
+    decision = forms.ChoiceField(choices=DECISION_CHOICES, widget=forms.HiddenInput)
+    review_note = forms.CharField(
+        label="管理者コメント",
+        required=False,
+        max_length=2000,
+        widget=forms.Textarea(
+            attrs={
+                "rows": 3,
+                "placeholder": "承認時の補足、または却下理由を入力してください。却下時は必須です。",
+            }
+        ),
+    )
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        apply_design_classes(self)
+
+    def clean_request_id(self):
+        request_id = self.cleaned_data["request_id"]
+        try:
+            return ServiceExceptionRequest.objects.select_related("user").get(
+                pk=request_id,
+                status=ServiceExceptionRequestStatus.PENDING,
             )
-        service.catalog_service = catalog
-        service.name = catalog.name
-        service.billing_type = catalog.billing_type
-        service.is_active = True
-        service.memo = memo or service.memo
-        service.registration_source = ServiceRegistrationSource.USER
-        service.registered_by = self.user
-        service.deactivation_source = ""
-        service.deactivated_by = None
-        service.deactivated_at = None
-        service.final_receipt_month = None
-        service.stop_note = ""
-        service.save()
-        return service
+        except ServiceExceptionRequest.DoesNotExist as exc:
+            raise forms.ValidationError("対象の例外申請は確認済み、または存在しません。") from exc
+
+    def clean(self):
+        cleaned = super().clean()
+        if cleaned.get("decision") == self.DECISION_REJECT and not (cleaned.get("review_note") or "").strip():
+            self.add_error("review_note", "却下する場合は理由を入力してください。")
+        return cleaned
 
 
 class UserServiceStopForm(forms.Form):
@@ -357,6 +412,117 @@ class UserServiceStopForm(forms.Form):
             note=self.cleaned_data.get("stop_note", ""),
         )
         return self.service
+
+
+class MultipleFileInput(forms.ClearableFileInput):
+    allow_multiple_selected = True
+
+
+class MultipleFileField(forms.FileField):
+    """複数ファイルを1回の選択で検証して返すFileField。"""
+
+    widget = MultipleFileInput
+
+    def clean(self, data, initial=None):
+        single_clean = super().clean
+        if not data:
+            return []
+        if isinstance(data, (list, tuple)):
+            return [single_clean(item, initial) for item in data]
+        return [single_clean(data, initial)]
+
+
+class ReceiptBatchUploadForm(forms.Form):
+    """登録サービスまたは「その他」を選び、1件以上の領収書をまとめて追加する。"""
+
+    OTHER_VALUE = "other"
+
+    service = forms.ChoiceField(
+        label="サービス",
+        choices=(),
+        help_text="登録済みサービス、または「その他」を選択します。",
+    )
+    memo = forms.CharField(
+        label="その他の内容メモ",
+        required=False,
+        max_length=500,
+        widget=forms.Textarea(
+            attrs={
+                "rows": 3,
+                "placeholder": "例: OpenAIからの返金領収書 / プラン変更に伴う追加請求",
+            }
+        ),
+        help_text="「その他」を選択した場合は必須です。AIはメモを参考にしますが、領収書ファイル内の記載を優先します。",
+    )
+    files = MultipleFileField(
+        label="領収書ファイル",
+        required=True,
+        validators=[
+            FileExtensionValidator(allowed_extensions=["pdf", "png", "jpg", "jpeg", "webp"]),
+            validate_upload_size,
+        ],
+        widget=MultipleFileInput(
+            attrs={
+                "accept": ".pdf,.png,.jpg,.jpeg,.webp",
+                "multiple": True,
+            }
+        ),
+        help_text="PDF / PNG / JPG / JPEG / WEBP。複数ファイルを一度に選択できます。各ファイル最大10MB。",
+    )
+
+    def __init__(self, *args, user: User, period_month=None, selected_choice: str = "", **kwargs):
+        self.user = user
+        self.period_month = period_month
+        self.selected_service: RegisteredService | None = None
+        self.is_extra = False
+        super().__init__(*args, **kwargs)
+
+        services = list(
+            RegisteredService.objects.uploadable_for(user, period_month)
+            .select_related("catalog_service")
+            .order_by("-is_active", "name", "billing_type")
+        )
+        choices: list[tuple[str, str]] = [("", "サービスを選択")]
+        for service in services:
+            label = ReceiptUploadForm.service_label(service)
+            choices.append((str(service.pk), label))
+        choices.append((self.OTHER_VALUE, "その他"))
+        self.fields["service"].choices = choices
+
+        valid_values = {value for value, _label in choices}
+        if not self.is_bound and selected_choice in valid_values:
+            self.initial["service"] = selected_choice
+        apply_design_classes(self)
+        self.fields["files"].widget.attrs["class"] = "sr-only"
+
+    def clean_service(self):
+        value = self.cleaned_data.get("service") or ""
+        if value == self.OTHER_VALUE:
+            self.is_extra = True
+            self.selected_service = None
+            return value
+        try:
+            service_id = int(value)
+        except (TypeError, ValueError) as exc:
+            raise forms.ValidationError("サービスを選択してください。") from exc
+        service = RegisteredService.objects.filter(pk=service_id, user=self.user).first()
+        if service is None or not service.is_uploadable_for(self.period_month):
+            raise forms.ValidationError("この提出月で利用できるサービスを選択してください。")
+        self.is_extra = False
+        self.selected_service = service
+        return value
+
+    def clean_memo(self):
+        return (self.cleaned_data.get("memo") or "").strip()
+
+    def clean(self):
+        cleaned = super().clean()
+        if cleaned.get("service") == self.OTHER_VALUE and not cleaned.get("memo"):
+            self.add_error("memo", "「その他」を選択した場合は、どのような領収書かをメモに入力してください。")
+        files = cleaned.get("files") or []
+        if not files:
+            self.add_error("files", "領収書ファイルを1件以上選択してください。")
+        return cleaned
 
 
 class ReceiptUploadForm(forms.ModelForm):

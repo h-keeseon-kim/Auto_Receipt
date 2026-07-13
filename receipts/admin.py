@@ -10,6 +10,7 @@ from .models import (
     ReceiptResubmissionRequest,
     RegisteredService,
     ServiceCatalog,
+    ServiceExceptionRequest,
     Submission,
     UserProfile,
 )
@@ -98,6 +99,22 @@ class RegisteredServiceAdmin(admin.ModelAdmin):
     list_filter = ("billing_type", "is_active", "registration_source", "deactivation_source", "final_receipt_month")
     search_fields = ("name", "user__username", "user__email", "memo", "stop_note")
     readonly_fields = ("created_at", "updated_at", "deactivated_at")
+
+
+@admin.register(ServiceExceptionRequest)
+class ServiceExceptionRequestAdmin(admin.ModelAdmin):
+    list_display = (
+        "user",
+        "service_name",
+        "billing_type",
+        "status",
+        "reviewed_by",
+        "created_at",
+        "reviewed_at",
+    )
+    list_filter = ("status", "billing_type", "created_at", "reviewed_at")
+    search_fields = ("user__username", "user__email", "service_name", "purpose", "review_note")
+    readonly_fields = ("created_at", "updated_at", "reviewed_at")
 
 
 @admin.register(Submission)

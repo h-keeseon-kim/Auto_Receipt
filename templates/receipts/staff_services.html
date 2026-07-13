@@ -18,7 +18,7 @@
     <div class="section-header">
         <div>
             <h2>サービスマスター</h2>
-            <p class="muted">一般ユーザーは、この選択可能なマスター一覧から新しい利用サービスを登録できます。</p>
+            <p class="muted">管理者による登録、または例外申請の承認時に利用するサービスマスターです。</p>
         </div>
         <a class="button" href="{% url 'staff_catalog_create' %}">サービスマスター登録</a>
     </div>
@@ -105,7 +105,7 @@
                 <div class="card"><span class="label">ユーザー</span><strong>{{ selected_user.username }}</strong></div>
                 <div class="card"><span class="label">利用中サービス</span><strong>{{ selected_user.active_service_count }}</strong></div>
                 <div class="card"><span class="label">登録サービス合計</span><strong>{{ selected_user.total_service_count }}</strong></div>
-                <div class="card"><span class="label">ユーザー登録</span><strong>{{ selected_user.user_registered_count }}</strong></div>
+                <div class="card"><span class="label">ユーザー起点登録</span><strong>{{ selected_user.user_registered_count }}</strong></div>
                 <div class="card"><span class="label">ユーザー停止</span><strong>{{ selected_user.user_stopped_count }}</strong></div>
             </section>
         </div>
@@ -159,7 +159,7 @@
             <div class="section-header compact">
                 <div>
                     <h3>新規登録/停止</h3>
-                    <p class="muted">ユーザー自身による利用登録、または利用停止を新しい順に表示します。</p>
+                    <p class="muted">例外申請の承認による登録、過去のユーザー登録、またはユーザーによる利用停止を新しい順に表示します。</p>
                 </div>
             </div>
             <div class="table-wrap scroll-box medium table-scroll-wide">

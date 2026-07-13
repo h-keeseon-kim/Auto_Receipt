@@ -16,8 +16,8 @@ from django.contrib.auth.models import User
 from django.contrib.auth.views import PasswordChangeView
 from django.core.exceptions import PermissionDenied, ValidationError
 from django.core.paginator import Paginator
-from django.db import transaction
-from django.db.models import Count, Prefetch, Q
+from django.db import IntegrityError, transaction
+from django.db.models import Case, Count, IntegerField, Prefetch, Q, When
 from django.http import FileResponse, Http404, HttpResponse, JsonResponse
 from django.utils.http import url_has_allowed_host_and_scheme
 from django.shortcuts import get_object_or_404, redirect, render
@@ -33,11 +33,13 @@ from .emailing import send_test_email
 from .forms import (
     MonthSelectForm,
     CardStatementUploadForm,
-    ExtraReceiptUploadForm,
+    ReceiptBatchUploadForm,
     ReceiptFileReplaceForm,
     ReceiptUploadForm,
     RegisterForm,
+    ServiceExceptionRequestForm,
     ServiceCatalogForm,
+    StaffServiceExceptionReviewForm,
     StaffServiceForm,
     StaffUserCreateForm,
     StaffSuperuserEmailForm,
@@ -47,7 +49,6 @@ from .forms import (
     EmailReminderScheduleForm,
     StaffEmailTestForm,
     StyledPasswordChangeForm,
-    UserServiceRegistrationForm,
     UserServiceStopForm,
     current_month,
 )
@@ -68,6 +69,8 @@ from .models import (
     ResubmissionRequestStatus,
     ServiceCatalog,
     ServiceDeactivationSource,
+    ServiceExceptionRequest,
+    ServiceExceptionRequestStatus,
     ServiceRegistrationSource,
     StatementMatchStatus,
     Submission,
@@ -148,6 +151,73 @@ def resolve_matching_resubmission_requests(receipt: Receipt, *, by) -> int:
     ).update(status=ResubmissionRequestStatus.RESOLVED, resolved_at=now, resolved_by=by)
 
 
+def save_receipt_batch(*, submission: Submission, form: ReceiptBatchUploadForm, uploaded_by) -> tuple[list[Receipt], bool, int]:
+    """複数ファイルを同じサービス（またはその他）へ一括登録する。
+
+    提出済み月へ追加した場合は下書きへ戻す。DBロールバック時に、先に保存された
+    ストレージファイルが孤児化しないよう可能な範囲で削除する。
+    """
+
+    uploads = list(form.cleaned_data.get("files") or [])
+    service = form.selected_service
+    is_extra = form.is_extra
+    memo = (form.cleaned_data.get("memo") or "").strip() if is_extra else ""
+    was_submitted = submission.is_submitted
+    created_receipts: list[Receipt] = []
+
+    try:
+        with transaction.atomic():
+            locked_submission = Submission.objects.select_for_update().get(pk=submission.pk)
+            was_submitted = locked_submission.is_submitted
+            if was_submitted:
+                locked_submission.status = SubmissionStatus.DRAFT
+                locked_submission.submitted_at = None
+                locked_submission.save(update_fields=["status", "submitted_at", "updated_at"])
+
+            for upload in uploads:
+                receipt = Receipt(
+                    submission=locked_submission,
+                    service=None if is_extra else service,
+                    is_extra=is_extra,
+                    service_name_snapshot="その他" if is_extra else service.name,
+                    billing_type_snapshot=BillingType.OTHER if is_extra else service.billing_type,
+                    memo=memo,
+                    file=upload,
+                    original_filename=upload.name,
+                    file_size=upload.size,
+                    content_type=getattr(upload, "content_type", "") or "",
+                    expires_at=receipt_expiry_from(timezone.now()),
+                )
+                receipt.full_clean()
+                created_receipts.append(receipt)
+                receipt.save()
+
+            if service is not None:
+                MonthlyServiceDeclaration.objects.filter(
+                    user=uploaded_by,
+                    service=service,
+                    period_month=locked_submission.period_month,
+                ).delete()
+    except Exception:
+        for receipt in created_receipts:
+            try:
+                if (
+                    receipt.file
+                    and getattr(receipt.file, "_committed", False)
+                    and receipt.file.name
+                    and receipt.file.storage.exists(receipt.file.name)
+                ):
+                    receipt.file.storage.delete(receipt.file.name)
+            except Exception:
+                pass
+        raise
+
+    resolved_count = 0
+    for receipt in created_receipts:
+        resolved_count += resolve_matching_resubmission_requests(receipt, by=uploaded_by)
+    return created_receipts, was_submitted, resolved_count
+
+
 def managed_users_queryset():
     return User.objects.filter(is_active=True, is_staff=False, is_superuser=False).select_related("profile").order_by("username")
 
@@ -210,9 +280,13 @@ def dashboard(request):
         status=ResubmissionRequestStatus.OPEN,
     ).order_by("service_name_snapshot", "created_at")
 
-    receipt_form = ReceiptUploadForm(user=request.user, period_month=selected_month)
-    extra_receipt_form = ExtraReceiptUploadForm()
-    extra_form_open = False
+    selected_upload_choice = request.GET.get("service", "")
+    upload_form = ReceiptBatchUploadForm(
+        user=request.user,
+        period_month=selected_month,
+        selected_choice=selected_upload_choice,
+    )
+
     if request.method == "POST":
         action = request.POST.get("action")
 
@@ -249,77 +323,53 @@ def dashboard(request):
                     messages.success(request, f"{service.display_name} の『当月利用なし』を取り消しました。")
             return redirect(f"{reverse('dashboard')}?month={month_query(selected_month)}")
 
-        if action == "add_extra_receipt":
-            extra_form_open = True
-            extra_receipt_form = ExtraReceiptUploadForm(request.POST, request.FILES)
-            if extra_receipt_form.is_valid():
-                upload = request.FILES["file"]
-                receipt = extra_receipt_form.save(commit=False)
-                receipt.submission = submission
-                receipt.original_filename = upload.name
-                receipt.file_size = upload.size
-                receipt.content_type = getattr(upload, "content_type", "") or ""
-                receipt.expires_at = receipt_expiry_from(timezone.now())
-                was_submitted = submission.is_submitted
+        if action in {"add_receipts", "add_receipt", "add_extra_receipt"}:
+            # v1.3系の画面を開いたままデプロイされた場合も、旧単一ファイルPOSTを受け付ける。
+            form_data = request.POST.copy()
+            files_data = request.FILES.copy()
+            if action == "add_receipt":
+                form_data["service"] = request.POST.get("service", "")
+                files_data.setlist("files", request.FILES.getlist("file"))
+            elif action == "add_extra_receipt":
+                form_data["service"] = ReceiptBatchUploadForm.OTHER_VALUE
+                files_data.setlist("files", request.FILES.getlist("file"))
+            upload_form = ReceiptBatchUploadForm(
+                form_data,
+                files_data,
+                user=request.user,
+                period_month=selected_month,
+            )
+            if upload_form.is_valid():
                 try:
-                    with transaction.atomic():
-                        if was_submitted:
-                            submission.status = SubmissionStatus.DRAFT
-                            submission.submitted_at = None
-                            submission.save(update_fields=["status", "submitted_at", "updated_at"])
-                        receipt.full_clean()
-                        receipt.save()
-                except ValidationError as exc:
-                    if was_submitted:
-                        submission.refresh_from_db(fields=["status", "submitted_at", "updated_at"])
-                    add_validation_errors(extra_receipt_form, exc)
-                else:
-                    resolved_count = resolve_matching_resubmission_requests(receipt, by=request.user)
-                    if resolved_count:
-                        messages.success(request, "その他の領収書の再提出依頼を対応済みにしました。")
-                    if was_submitted:
-                        messages.info(request, "追加領収書を登録したため、この月を下書きに戻しました。内容を確認して再度提出してください。")
-                    messages.success(
-                        request,
-                        "その他の領収書を追加しました。メモはAIの参考情報として使われますが、領収書ファイル内の情報を優先してファイル名修正・検査を行います。",
+                    created_receipts, was_submitted, resolved_count = save_receipt_batch(
+                        submission=submission,
+                        form=upload_form,
+                        uploaded_by=request.user,
                     )
-                    return redirect(f"{reverse('dashboard')}?month={month_query(selected_month)}")
-
-        elif submission.is_submitted:
-            messages.error(request, "この提出月はすでに提出済みのため編集できません。")
-            return redirect(submission.get_absolute_url())
-
-        elif action == "add_receipt":
-            receipt_form = ReceiptUploadForm(request.POST, request.FILES, user=request.user, period_month=selected_month)
-            if receipt_form.is_valid():
-                upload = request.FILES["file"]
-                receipt = receipt_form.save(commit=False)
-                receipt.submission = submission
-                receipt.service_name_snapshot = receipt.service.name
-                receipt.billing_type_snapshot = receipt.service.billing_type
-                receipt.original_filename = upload.name
-                receipt.file_size = upload.size
-                receipt.content_type = getattr(upload, "content_type", "") or ""
-                receipt.expires_at = receipt_expiry_from(timezone.now())
-                try:
-                    receipt.full_clean()
-                    receipt.save()
                 except ValidationError as exc:
-                    add_validation_errors(receipt_form, exc)
+                    add_validation_errors(upload_form, exc)
                 else:
-                    MonthlyServiceDeclaration.objects.filter(
-                        user=request.user,
-                        service=receipt.service,
-                        period_month=selected_month,
-                    ).delete()
-                    resolved_count = resolve_matching_resubmission_requests(receipt, by=request.user)
+                    count = len(created_receipts)
+                    selected_label = "その他" if upload_form.is_extra else upload_form.selected_service.display_name
                     if resolved_count:
-                        messages.success(request, f"{receipt.service_display_name_snapshot} の再提出依頼を対応済みにしました。")
-                    messages.success(
-                        request,
-                        f"{receipt.service_display_name_snapshot} の領収書を追加しました。AIによるファイル名修正・検査は、管理者が実行した後に管理者画面へ反映されます。",
+                        messages.success(request, f"{selected_label} の再提出依頼を対応済みにしました。")
+                    if was_submitted:
+                        messages.info(request, "領収書を追加したため、この月を下書きに戻しました。内容を確認して再度提出してください。")
+                    if upload_form.is_extra:
+                        messages.success(
+                            request,
+                            f"その他の領収書を{count}件追加しました。メモはAIの参考情報として使われますが、領収書ファイル内の情報を優先して確認します。",
+                        )
+                    else:
+                        messages.success(
+                            request,
+                            f"{selected_label} の領収書を{count}件追加しました。AIによるファイル名修正・検査は、管理者が実行した後に反映されます。",
+                        )
+                    selected_value = ReceiptBatchUploadForm.OTHER_VALUE if upload_form.is_extra else str(upload_form.selected_service.pk)
+                    return redirect(
+                        f"{reverse('dashboard')}?month={month_query(selected_month)}&service={selected_value}"
                     )
-                    return redirect(f"{reverse('dashboard')}?month={month_query(selected_month)}")
+
         elif action == "submit":
             try:
                 submission.submit()
@@ -337,15 +387,16 @@ def dashboard(request):
         "receipts/dashboard.html",
         {
             "month_form": month_form,
-            "receipt_form": receipt_form,
-            "extra_receipt_form": extra_receipt_form,
-            "extra_form_open": extra_form_open,
+            "upload_form": upload_form,
+            # 旧テンプレート拡張との互換用。新画面は upload_form を使用する。
+            "receipt_form": upload_form,
             "submission": submission,
             "receipts": receipts,
             "uploadable_services": uploadable_services,
             "monthly_summary": monthly_summary,
             "open_resubmission_requests": open_resubmission_requests,
             "selected_month": selected_month,
+            "selected_upload_choice": selected_upload_choice,
             "retention_months": settings.RECEIPT_RETENTION_MONTHS,
         },
     )
@@ -356,7 +407,11 @@ def user_services(request):
     services = RegisteredService.objects.filter(user=request.user).select_related("catalog_service", "registered_by", "deactivated_by").order_by("-is_active", "name", "billing_type")
     active_services = [service for service in services if service.is_active]
     stopped_services = [service for service in services if not service.is_active]
-    available_catalog_count = ServiceCatalog.objects.filter(is_active=True).count()
+    exception_requests = ServiceExceptionRequest.objects.filter(user=request.user).select_related(
+        "reviewed_by",
+        "approved_registered_service",
+    ).order_by("-created_at")
+    pending_exception_count = exception_requests.filter(status=ServiceExceptionRequestStatus.PENDING).count()
     return render(
         request,
         "receipts/user_services.html",
@@ -364,28 +419,40 @@ def user_services(request):
             "services": services,
             "active_services": active_services,
             "stopped_services": stopped_services,
-            "available_catalog_count": available_catalog_count,
+            "exception_requests": exception_requests,
+            "pending_exception_count": pending_exception_count,
         },
     )
 
 
 @login_required
 def user_service_create(request):
+    if request.user.is_staff:
+        return redirect("staff_exception_requests")
     if request.method == "POST":
-        form = UserServiceRegistrationForm(request.POST, user=request.user)
+        form = ServiceExceptionRequestForm(request.POST, user=request.user)
         if form.is_valid():
-            service = form.save()
-            messages.success(request, f"{service.display_name} を利用サービスとして登録しました。管理者画面にもユーザー登録として記録されます。")
-            return redirect("user_services")
+            try:
+                with transaction.atomic():
+                    request_item = form.save()
+            except IntegrityError:
+                # 二重クリックや同時POSTでも500にせず、確認待ちの重複として案内する。
+                form.add_error(None, "同じサービス・支払い方法の例外申請がすでに確認待ちです。")
+            else:
+                messages.success(
+                    request,
+                    f"{request_item.display_name} の例外申請を提出しました。管理者が承認するまで利用サービスには追加されません。",
+                )
+                return redirect("user_services")
     else:
-        form = UserServiceRegistrationForm(user=request.user)
+        form = ServiceExceptionRequestForm(user=request.user)
     return render(
         request,
         "receipts/user_service_form.html",
         {
-            "title": "サービス利用登録",
+            "title": "新規サービス例外申請",
             "form": form,
-            "submit_label": "登録する",
+            "submit_label": "例外申請を提出する",
             "back_url": reverse("user_services"),
         },
     )
@@ -416,6 +483,175 @@ def user_service_stop(request, pk: int):
     )
 
 
+def approve_service_exception_request(request_id: int, *, reviewer, review_note: str = "") -> ServiceExceptionRequest:
+    """例外申請を承認し、サービスマスターとユーザー利用サービスへ反映する。"""
+
+    with transaction.atomic():
+        request_item = (
+            ServiceExceptionRequest.objects.select_for_update()
+            .select_related("user")
+            .get(pk=request_id, status=ServiceExceptionRequestStatus.PENDING)
+        )
+        catalog = ServiceCatalog.objects.filter(
+            name__iexact=request_item.service_name,
+            billing_type=request_item.billing_type,
+        ).order_by("pk").first()
+        if catalog is None:
+            try:
+                # 別ユーザーの同一サービス申請が同時承認された場合も、既存マスターを再利用する。
+                with transaction.atomic():
+                    catalog = ServiceCatalog.objects.create(
+                        name=request_item.service_name,
+                        billing_type=request_item.billing_type,
+                        is_active=True,
+                        memo="例外申請の承認時に自動作成されました。",
+                        created_by=reviewer,
+                    )
+            except IntegrityError:
+                catalog = ServiceCatalog.objects.get(
+                    name__iexact=request_item.service_name,
+                    billing_type=request_item.billing_type,
+                )
+        elif not catalog.is_active:
+            catalog.is_active = True
+            catalog.save(update_fields=["is_active", "updated_at"])
+
+        service = RegisteredService.objects.filter(
+            user=request_item.user,
+            name__iexact=request_item.service_name,
+            billing_type=request_item.billing_type,
+        ).order_by("pk").first()
+        purpose_note = f"例外申請用途: {request_item.purpose}"
+        if service is None:
+            service = RegisteredService(
+                user=request_item.user,
+                catalog_service=catalog,
+                name=catalog.name,
+                billing_type=catalog.billing_type,
+                is_active=True,
+                memo=purpose_note,
+                registration_source=ServiceRegistrationSource.EXCEPTION_REQUEST,
+                registered_by=reviewer,
+            )
+        else:
+            service.catalog_service = catalog
+            service.name = catalog.name
+            service.billing_type = catalog.billing_type
+            service.is_active = True
+            if purpose_note not in (service.memo or ""):
+                service.memo = "\n".join(part for part in [service.memo.strip(), purpose_note] if part)
+            service.registration_source = ServiceRegistrationSource.EXCEPTION_REQUEST
+            service.registered_by = reviewer
+            service.deactivation_source = ""
+            service.deactivated_by = None
+            service.deactivated_at = None
+            service.final_receipt_month = None
+            service.stop_note = ""
+        service.full_clean()
+        service.save()
+
+        request_item.status = ServiceExceptionRequestStatus.APPROVED
+        request_item.review_note = (review_note or "").strip()
+        request_item.reviewed_by = reviewer
+        request_item.reviewed_at = timezone.now()
+        request_item.approved_catalog_service = catalog
+        request_item.approved_registered_service = service
+        request_item.save(
+            update_fields=[
+                "status",
+                "review_note",
+                "reviewed_by",
+                "reviewed_at",
+                "approved_catalog_service",
+                "approved_registered_service",
+                "updated_at",
+            ]
+        )
+    return request_item
+
+
+def reject_service_exception_request(request_id: int, *, reviewer, review_note: str) -> ServiceExceptionRequest:
+    with transaction.atomic():
+        request_item = ServiceExceptionRequest.objects.select_for_update().get(
+            pk=request_id,
+            status=ServiceExceptionRequestStatus.PENDING,
+        )
+        request_item.status = ServiceExceptionRequestStatus.REJECTED
+        request_item.review_note = (review_note or "").strip()
+        request_item.reviewed_by = reviewer
+        request_item.reviewed_at = timezone.now()
+        request_item.save(
+            update_fields=["status", "review_note", "reviewed_by", "reviewed_at", "updated_at"]
+        )
+    return request_item
+
+
+@staff_member_required
+def staff_exception_requests(request):
+    status_filter = request.GET.get("status", "pending")
+    if status_filter not in {"pending", "approved", "rejected", "all"}:
+        status_filter = "pending"
+
+    if request.method == "POST":
+        form = StaffServiceExceptionReviewForm(request.POST)
+        if form.is_valid():
+            request_item = form.cleaned_data["request_id"]
+            decision = form.cleaned_data["decision"]
+            note = form.cleaned_data.get("review_note", "")
+            try:
+                if decision == StaffServiceExceptionReviewForm.DECISION_APPROVE:
+                    reviewed = approve_service_exception_request(
+                        request_item.pk,
+                        reviewer=request.user,
+                        review_note=note,
+                    )
+                    messages.success(
+                        request,
+                        f"{reviewed.user.username} の {reviewed.display_name} を承認し、利用サービスへ追加しました。",
+                    )
+                else:
+                    reviewed = reject_service_exception_request(
+                        request_item.pk,
+                        reviewer=request.user,
+                        review_note=note,
+                    )
+                    messages.success(request, f"{reviewed.user.username} の {reviewed.display_name} を却下しました。")
+            except ServiceExceptionRequest.DoesNotExist:
+                messages.error(request, "この例外申請は別の管理者によってすでに処理されています。")
+            return redirect(f"{reverse('staff_exception_requests')}?status={status_filter}")
+        for errors in form.errors.values():
+            for error in errors:
+                messages.error(request, error)
+
+    queryset = ServiceExceptionRequest.objects.select_related(
+        "user",
+        "reviewed_by",
+        "approved_catalog_service",
+        "approved_registered_service",
+    )
+    if status_filter != "all":
+        queryset = queryset.filter(status=status_filter)
+    queryset = queryset.order_by(
+        Case(
+            When(status=ServiceExceptionRequestStatus.PENDING, then=0),
+            default=1,
+            output_field=IntegerField(),
+        ),
+        "-created_at",
+    )
+    page_obj = Paginator(queryset, 30).get_page(request.GET.get("page"))
+    pending_count = ServiceExceptionRequest.objects.filter(status=ServiceExceptionRequestStatus.PENDING).count()
+    return render(
+        request,
+        "receipts/staff_exception_requests.html",
+        {
+            "page_obj": page_obj,
+            "status_filter": status_filter,
+            "pending_count": pending_count,
+        },
+    )
+
+
 @staff_member_required
 def staff_services(request):
     active_tab = request.GET.get("tab") or ("users" if request.GET.get("user") else "catalog")
@@ -431,7 +667,7 @@ def staff_services(request):
             ),
             user_registered_count=Count(
                 "registered_services",
-                filter=Q(registered_services__registration_source=ServiceRegistrationSource.USER),
+                filter=Q(registered_services__registration_source__in=[ServiceRegistrationSource.USER, ServiceRegistrationSource.EXCEPTION_REQUEST]),
                 distinct=True,
             ),
             user_stopped_count=Count(
@@ -460,7 +696,8 @@ def staff_services(request):
             .order_by("-is_active", "name", "billing_type")
         )
         user_change_services = services.filter(
-            Q(registration_source=ServiceRegistrationSource.USER) | Q(deactivation_source=ServiceDeactivationSource.USER)
+            Q(registration_source__in=[ServiceRegistrationSource.USER, ServiceRegistrationSource.EXCEPTION_REQUEST])
+            | Q(deactivation_source=ServiceDeactivationSource.USER)
         ).order_by("-updated_at")
 
     catalog_queryset = ServiceCatalog.objects.annotate(
@@ -1178,7 +1415,7 @@ def staff_history(request):
             ),
             user_registered_count=Count(
                 "registered_services",
-                filter=Q(registered_services__registration_source=ServiceRegistrationSource.USER),
+                filter=Q(registered_services__registration_source__in=[ServiceRegistrationSource.USER, ServiceRegistrationSource.EXCEPTION_REQUEST]),
                 distinct=True,
             ),
             user_stopped_count=Count(

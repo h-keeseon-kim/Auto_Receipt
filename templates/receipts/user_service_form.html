@@ -3,7 +3,11 @@
 {% block content %}
 <section class="auth-card wide">
     <h1>{{ title }}</h1>
-    <p class="muted">管理者が登録したサービスマスターから、新しく利用するサービスを選択します。登録内容は管理者画面にも「ユーザー登録」として表示されます。</p>
+    <p class="muted">新しいサービスを利用開始する前に、サービス名・支払い方法・用途を記載して申請してください。管理者が承認すると利用サービスへ自動で追加されます。</p>
+    <div class="notice section compact-notice">
+        <strong>申請前に確認してください</strong>
+        <p class="muted small">承認前にサービスの契約・課金を開始しないでください。却下された場合は管理者コメントを確認してください。</p>
+    </div>
     <form method="post" class="stack">
         {% csrf_token %}
         {{ form.as_p }}

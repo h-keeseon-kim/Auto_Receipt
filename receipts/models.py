@@ -123,6 +123,7 @@ class StatementMatchStatus(models.TextChoices):
 class ServiceRegistrationSource(models.TextChoices):
     ADMIN = "admin", "管理者登録"
     USER = "user", "ユーザー登録"
+    EXCEPTION_REQUEST = "exception_request", "例外申請承認"
 
 
 class ServiceDeactivationSource(models.TextChoices):
@@ -130,8 +131,14 @@ class ServiceDeactivationSource(models.TextChoices):
     USER = "user", "ユーザー停止"
 
 
+class ServiceExceptionRequestStatus(models.TextChoices):
+    PENDING = "pending", "確認待ち"
+    APPROVED = "approved", "承認済み"
+    REJECTED = "rejected", "却下"
+
+
 class ServiceCatalog(models.Model):
-    """管理者が登録するサービスマスター。ユーザーはこの一覧から利用登録する。"""
+    """管理者が登録するサービスマスター。例外申請の承認または管理者割り当てで利用サービスに紐づける。"""
 
     name = models.CharField("サービス名", max_length=120)
     billing_type = models.CharField("支払い種別", max_length=20, choices=BillingType.choices)
@@ -306,7 +313,11 @@ class RegisteredService(models.Model):
 
     @property
     def source_badge_class(self) -> str:
-        return "draft" if self.registration_source == ServiceRegistrationSource.USER else "neutral"
+        if self.registration_source == ServiceRegistrationSource.EXCEPTION_REQUEST:
+            return "submitted"
+        if self.registration_source == ServiceRegistrationSource.USER:
+            return "draft"
+        return "neutral"
 
     @property
     def stop_badge_class(self) -> str:
@@ -352,6 +363,109 @@ class RegisteredService(models.Model):
 
     def __str__(self) -> str:
         return f"{self.display_name} / {self.user}"
+
+
+class ServiceExceptionRequest(models.Model):
+    """ユーザーが新しいサービスを利用開始する前に行う例外申請。"""
+
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="service_exception_requests",
+        verbose_name="申請ユーザー",
+    )
+    service_name = models.CharField("サービス名", max_length=120)
+    billing_type = models.CharField("支払い方法", max_length=20, choices=BillingType.choices)
+    purpose = models.TextField("用途")
+    status = models.CharField(
+        "ステータス",
+        max_length=20,
+        choices=ServiceExceptionRequestStatus.choices,
+        default=ServiceExceptionRequestStatus.PENDING,
+    )
+    review_note = models.TextField("管理者コメント", blank=True)
+    reviewed_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="reviewed_service_exception_requests",
+        verbose_name="確認管理者",
+    )
+    reviewed_at = models.DateTimeField("確認日時", null=True, blank=True)
+    approved_catalog_service = models.ForeignKey(
+        ServiceCatalog,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="approved_exception_requests",
+        verbose_name="承認後サービスマスター",
+    )
+    approved_registered_service = models.ForeignKey(
+        RegisteredService,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="approved_exception_requests",
+        verbose_name="承認後利用サービス",
+    )
+    created_at = models.DateTimeField("申請日時", auto_now_add=True)
+    updated_at = models.DateTimeField("更新日時", auto_now=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+        constraints = [
+            models.UniqueConstraint(
+                Lower("service_name"),
+                "user",
+                "billing_type",
+                condition=Q(status=ServiceExceptionRequestStatus.PENDING),
+                name="unique_pending_service_exception_request_ci",
+            )
+        ]
+        indexes = [
+            models.Index(fields=["status", "created_at"]),
+            models.Index(fields=["user", "status"]),
+        ]
+        verbose_name = "サービス例外申請"
+        verbose_name_plural = "サービス例外申請"
+
+    def clean(self):
+        self.service_name = " ".join((self.service_name or "").strip().split())
+        self.purpose = (self.purpose or "").strip()
+        self.review_note = (self.review_note or "").strip()
+        errors = {}
+        if not self.service_name:
+            errors["service_name"] = "サービス名を入力してください。"
+        if not self.purpose:
+            errors["purpose"] = "利用目的を入力してください。"
+        if errors:
+            raise ValidationError(errors)
+
+    def save(self, *args, **kwargs):
+        self.service_name = " ".join((self.service_name or "").strip().split())
+        self.purpose = (self.purpose or "").strip()
+        self.review_note = (self.review_note or "").strip()
+        super().save(*args, **kwargs)
+
+    @property
+    def display_name(self) -> str:
+        return f"{self.service_name}（{self.get_billing_type_display()}）"
+
+    @property
+    def badge_class(self) -> str:
+        if self.status == ServiceExceptionRequestStatus.APPROVED:
+            return "submitted"
+        if self.status == ServiceExceptionRequestStatus.REJECTED:
+            return "danger"
+        return "draft"
+
+    @property
+    def is_pending(self) -> bool:
+        return self.status == ServiceExceptionRequestStatus.PENDING
+
+    def __str__(self) -> str:
+        return f"{self.user} / {self.display_name} / {self.get_status_display()}"
 
 
 class Submission(models.Model):

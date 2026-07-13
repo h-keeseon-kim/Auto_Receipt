@@ -4,14 +4,14 @@
 <div class="page-title" data-tutorial-target="user-services-page">
     <div>
         <h1>利用サービス管理</h1>
-        <p class="muted">新しく使い始めたサービスを自分で登録し、使わなくなったサービスは最終領収書月を指定して停止できます。</p>
+        <p class="muted">新しいサービスを利用開始する前に例外申請を提出します。管理者の承認後に利用中サービスへ追加されます。</p>
     </div>
 </div>
 
 <section class="status-grid">
     <div class="card"><span class="label">利用中サービス</span><strong>{{ active_services|length }}</strong></div>
     <div class="card"><span class="label">停止済みサービス</span><strong>{{ stopped_services|length }}</strong></div>
-    <div class="card"><span class="label">選択可能なサービスマスター</span><strong>{{ available_catalog_count }}</strong></div>
+    <div class="card"><span class="label">確認待ちの例外申請</span><strong>{{ pending_exception_count }}</strong></div>
 </section>
 
 <section class="card section" data-tutorial-target="active-services-section">
@@ -21,7 +21,7 @@
             <p class="muted">領収書アップロード時に通常表示されるサービスです。</p>
         </div>
         <div class="actions">
-            <a class="button primary" href="{% url 'user_service_create' %}" data-tutorial-target="service-registration-button">サービス利用登録</a>
+            <a class="button primary" href="{% url 'service_exception_request_create' %}" data-tutorial-target="service-registration-button">新規サービス例外申請</a>
         </div>
     </div>
     <div class="table-wrap">
@@ -40,6 +40,34 @@
                     </tr>
                 {% empty %}
                     <tr><td colspan="5" class="muted center">利用中サービスはありません。</td></tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</section>
+
+<section class="card section" data-tutorial-target="service-exception-history-section">
+    <div class="section-header">
+        <div>
+            <h2>例外申請履歴</h2>
+            <p class="muted">確認待ち、承認済み、却下の状態と管理者コメントを確認できます。</p>
+        </div>
+    </div>
+    <div class="table-wrap">
+        <table>
+            <thead><tr><th>サービス</th><th>支払い方法</th><th>用途</th><th>ステータス</th><th>申請日時</th><th>管理者コメント</th></tr></thead>
+            <tbody>
+                {% for request_item in exception_requests %}
+                    <tr>
+                        <td><strong>{{ request_item.service_name }}</strong></td>
+                        <td>{{ request_item.get_billing_type_display }}</td>
+                        <td>{{ request_item.purpose|linebreaksbr }}</td>
+                        <td><span class="badge {{ request_item.badge_class }}">{{ request_item.get_status_display }}</span></td>
+                        <td>{{ request_item.created_at|date:"Y-m-d H:i" }}</td>
+                        <td>{{ request_item.review_note|default:"-"|linebreaksbr }}</td>
+                    </tr>
+                {% empty %}
+                    <tr><td colspan="6" class="muted center">例外申請はありません。</td></tr>
                 {% endfor %}
             </tbody>
         </table>

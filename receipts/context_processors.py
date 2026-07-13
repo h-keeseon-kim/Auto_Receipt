@@ -41,10 +41,19 @@ def tutorial_context(request) -> tuple[bool, bool, str]:
 def app_settings(request):
     """Expose small, safe app-level flags to templates."""
     tutorial_available, tutorial_auto_start, tutorial_complete_url = tutorial_context(request)
+    pending_exception_count = 0
+    user = getattr(request, "user", None)
+    if user is not None and user.is_authenticated and user.is_staff:
+        from .models import ServiceExceptionRequest, ServiceExceptionRequestStatus
+
+        pending_exception_count = ServiceExceptionRequest.objects.filter(
+            status=ServiceExceptionRequestStatus.PENDING
+        ).count()
     return {
         "allow_signup": settings.ALLOW_SIGNUP,
         "app_name": getattr(settings, "APP_NAME", "ReceiptHub"),
         "tutorial_available": tutorial_available,
         "tutorial_auto_start": tutorial_auto_start,
         "tutorial_complete_url": tutorial_complete_url,
+        "staff_pending_exception_count": pending_exception_count,
     }

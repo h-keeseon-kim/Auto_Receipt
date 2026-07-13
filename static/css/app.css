@@ -39,6 +39,21 @@ a:hover { text-decoration: underline; }
 }
 .brand { font-size: 1.2rem; font-weight: 800; color: var(--text); }
 .nav { display: flex; align-items: center; gap: 1rem; flex-wrap: wrap; }
+.nav-with-count { display: inline-flex; align-items: center; gap: 0.35rem; }
+.nav-count-badge {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 1.35rem;
+    height: 1.35rem;
+    padding: 0 0.35rem;
+    border-radius: 999px;
+    background: var(--danger);
+    color: #fff;
+    font-size: 0.75rem;
+    font-weight: 800;
+    line-height: 1;
+}
 .inline-form { display: inline; margin: 0; }
 .link-button { border: 0; background: transparent; padding: 0; color: var(--primary); cursor: pointer; font: inherit; }
 .container { max-width: 1160px; margin: 0 auto; padding: 2rem 1rem 4rem; }
@@ -119,6 +134,16 @@ ul.errorlist { color: var(--danger); margin: 0.2rem 0 0.6rem; padding-left: 1.2r
 .message { padding: 0.8rem 1rem; border-radius: 12px; border: 1px solid var(--border); background: #fff; margin-bottom: 0.5rem; }
 .message.success { background: var(--success-bg); color: var(--success); border-color: #b7e6c4; }
 .message.error { background: #fff1f0; color: var(--danger); border-color: #ffd0cc; }
+.staff-notification {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 1rem;
+    flex-wrap: wrap;
+    background: #fff8e7;
+    border-color: #f5cf78;
+    color: #7a4b00;
+}
 .notice { background: #eef4ff; border-color: #c7d7fe; }
 .table-wrap { width: 100%; overflow-x: auto; }
 table { width: 100%; border-collapse: collapse; }
@@ -749,4 +774,37 @@ body.tutorial-open { overflow-x: hidden; }
     .extra-receipt-toggle {
         width: 100%;
     }
+}
+
+/* v1.4: service exception requests and multi-receipt upload */
+.receipt-batch-upload-form { max-width: 720px; }
+.receipt-file-picker-panel {
+    padding: 1rem;
+    border: 1px dashed #9db3ec;
+    border-radius: 12px;
+    background: #f8faff;
+}
+.receipt-file-picker-panel[hidden],
+.other-receipt-memo-field[hidden] { display: none !important; }
+.receipt-file-picker-button { min-width: 15rem; }
+.receipt-file-picker-button .plus-icon {
+    background: rgba(255, 255, 255, 0.2);
+    color: #fff;
+}
+.compact-summary-card {
+    min-width: 150px;
+    padding: 0.8rem 1rem;
+}
+.compact-summary-card strong { font-size: 1.35rem; }
+.exception-request-scroll table { min-width: 1220px; }
+.exception-request-table .purpose-cell { min-width: 280px; max-width: 420px; }
+.exception-request-table .exception-review-cell { min-width: 340px; }
+.exception-request-pending-row { background: #fffaf0; }
+.exception-review-form textarea { min-width: 310px; margin-bottom: 0.55rem; }
+.review-note { margin-top: 0.4rem; max-width: 340px; }
+.badge.danger { background: #fff1f0; color: var(--danger); }
+
+@media (max-width: 760px) {
+    .receipt-file-picker-button { width: 100%; min-width: 0; }
+    .compact-summary-card { width: 100%; }
 }

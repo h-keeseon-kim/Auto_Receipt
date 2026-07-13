@@ -21,7 +21,7 @@ from .ai_filename import (
     build_result_from_ai_payload,
     filename_user_part_from_user,
 )
-from .forms import ExtraReceiptUploadForm, ReceiptUploadForm
+from .forms import ExtraReceiptUploadForm, ReceiptBatchUploadForm, ReceiptUploadForm, ServiceExceptionRequestForm
 from .monthly_status import build_user_month_summary
 from .statement_ai import StatementAnalysisItem, StatementAnalysisResult, build_statement_result_from_payload
 from .statement_processing import process_card_statement
@@ -43,6 +43,8 @@ from .models import (
     ResubmissionRequestStatus,
     ServiceCatalog,
     ServiceDeactivationSource,
+    ServiceExceptionRequest,
+    ServiceExceptionRequestStatus,
     ServiceRegistrationSource,
     StatementMatchStatus,
     Submission,
@@ -77,14 +79,15 @@ class ReceiptFlowTests(TestCase):
 
         self.assertRedirects(response, reverse("user_services"))
 
-    def test_dashboard_auto_upload_form_has_no_visible_upload_button(self):
+    def test_dashboard_batch_upload_uses_plus_button_without_visible_submit_button(self):
         self.client.login(username="alice", password="password123")
 
         response = self.client.get(reverse("dashboard"))
 
         self.assertEqual(response.status_code, 200)
-        self.assertContains(response, "data-auto-upload-form")
-        self.assertContains(response, "data-file-upload-field hidden")
+        self.assertContains(response, "data-receipt-batch-upload-form")
+        self.assertContains(response, "data-receipt-file-picker-button")
+        self.assertContains(response, "＋")
         self.assertNotContains(response, ">アップロード</button>")
 
 
@@ -666,27 +669,40 @@ class ReceiptFlowTests(TestCase):
         submission.refresh_from_db()
         self.assertTrue(submission.is_submitted)
 
-    def test_user_can_upload_multiple_receipts_before_submit(self):
+    def test_user_can_add_multiple_receipts_to_same_service_in_one_selection_and_again_later(self):
         self.client.login(username="alice", password="password123")
 
-        for filename in ["receipt-a.pdf", "receipt-b.pdf"]:
-            upload = SimpleUploadedFile(filename, b"%PDF-1.4 test", content_type="application/pdf")
-            response = self.client.post(
-                reverse("dashboard") + "?month=2026-06",
-                {
-                    "action": "add_receipt",
-                    "service": self.service.id,
-                    "file": upload,
-                },
-            )
-            self.assertEqual(response.status_code, 302)
+        response = self.client.post(
+            reverse("dashboard") + "?month=2026-06",
+            {
+                "action": "add_receipts",
+                "service": str(self.service.id),
+                "files": [
+                    SimpleUploadedFile("receipt-a.pdf", b"%PDF-1.4 a", content_type="application/pdf"),
+                    SimpleUploadedFile("receipt-b.pdf", b"%PDF-1.4 b", content_type="application/pdf"),
+                ],
+            },
+        )
+        self.assertEqual(response.status_code, 302)
+        self.assertIn(f"service={self.service.id}", response["Location"])
+
+        second_response = self.client.post(
+            reverse("dashboard") + "?month=2026-06",
+            {
+                "action": "add_receipts",
+                "service": str(self.service.id),
+                "files": [SimpleUploadedFile("receipt-c.pdf", b"%PDF-1.4 c", content_type="application/pdf")],
+            },
+        )
+        self.assertEqual(second_response.status_code, 302)
 
         submission = Submission.objects.get(user=self.user, period_month=date(2026, 6, 1))
-        self.assertEqual(submission.receipts.count(), 2)
+        self.assertEqual(submission.receipts.count(), 3)
         self.assertEqual(
             list(submission.receipts.order_by("original_filename").values_list("original_filename", flat=True)),
-            ["receipt-a.pdf", "receipt-b.pdf"],
+            ["receipt-a.pdf", "receipt-b.pdf", "receipt-c.pdf"],
         )
+        self.assertEqual(submission.receipts.filter(service=self.service).count(), 3)
 
     def test_user_can_replace_receipt_file_after_submit(self):
         self.client.login(username="alice", password="password123")
@@ -725,24 +741,28 @@ class ReceiptFlowTests(TestCase):
         with receipt.file.open("rb") as fp:
             self.assertEqual(fp.read(), b"%PDF-1.4 correct")
 
-    def test_receipt_upload_form_has_only_service_and_file_fields(self):
-        form = ReceiptUploadForm(user=self.user, period_month=date(2026, 6, 1))
+    def test_receipt_batch_upload_form_supports_service_other_and_multiple_files(self):
+        form = ReceiptBatchUploadForm(user=self.user, period_month=date(2026, 6, 1))
 
-        self.assertEqual(list(form.fields), ["service", "file"])
-        self.assertEqual(form.fields["service"].label, "サービス選択（登録サービス）")
-        self.assertEqual(form.fields["file"].label, "領収書ファイルアップロード")
-        self.assertTrue(form.fields["file"].required)
+        self.assertEqual(list(form.fields), ["service", "memo", "files"])
+        self.assertEqual(form.fields["service"].label, "サービス")
+        choices = dict(form.fields["service"].choices)
+        self.assertIn(str(self.service.pk), choices)
+        self.assertEqual(choices[ReceiptBatchUploadForm.OTHER_VALUE], "その他")
+        self.assertTrue(form.fields["files"].required)
+        self.assertTrue(form.fields["files"].widget.allow_multiple_selected)
 
-    def test_dashboard_has_plus_button_for_unexpected_extra_receipt(self):
+    def test_dashboard_has_other_choice_and_plus_button_in_unified_upload_form(self):
         self.client.login(username="alice", password="password123")
 
         response = self.client.get(reverse("dashboard") + "?month=2026-06")
 
         self.assertEqual(response.status_code, 200)
-        self.assertContains(response, "data-extra-receipt-toggle")
-        self.assertContains(response, "＋</span> その他の領収書")
-        self.assertContains(response, "data-extra-upload-form")
-        self.assertContains(response, "領収書の内容メモ")
+        self.assertContains(response, 'value="other"')
+        self.assertContains(response, "その他の内容メモ")
+        self.assertContains(response, "data-receipt-file-picker-button")
+        self.assertContains(response, "＋")
+        self.assertNotContains(response, "data-extra-upload-form")
 
     def test_extra_receipt_form_requires_memo(self):
         form = ExtraReceiptUploadForm(
@@ -754,15 +774,20 @@ class ReceiptFlowTests(TestCase):
         self.assertFalse(form.is_valid())
         self.assertIn("memo", form.errors)
 
-    def test_user_can_upload_extra_receipt_without_registered_service(self):
+    def test_user_can_select_other_and_upload_without_any_registered_service(self):
+        self.service.delete()
         self.client.login(username="alice", password="password123")
+
+        page = self.client.get(reverse("dashboard") + "?month=2026-06")
+        self.assertContains(page, 'value="other"')
 
         response = self.client.post(
             reverse("dashboard") + "?month=2026-06",
             {
-                "action": "add_extra_receipt",
+                "action": "add_receipts",
+                "service": ReceiptBatchUploadForm.OTHER_VALUE,
                 "memo": "OpenAIからの返金領収書",
-                "file": SimpleUploadedFile("refund.pdf", b"%PDF-1.4 refund", content_type="application/pdf"),
+                "files": [SimpleUploadedFile("refund.pdf", b"%PDF-1.4 refund", content_type="application/pdf")],
             },
         )
 
@@ -775,7 +800,8 @@ class ReceiptFlowTests(TestCase):
         self.assertEqual(receipt.service_display_name_snapshot, "その他")
         self.assertEqual(receipt.memo, "OpenAIからの返金領収書")
         summary = build_user_month_summary(self.user, date(2026, 6, 1))
-        self.assertEqual(summary.api_pending_count, 1, "その他領収書は登録サービスの提出済み判定に流用しない")
+        self.assertEqual(summary.total_services, 0)
+        self.assertEqual(summary.resolved_count, 0, "その他領収書は登録サービスの提出済み判定に流用しない")
 
     def test_submission_with_only_extra_receipt_is_allowed_when_no_registered_services_exist(self):
         extra_only_user = User.objects.create_user(username="extra-only@example.com", password="password123")
@@ -1580,7 +1606,10 @@ class StaffServiceAssignmentTests(TestCase):
         self.client.login(username="user@example.com", password="password123")
         response = self.client.get(reverse("dashboard"))
         self.assertNotContains(response, "AWS")
-        self.assertContains(response, "領収書をアップロードするには、利用サービス登録が必要です")
+        self.assertContains(response, 'value="other"')
+        choices = dict(response.context["upload_form"].fields["service"].choices)
+        self.assertNotIn(str(service.pk), choices)
+        self.assertEqual(choices[ReceiptBatchUploadForm.OTHER_VALUE], "その他")
 
         self.client.logout()
         self.client.login(username="admin", password="admin-password-123")
@@ -1681,68 +1710,167 @@ class UserServiceRegistrationTests(TestCase):
         self.override = override_settings(MEDIA_ROOT=self.media_dir.name)
         self.override.enable()
         self.addCleanup(self.override.disable)
-        self.admin = User.objects.create_superuser(username="admin", email="admin@example.com", password="admin-password-123")
-        self.user = User.objects.create_user(username="user@example.com", email="user@example.com", password="password123")
-        self.catalog = ServiceCatalog.objects.create(name="Slack", billing_type=BillingType.SUBSCRIPTION, created_by=self.admin)
-
-    def test_user_registers_service_from_admin_catalog_and_staff_can_see_it(self):
-        self.client.login(username="user@example.com", password="password123")
-        response = self.client.post(
-            reverse("user_service_create"),
-            {"catalog_service": self.catalog.pk, "memo": "チーム連絡"},
+        self.admin = User.objects.create_superuser(
+            username="admin",
+            email="admin@example.com",
+            password="admin-password-123",
+        )
+        self.user = User.objects.create_user(
+            username="user@example.com",
+            email="user@example.com",
+            password="password123",
+        )
+        self.catalog = ServiceCatalog.objects.create(
+            name="Slack",
+            billing_type=BillingType.SUBSCRIPTION,
+            created_by=self.admin,
         )
 
-        self.assertRedirects(response, reverse("user_services"))
-        service = RegisteredService.objects.get(user=self.user, name="Slack")
-        self.assertEqual(service.catalog_service, self.catalog)
-        self.assertEqual(service.registration_source, ServiceRegistrationSource.USER)
-        self.assertEqual(service.registered_by, self.user)
-        self.assertTrue(service.is_active)
+    def submit_exception_request(self, *, name="Figma", billing_type=BillingType.SUBSCRIPTION, purpose="デザイン制作"):
+        self.client.login(username="user@example.com", password="password123")
+        return self.client.post(
+            reverse("service_exception_request_create"),
+            {
+                "service_name": name,
+                "billing_type": billing_type,
+                "purpose": purpose,
+            },
+        )
 
+    def test_exception_application_form_requires_service_payment_method_and_purpose(self):
+        form = ServiceExceptionRequestForm(
+            data={"service_name": "", "billing_type": "", "purpose": ""},
+            user=self.user,
+        )
+
+        self.assertEqual(list(form.fields), ["service_name", "billing_type", "purpose"])
+        self.assertFalse(form.is_valid())
+        self.assertIn("service_name", form.errors)
+        self.assertIn("billing_type", form.errors)
+        self.assertIn("purpose", form.errors)
+
+    def test_user_submits_exception_request_without_immediate_service_registration(self):
+        response = self.submit_exception_request()
+
+        self.assertRedirects(response, reverse("user_services"))
+        request_item = ServiceExceptionRequest.objects.get(user=self.user)
+        self.assertEqual(request_item.service_name, "Figma")
+        self.assertEqual(request_item.billing_type, BillingType.SUBSCRIPTION)
+        self.assertEqual(request_item.purpose, "デザイン制作")
+        self.assertEqual(request_item.status, ServiceExceptionRequestStatus.PENDING)
+        self.assertFalse(RegisteredService.objects.filter(user=self.user, name="Figma").exists())
+
+        page = self.client.get(reverse("user_services"))
+        self.assertContains(page, "新規サービス例外申請")
+        self.assertContains(page, "確認待ち")
+        self.assertContains(page, "Figma")
+        self.assertNotContains(page, "サービス利用登録")
+
+    def test_staff_gets_pending_notice_and_can_approve_request(self):
+        self.submit_exception_request(name="Figma", purpose="UIデザインと共同編集")
         self.client.logout()
         self.client.login(username="admin", password="admin-password-123")
-        response = self.client.get(reverse("staff_services") + f"?tab=users&user={self.user.pk}")
-        self.assertContains(response, "新規登録/停止")
-        self.assertNotContains(response, "ユーザー操作の通知")
-        self.assertContains(response, "Slack（サブスク）")
-        self.assertContains(response, "ユーザー登録")
 
-    def test_user_services_page_places_registration_button_in_active_services_section(self):
-        self.client.login(username="user@example.com", password="password123")
-        response = self.client.get(reverse("user_services"))
+        history = self.client.get(reverse("history"))
+        self.assertContains(history, "例外申請")
+        self.assertContains(history, "未対応のサービス例外申請が 1 件あります")
 
-        self.assertEqual(response.status_code, 200)
-        self.assertContains(response, "サービス利用登録")
-        self.assertNotContains(response, "アップロードへ")
-        self.assertContains(response, "<h2>利用中サービス</h2>", html=True)
+        request_item = ServiceExceptionRequest.objects.get(user=self.user)
+        response = self.client.post(
+            reverse("staff_exception_requests") + "?status=pending",
+            {
+                "request_id": request_item.pk,
+                "decision": "approve",
+                "review_note": "業務利用を承認",
+            },
+        )
+        self.assertRedirects(response, reverse("staff_exception_requests") + "?status=pending")
 
-    def test_user_can_register_same_name_with_different_billing_type(self):
-        subscription = ServiceCatalog.objects.create(name="ChatGPT", billing_type=BillingType.SUBSCRIPTION, created_by=self.admin)
-        metered = ServiceCatalog.objects.create(name="ChatGPT", billing_type=BillingType.METERED, created_by=self.admin)
-        self.client.login(username="user@example.com", password="password123")
+        request_item.refresh_from_db()
+        self.assertEqual(request_item.status, ServiceExceptionRequestStatus.APPROVED)
+        self.assertEqual(request_item.reviewed_by, self.admin)
+        self.assertEqual(request_item.review_note, "業務利用を承認")
+        service = RegisteredService.objects.get(user=self.user, name="Figma", billing_type=BillingType.SUBSCRIPTION)
+        self.assertTrue(service.is_active)
+        self.assertEqual(service.registration_source, ServiceRegistrationSource.EXCEPTION_REQUEST)
+        self.assertEqual(service.registered_by, self.admin)
+        self.assertEqual(request_item.approved_registered_service, service)
+        self.assertEqual(request_item.approved_catalog_service, service.catalog_service)
+        self.user.profile.refresh_from_db()
+        self.assertEqual(self.user.profile.account_status, UserAccountStatus.ACTIVE)
 
-        response = self.client.get(reverse("user_service_create"))
-        self.assertContains(response, "ChatGPT（サブスク）")
-        self.assertContains(response, "ChatGPT（従量課金 / API）")
+    def test_approval_reuses_and_reactivates_matching_catalog(self):
+        inactive_catalog = ServiceCatalog.objects.create(
+            name="Figma",
+            billing_type=BillingType.SUBSCRIPTION,
+            is_active=False,
+            created_by=self.admin,
+        )
+        self.submit_exception_request(name="figma")
+        request_item = ServiceExceptionRequest.objects.get(user=self.user)
+        self.client.logout()
+        self.client.login(username="admin", password="admin-password-123")
 
-        response = self.client.post(reverse("user_service_create"), {"catalog_service": subscription.pk})
-        self.assertRedirects(response, reverse("user_services"))
+        response = self.client.post(
+            reverse("staff_exception_requests"),
+            {"request_id": request_item.pk, "decision": "approve", "review_note": ""},
+        )
 
-        response = self.client.get(reverse("user_service_create"))
-        self.assertNotContains(response, "ChatGPT（サブスク）")
-        self.assertContains(response, "ChatGPT（従量課金 / API）")
+        self.assertEqual(response.status_code, 302)
+        inactive_catalog.refresh_from_db()
+        self.assertTrue(inactive_catalog.is_active)
+        request_item.refresh_from_db()
+        self.assertEqual(request_item.approved_catalog_service, inactive_catalog)
+        self.assertEqual(ServiceCatalog.objects.filter(name__iexact="Figma", billing_type=BillingType.SUBSCRIPTION).count(), 1)
 
-        response = self.client.post(reverse("user_service_create"), {"catalog_service": metered.pk})
-        self.assertRedirects(response, reverse("user_services"))
+    def test_staff_rejection_requires_reason_and_does_not_create_service(self):
+        self.submit_exception_request(name="Unknown AI")
+        request_item = ServiceExceptionRequest.objects.get(user=self.user)
+        self.client.logout()
+        self.client.login(username="admin", password="admin-password-123")
 
-        services = RegisteredService.objects.filter(user=self.user, name="ChatGPT")
-        self.assertEqual(services.count(), 2)
-        self.assertEqual({service.billing_type for service in services}, {BillingType.SUBSCRIPTION, BillingType.METERED})
+        invalid = self.client.post(
+            reverse("staff_exception_requests"),
+            {"request_id": request_item.pk, "decision": "reject", "review_note": ""},
+        )
+        self.assertEqual(invalid.status_code, 200)
+        request_item.refresh_from_db()
+        self.assertEqual(request_item.status, ServiceExceptionRequestStatus.PENDING)
 
-        response = self.client.get(reverse("dashboard"))
-        self.assertContains(response, "ChatGPT（サブスク）")
-        self.assertContains(response, "ChatGPT（従量課金 / API）")
-        self.assertNotContains(response, "<h2>利用サービス</h2>", html=True)
+        valid = self.client.post(
+            reverse("staff_exception_requests"),
+            {"request_id": request_item.pk, "decision": "reject", "review_note": "契約条件を確認できません。"},
+        )
+        self.assertRedirects(valid, reverse("staff_exception_requests") + "?status=pending")
+        request_item.refresh_from_db()
+        self.assertEqual(request_item.status, ServiceExceptionRequestStatus.REJECTED)
+        self.assertEqual(request_item.review_note, "契約条件を確認できません。")
+        self.assertFalse(RegisteredService.objects.filter(user=self.user, name="Unknown AI").exists())
+
+    def test_duplicate_pending_request_is_blocked_but_different_billing_type_is_allowed(self):
+        self.submit_exception_request(name="ChatGPT", billing_type=BillingType.SUBSCRIPTION)
+
+        duplicate = self.client.post(
+            reverse("service_exception_request_create"),
+            {
+                "service_name": "chatgpt",
+                "billing_type": BillingType.SUBSCRIPTION,
+                "purpose": "別用途",
+            },
+        )
+        self.assertEqual(duplicate.status_code, 200)
+        self.assertContains(duplicate, "同じサービス・支払い方法の例外申請がすでに確認待ちです")
+
+        different_type = self.client.post(
+            reverse("service_exception_request_create"),
+            {
+                "service_name": "ChatGPT",
+                "billing_type": BillingType.METERED,
+                "purpose": "API検証",
+            },
+        )
+        self.assertRedirects(different_type, reverse("user_services"))
+        self.assertEqual(ServiceExceptionRequest.objects.filter(user=self.user, service_name__iexact="ChatGPT").count(), 2)
 
     def test_user_can_stop_service_with_final_receipt_month_and_staff_can_see_it(self):
         service = RegisteredService.objects.create(
@@ -1750,8 +1878,8 @@ class UserServiceRegistrationTests(TestCase):
             catalog_service=self.catalog,
             name=self.catalog.name,
             billing_type=self.catalog.billing_type,
-            registration_source=ServiceRegistrationSource.USER,
-            registered_by=self.user,
+            registration_source=ServiceRegistrationSource.EXCEPTION_REQUEST,
+            registered_by=self.admin,
         )
         self.client.login(username="user@example.com", password="password123")
         response = self.client.post(
@@ -1769,12 +1897,15 @@ class UserServiceRegistrationTests(TestCase):
 
         response = self.client.get(reverse("dashboard") + "?month=2026-06")
         self.assertContains(response, "停止済み・最終 2026-06")
-        form = response.context["receipt_form"]
-        self.assertIn(service.id, set(form.fields["service"].queryset.values_list("id", flat=True)))
+        form = response.context["upload_form"]
+        service_values = {value for value, _label in form.fields["service"].choices}
+        self.assertIn(str(service.id), service_values)
 
         response = self.client.get(reverse("dashboard") + "?month=2026-07")
-        form = response.context["receipt_form"]
-        self.assertNotIn(service.id, set(form.fields["service"].queryset.values_list("id", flat=True)))
+        form = response.context["upload_form"]
+        service_values = {value for value, _label in form.fields["service"].choices}
+        self.assertNotIn(str(service.id), service_values)
+        self.assertIn(ReceiptBatchUploadForm.OTHER_VALUE, service_values)
 
         self.client.logout()
         self.client.login(username="admin", password="admin-password-123")
@@ -1782,16 +1913,6 @@ class UserServiceRegistrationTests(TestCase):
         self.assertContains(response, "ユーザー停止")
         self.assertContains(response, "2026年06月")
         self.assertContains(response, "解約済み")
-
-    def test_user_cannot_register_service_that_is_not_in_catalog(self):
-        inactive_catalog = ServiceCatalog.objects.create(name="Old Service", billing_type=BillingType.OTHER, is_active=False)
-        self.client.login(username="user@example.com", password="password123")
-        response = self.client.get(reverse("user_service_create"))
-
-        form = response.context["form"]
-        catalog_ids = set(form.fields["catalog_service"].queryset.values_list("id", flat=True))
-        self.assertIn(self.catalog.id, catalog_ids)
-        self.assertNotIn(inactive_catalog.id, catalog_ids)
 
     def test_stopped_service_cannot_be_used_after_final_receipt_month(self):
         service = RegisteredService.objects.create(
@@ -2853,4 +2974,4 @@ class FinalWorkflowAcceptanceTests(TestCase):
         self.assertEqual(response.status_code, 404)
 
     def test_version_file_is_present_without_web_display_requirement(self):
-        self.assertEqual(Path("VERSION").read_text(encoding="utf-8").strip(), "1.3.1")
+        self.assertEqual(Path("VERSION").read_text(encoding="utf-8").strip(), "1.4.0")

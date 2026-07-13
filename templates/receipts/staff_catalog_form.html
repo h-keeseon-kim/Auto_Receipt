@@ -3,7 +3,7 @@
 {% block content %}
 <section class="auth-card wide">
     <h1>{{ title }}</h1>
-    <p class="muted">ここで登録したサービスは、ユーザーの「サービス利用登録」画面と管理者のユーザー別割り当て画面に表示されます。</p>
+    <p class="muted">ここで登録したサービスは、例外申請の承認時または管理者のユーザー別割り当て時に利用サービスへ紐づけられます。</p>
     <form method="post" class="stack">
         {% csrf_token %}
         {{ form.as_p }}

@@ -8,6 +8,7 @@ urlpatterns = [
     path("dashboard/", views.dashboard, name="dashboard"),
     path("my/services/", views.user_services, name="user_services"),
     path("my/services/add/", views.user_service_create, name="user_service_create"),
+    path("my/services/exception-request/", views.user_service_create, name="service_exception_request_create"),
     path("my/services/<int:pk>/stop/", views.user_service_stop, name="user_service_stop"),
     # 旧URL互換。一般ユーザー画面からは表示せず、管理者専用画面へ移行済み。
     path("services/new/", views.service_create, name="service_create"),
@@ -21,6 +22,7 @@ urlpatterns = [
     path("staff/", views.staff_dashboard, name="staff_dashboard"),
     path("staff/users/new/", views.staff_user_create, name="staff_user_create"),
     path("staff/email/", views.staff_email, name="staff_email"),
+    path("staff/exception-requests/", views.staff_exception_requests, name="staff_exception_requests"),
     path("staff/catalog/new/", views.staff_catalog_create, name="staff_catalog_create"),
     path("staff/catalog/<int:pk>/edit/", views.staff_catalog_update, name="staff_catalog_update"),
     path("staff/catalog/<int:pk>/archive/", views.staff_catalog_archive, name="staff_catalog_archive"),

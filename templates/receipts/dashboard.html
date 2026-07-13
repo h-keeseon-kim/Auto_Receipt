@@ -110,7 +110,7 @@
 {% if submission.is_submitted %}
     <section class="card section notice">
         <h2>提出済みです</h2>
-        <p>登録サービスの新規追加と削除はロックされています。ファイル修正は可能です。返金・プラン変更などで追加の領収書が発生した場合は、下の「＋ その他の領収書」から追加できます。追加すると、この月は下書きに戻ります。</p>
+        <p>ファイル修正は可能です。登録サービスまたは「その他」に領収書を追加すると、この月は自動的に下書きへ戻るため、内容を確認して再度提出してください。</p>
         <a class="button primary" href="{{ submission.get_absolute_url }}">提出内容を見る</a>
     </section>
 {% endif %}
@@ -118,86 +118,46 @@
 <section class="card section" data-tutorial-target="receipt-add-form">
     <div class="section-header receipt-add-header">
         <div>
-            <h2>{% if submission.is_submitted %}追加領収書{% else %}領収書を追加{% endif %}</h2>
-            <p class="muted">{% if submission.is_submitted %}提出後に発生した登録外の領収書を追加できます。{% else %}登録サービスの領収書、または予期せず発生した「その他」の領収書を追加できます。{% endif %}</p>
+            <h2>領収書を追加</h2>
+            <p class="muted">サービスを選び、「＋ 領収書を追加」からファイルを選択します。同じサービスへ複数の領収書を追加でき、一度に複数ファイルも選択できます。</p>
         </div>
-        <button
-            type="button"
-            class="button small extra-receipt-toggle"
-            data-extra-receipt-toggle
-            data-tutorial-target="extra-receipt-button"
-            aria-expanded="{% if extra_form_open %}true{% else %}false{% endif %}"
-            aria-controls="extra-receipt-panel"
-        ><span class="plus-icon" aria-hidden="true">＋</span> その他の領収書</button>
     </div>
 
-    {% if not submission.is_submitted %}
-        {% if uploadable_services %}
-            <form method="post" enctype="multipart/form-data" class="form-grid auto-upload-form" data-auto-upload-form>
-                {% csrf_token %}
-                <input type="hidden" name="action" value="add_receipt">
-                {{ receipt_form.non_field_errors }}
-                <div class="form-row">
-                    {{ receipt_form.service.errors }}
-                    {{ receipt_form.service.label_tag }}
-                    {{ receipt_form.service }}
-                    {% if receipt_form.service.help_text %}<span class="helptext">{{ receipt_form.service.help_text }}</span>{% endif %}
-                </div>
-                <div class="form-row file-upload-field" data-file-upload-field hidden>
-                    {{ receipt_form.file.errors }}
-                    {{ receipt_form.file.label_tag }}
-                    {{ receipt_form.file }}
-                    {% if receipt_form.file.help_text %}<span class="helptext">{{ receipt_form.file.help_text }}</span>{% endif %}
-                    <p class="muted small auto-upload-note">ファイルを選択すると、自動で下の「アップロード済み領収書」に追加されます。</p>
-                </div>
-                <p class="muted small auto-upload-status" data-auto-upload-status aria-live="polite"></p>
-            </form>
-        {% else %}
-            <div class="notice compact-notice">
-                <p class="muted">登録サービスの領収書をアップロードするには、利用サービス登録が必要です。登録外の領収書は右上の「＋ その他の領収書」から追加できます。</p>
-                <a class="button" href="{% url 'user_services' %}">利用サービス管理へ</a>
-            </div>
-        {% endif %}
-    {% endif %}
-
-    <div id="extra-receipt-panel" class="extra-receipt-panel" data-extra-receipt-panel {% if not extra_form_open %}hidden{% endif %}>
-        <div class="extra-receipt-panel-heading">
-            <div>
-                <h3>その他の領収書を追加</h3>
-                <p class="muted small">返金、プラン変更、追加請求など、登録サービスに紐づかない領収書はこちらから追加します。</p>
-            </div>
+    <form method="post" enctype="multipart/form-data" class="form-grid receipt-batch-upload-form" data-receipt-batch-upload-form>
+        {% csrf_token %}
+        <input type="hidden" name="action" value="add_receipts">
+        {{ upload_form.non_field_errors }}
+        <div class="form-row">
+            {{ upload_form.service.errors }}
+            {{ upload_form.service.label_tag }}
+            {{ upload_form.service }}
+            {% if upload_form.service.help_text %}<span class="helptext">{{ upload_form.service.help_text }}</span>{% endif %}
         </div>
-        <form method="post" enctype="multipart/form-data" class="form-grid extra-auto-upload-form" data-extra-upload-form>
-            {% csrf_token %}
-            <input type="hidden" name="action" value="add_extra_receipt">
-            {{ extra_receipt_form.non_field_errors }}
-            <div class="form-row">
-                <label>項目</label>
-                <div class="readonly-form-value"><strong>その他</strong></div>
-            </div>
-            <div class="form-row">
-                {{ extra_receipt_form.memo.errors }}
-                {{ extra_receipt_form.memo.label_tag }}
-                {{ extra_receipt_form.memo }}
-                {% if extra_receipt_form.memo.help_text %}<span class="helptext">{{ extra_receipt_form.memo.help_text }}</span>{% endif %}
-            </div>
-            <div class="form-row file-upload-field" data-extra-file-upload-field hidden>
-                {{ extra_receipt_form.file.errors }}
-                {{ extra_receipt_form.file.label_tag }}
-                {{ extra_receipt_form.file }}
-                {% if extra_receipt_form.file.help_text %}<span class="helptext">{{ extra_receipt_form.file.help_text }}</span>{% endif %}
-                <p class="muted small auto-upload-note">メモを入力してファイルを選択すると、自動でアップロード済み領収書へ追加されます。</p>
-            </div>
-            <p class="muted small auto-upload-status" data-extra-upload-status aria-live="polite"></p>
-        </form>
-    </div>
+        <div class="form-row other-receipt-memo-field" data-other-receipt-memo-field hidden>
+            {{ upload_form.memo.errors }}
+            {{ upload_form.memo.label_tag }}
+            {{ upload_form.memo }}
+            {% if upload_form.memo.help_text %}<span class="helptext">{{ upload_form.memo.help_text }}</span>{% endif %}
+        </div>
+        <div class="form-row receipt-file-picker-panel" data-receipt-file-picker-panel hidden>
+            {{ upload_form.files.errors }}
+            {{ upload_form.files }}
+            <button type="button" class="button primary receipt-file-picker-button" data-receipt-file-picker-button>
+                <span class="plus-icon" aria-hidden="true">＋</span>
+                <span data-receipt-file-picker-label>領収書を追加</span>
+            </button>
+            {% if upload_form.files.help_text %}<span class="helptext">{{ upload_form.files.help_text }}</span>{% endif %}
+            <p class="muted small auto-upload-note">ファイル選択後、自動で下の「アップロード済み領収書」に追加されます。</p>
+        </div>
+        <p class="muted small auto-upload-status" data-receipt-upload-status aria-live="polite"></p>
+    </form>
 </section>
 
 <section class="card section" data-tutorial-target="uploaded-receipts-section">
     <div class="section-header">
         <h2>アップロード済み領収書</h2>
         {% if not submission.is_submitted %}
-            <form method="post" onsubmit="return confirm('この内容で提出しますか？提出後は新規追加と削除はできませんが、ファイル修正は可能です。');">
+            <form method="post" onsubmit="return confirm('この内容で提出しますか？提出後に領収書を追加した場合は、月が下書きへ戻り再提出が必要になります。');">
                 {% csrf_token %}
                 <input type="hidden" name="action" value="submit">
                 <button type="submit" class="button primary" data-tutorial-target="submit-receipts-button">提出する</button>
@@ -209,91 +169,76 @@
 
 <script>
 (function () {
-    const form = document.querySelector("[data-auto-upload-form]");
+    const form = document.querySelector("[data-receipt-batch-upload-form]");
     if (!form) return;
 
     const serviceSelect = form.querySelector("select[name='service']");
-    const fileField = form.querySelector("[data-file-upload-field]");
-    const fileInput = form.querySelector("input[type='file'][name='file']");
-    const status = form.querySelector("[data-auto-upload-status]");
+    const memoField = form.querySelector("[data-other-receipt-memo-field]");
+    const memoInput = form.querySelector("textarea[name='memo']");
+    const filePanel = form.querySelector("[data-receipt-file-picker-panel]");
+    const fileInput = form.querySelector("input[type='file'][name='files']");
+    const pickerButton = form.querySelector("[data-receipt-file-picker-button]");
+    const pickerLabel = form.querySelector("[data-receipt-file-picker-label]");
+    const status = form.querySelector("[data-receipt-upload-status]");
 
-    function refreshFileVisibility() {
-        const hasService = serviceSelect && serviceSelect.value;
-        if (fileField) fileField.hidden = !hasService;
-        if (fileInput) fileInput.disabled = !hasService;
-        if (status && !hasService) status.textContent = "サービスを選択すると、ファイルアップロード欄が表示されます。";
-        if (status && hasService) status.textContent = "";
+    function selectedLabel() {
+        if (!serviceSelect || serviceSelect.selectedIndex < 0) return "";
+        return serviceSelect.options[serviceSelect.selectedIndex].text || "";
+    }
+
+    function refreshUploadControls() {
+        const value = serviceSelect ? serviceSelect.value : "";
+        const isOther = value === "other";
+        const hasMemo = Boolean(memoInput && memoInput.value.trim());
+        const ready = Boolean(value) && (!isOther || hasMemo);
+
+        if (memoField) memoField.hidden = !isOther;
+        if (filePanel) filePanel.hidden = !ready;
+        if (pickerButton) pickerButton.disabled = !ready;
+        if (fileInput) fileInput.disabled = !ready;
+        if (pickerLabel) {
+            pickerLabel.textContent = value ? `${selectedLabel()}の領収書を追加` : "領収書を追加";
+        }
+        if (status) {
+            if (!value) {
+                status.textContent = "サービスを選択すると、領収書追加ボタンが表示されます。";
+            } else if (isOther && !hasMemo) {
+                status.textContent = "「その他」の内容メモを入力すると、領収書追加ボタンが表示されます。";
+            } else {
+                status.textContent = "";
+            }
+        }
     }
 
     if (serviceSelect) {
         serviceSelect.addEventListener("change", function () {
             if (fileInput) fileInput.value = "";
-            refreshFileVisibility();
+            if (memoInput && serviceSelect.value !== "other") memoInput.value = "";
+            refreshUploadControls();
         });
     }
-
-    if (fileInput) {
-        fileInput.addEventListener("change", function () {
-            if (!fileInput.files || fileInput.files.length === 0) return;
-            if (!serviceSelect || !serviceSelect.value) return;
-            if (status) status.textContent = "アップロード中です...";
-            form.submit();
-        });
-    }
-
-    refreshFileVisibility();
-})();
-
-(function () {
-    const toggle = document.querySelector("[data-extra-receipt-toggle]");
-    const panel = document.querySelector("[data-extra-receipt-panel]");
-    const form = document.querySelector("[data-extra-upload-form]");
-    if (!toggle || !panel || !form) return;
-
-    const memoInput = form.querySelector("textarea[name='memo']");
-    const fileField = form.querySelector("[data-extra-file-upload-field]");
-    const fileInput = form.querySelector("input[type='file'][name='file']");
-    const status = form.querySelector("[data-extra-upload-status]");
-
-    function setPanelOpen(open) {
-        panel.hidden = !open;
-        toggle.setAttribute("aria-expanded", open ? "true" : "false");
-        if (open && memoInput) memoInput.focus({preventScroll: true});
-    }
-
-    function refreshFileVisibility() {
-        const hasMemo = Boolean(memoInput && memoInput.value.trim());
-        if (fileField) fileField.hidden = !hasMemo;
-        if (fileInput) fileInput.disabled = !hasMemo;
-        if (status && !hasMemo) status.textContent = "メモを入力すると、ファイルアップロード欄が表示されます。";
-        if (status && hasMemo) status.textContent = "";
-    }
-
-    toggle.addEventListener("click", function () {
-        setPanelOpen(panel.hidden);
-        if (!panel.hidden) refreshFileVisibility();
-    });
 
     if (memoInput) {
         memoInput.addEventListener("input", function () {
             if (fileInput && !memoInput.value.trim()) fileInput.value = "";
-            refreshFileVisibility();
+            refreshUploadControls();
         });
     }
 
-    if (fileInput) {
+    if (pickerButton && fileInput) {
+        pickerButton.addEventListener("click", function () {
+            if (!pickerButton.disabled) fileInput.click();
+        });
         fileInput.addEventListener("change", function () {
-            if (!fileInput.files || fileInput.files.length === 0) return;
-            if (!memoInput || !memoInput.value.trim()) {
-                if (status) status.textContent = "先に領収書の内容メモを入力してください。";
-                return;
-            }
-            if (status) status.textContent = "アップロード中です...";
+            const count = fileInput.files ? fileInput.files.length : 0;
+            if (!count) return;
+            if (status) status.textContent = `${count}件の領収書をアップロード中です...`;
+            pickerButton.disabled = true;
             form.submit();
         });
     }
 
-    refreshFileVisibility();
+    refreshUploadControls();
 })();
 </script>
 {% endblock %}

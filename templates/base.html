@@ -16,6 +16,10 @@
                     <a href="{% url 'history' %}" data-tutorial-target="staff-history-nav">提出履歴</a>
                     <a href="{% url 'staff_card_statements' %}" data-tutorial-target="staff-statements-nav">ご利用代金明細</a>
                     <a href="{% url 'staff_services' %}" data-tutorial-target="staff-services-nav">利用サービス管理</a>
+                    <a href="{% url 'staff_exception_requests' %}" data-tutorial-target="staff-exception-requests-nav" class="nav-with-count">
+                        例外申請
+                        {% if staff_pending_exception_count %}<span class="nav-count-badge">{{ staff_pending_exception_count }}</span>{% endif %}
+                    </a>
                     <a href="{% url 'staff_user_create' %}" data-tutorial-target="staff-user-create-nav">ユーザー管理</a>
                     <a href="{% url 'staff_email' %}">メール送信</a>
                 {% else %}
@@ -37,6 +41,12 @@
         </nav>
     </header>
     <main class="container">
+        {% if user.is_authenticated and user.is_staff and staff_pending_exception_count and request.resolver_match.url_name != "staff_exception_requests" %}
+            <div class="message staff-notification">
+                <strong>未対応のサービス例外申請が {{ staff_pending_exception_count }} 件あります。</strong>
+                <a href="{% url 'staff_exception_requests' %}">申請を確認する</a>
+            </div>
+        {% endif %}
         {% if messages %}
             <div class="messages">
                 {% for message in messages %}
@@ -48,7 +58,7 @@
     </main>
 
     {% if user.is_authenticated and tutorial_available %}
-        <div class="tutorial-backdrop" data-tutorial-root data-auto-start="{% if tutorial_auto_start %}true{% else %}false{% endif %}" data-complete-url="{{ tutorial_complete_url }}" data-user-services-url="{% url 'user_services' %}" data-upload-url="{% url 'dashboard' %}" data-history-url="{% url 'history' %}" data-staff-statements-url="{% url 'staff_card_statements' %}" data-staff-services-url="{% url 'staff_services' %}?tab=catalog" data-staff-user-create-url="{% url 'staff_user_create' %}" hidden>
+        <div class="tutorial-backdrop" data-tutorial-root data-auto-start="{% if tutorial_auto_start %}true{% else %}false{% endif %}" data-complete-url="{{ tutorial_complete_url }}" data-user-services-url="{% url 'user_services' %}" data-upload-url="{% url 'dashboard' %}" data-history-url="{% url 'history' %}" data-staff-statements-url="{% url 'staff_card_statements' %}" data-staff-services-url="{% url 'staff_services' %}?tab=catalog" data-staff-exception-requests-url="{% url 'staff_exception_requests' %}" data-staff-user-create-url="{% url 'staff_user_create' %}" hidden>
             <form hidden>{% csrf_token %}</form>
             <section class="tutorial-card" role="dialog" aria-modal="true" aria-labelledby="tutorial-title" aria-describedby="tutorial-body" tabindex="-1">
                 <button type="button" class="tutorial-close" data-tutorial-close aria-label="チュートリアルを閉じる">×</button>

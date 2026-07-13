@@ -15,15 +15,23 @@
         {
             pageName: "user_services",
             selector: "[data-tutorial-target='service-registration-button']",
-            title: "新しい利用サービスを登録します",
-            body: "新しく使い始めたサービスがある場合は「サービス利用登録」を押します。管理者が登録したサービスマスターから選択するため、サービス名の表記ゆれを防げます。",
+            title: "新しいサービスは例外申請します",
+            body: "新しいサービスを利用開始する前に「新規サービス例外申請」を押し、サービス名、支払い方法、用途を申請します。管理者の承認後に利用中サービスへ追加されます。",
             placement: "left",
+        },
+        {
+            pageName: "user_services",
+            selector: "[data-tutorial-target='service-exception-history-section']",
+            title: "例外申請の状態を確認します",
+            body: "確認待ち、承認済み、却下の状態と管理者コメントをここで確認できます。承認前に契約や課金を開始しないでください。",
+            placement: "above",
+            scrollBlock: "nearest",
         },
         {
             pageName: "user_services",
             selector: "[data-tutorial-target='active-services-section']",
             title: "利用中サービスを確認します",
-            body: "領収書アップロード時に選べるサービスは、ここに表示される利用中サービスです。管理者登録とユーザー登録のどちらで追加されたかも確認できます。",
+            body: "領収書アップロード時に選べるサービスは、ここに表示される利用中サービスです。管理者登録または例外申請の承認によって追加されたことも確認できます。",
             placement: "above",
             scrollBlock: "nearest",
         },
@@ -52,18 +60,10 @@
         {
             pageName: "dashboard",
             selector: "[data-tutorial-target='receipt-add-form']",
-            title: "サービスを選んでファイルを追加します",
-            body: "領収書を追加する時は、登録済みサービスを選択します。サービスを選ぶとファイルアップロード欄が表示され、ファイルを選ぶと自動でアップロードされます。",
+            title: "サービスを選んで領収書を追加します",
+            body: "登録済みサービスまたは「その他」を選び、「＋ 領収書を追加」からファイルを選びます。同じサービスに複数の領収書を追加でき、一度に複数ファイルも選択できます。",
             placement: "above",
             scrollBlock: "center",
-        },
-        {
-            pageName: "dashboard",
-            selector: "[data-tutorial-target='extra-receipt-button']",
-            title: "登録外の領収書も追加できます",
-            body: "返金、プラン変更、追加請求など、登録サービスにない領収書が発生した場合は「＋ その他の領収書」を押します。内容メモは必須で、AIはメモを参考にしながら領収書ファイル内の情報を優先して確認します。",
-            placement: "left",
-            scrollBlock: "nearest",
         },
         {
             pageName: "dashboard",
@@ -152,6 +152,20 @@
             body: "ここでユーザーが選択できるサービスマスターを登録します。同じサービス名でも、サブスクや従量課金 / APIなど種別ごとに分けられます。",
             placement: "above",
             scrollBlock: "nearest",
+        },
+        {
+            pageName: "staff_exception_requests",
+            selector: "[data-tutorial-target='staff-exception-requests-nav']",
+            title: "サービス例外申請を確認します",
+            body: "ユーザーから届いた新規サービスの例外申請を確認し、承認または却下します。確認待ち件数はメニューのバッジにも表示されます。",
+            placement: "below",
+        },
+        {
+            pageName: "staff_exception_requests",
+            selector: "[data-tutorial-target='staff-exception-request-list']",
+            title: "承認すると利用サービスへ追加されます",
+            body: "承認するとサービスマスターを作成または再利用し、対象ユーザーの利用サービスへ自動で追加します。却下時は理由を入力します。",
+            placement: "above",
         },
         {
             pageName: "staff_user_create",
@@ -249,6 +263,7 @@
             history: root.dataset.historyUrl,
             staff_card_statements: root.dataset.staffStatementsUrl,
             staff_services: root.dataset.staffServicesUrl,
+            staff_exception_requests: root.dataset.staffExceptionRequestsUrl,
             staff_user_create: root.dataset.staffUserCreateUrl,
         };
         const card = root.querySelector(".tutorial-card");

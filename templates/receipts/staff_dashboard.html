@@ -23,7 +23,7 @@
     <div class="card"><span class="label">下書き</span><strong>{{ stats.draft }}</strong></div>
     <div class="card"><span class="label">未着手</span><strong>{{ stats.not_started }}</strong></div>
     <div class="card"><span class="label">利用中サービス</span><strong>{{ stats.active_service_count }}</strong></div>
-    <div class="card"><span class="label">ユーザー登録</span><strong>{{ stats.user_registered_count }}</strong></div>
+    <div class="card"><span class="label">ユーザー起点登録</span><strong>{{ stats.user_registered_count }}</strong></div>
     <div class="card"><span class="label">ユーザー停止</span><strong>{{ stats.user_stopped_count }}</strong></div>
     <div class="card"><span class="label">保存中ファイル</span><strong>{{ stats.available_file_count }}</strong></div>
 </section>
@@ -36,7 +36,7 @@
     </div>
     <div class="table-wrap">
         <table>
-            <thead><tr><th>ユーザー</th><th>メール</th><th>利用中サービス</th><th>ユーザー登録</th><th>ユーザー停止</th><th>ステータス</th><th>領収書数</th><th>保存中</th><th>削除済み</th><th>操作</th></tr></thead>
+            <thead><tr><th>ユーザー</th><th>メール</th><th>利用中サービス</th><th>ユーザー起点登録</th><th>ユーザー停止</th><th>ステータス</th><th>領収書数</th><th>保存中</th><th>削除済み</th><th>操作</th></tr></thead>
             <tbody>
                 {% for row in rows %}
                     <tr>
