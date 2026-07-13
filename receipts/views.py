@@ -78,6 +78,7 @@ from .models import (
 )
 from .monthly_status import build_user_month_summary
 from .statement_processing import reconcile_card_statement_items, start_background_statement_processing
+from .statement_pdf import build_card_statement_reconciliation_pdf, reconciliation_report_filename
 
 
 def safe_part(value: str, fallback: str = "item") -> str:
@@ -1064,6 +1065,24 @@ def staff_download_card_statement(request, pk: int):
         raise Http404("保存期限が過ぎたか、明細ファイルが削除済みです。")
     filename = statement.original_filename or Path(statement.file.name).name
     return FileResponse(statement.file.open("rb"), as_attachment=True, filename=filename)
+
+
+@staff_member_required
+def staff_download_card_statement_report(request, pk: int):
+    base_statement = get_object_or_404(CardStatement, pk=pk)
+    statement = get_object_or_404(global_statement_queryset(base_statement.period_month), pk=pk)
+    if statement.status in {CardStatementStatus.PROCESSING, CardStatementStatus.FAILED}:
+        raise Http404("AI解析・照合が完了してから照合結果PDFをダウンロードしてください。")
+    if not statement.items.exists():
+        raise Http404("PDFに出力できる照合結果がありません。")
+
+    pdf_bytes = build_card_statement_reconciliation_pdf(statement)
+    return FileResponse(
+        BytesIO(pdf_bytes),
+        as_attachment=True,
+        filename=reconciliation_report_filename(statement),
+        content_type="application/pdf",
+    )
 
 
 @staff_member_required

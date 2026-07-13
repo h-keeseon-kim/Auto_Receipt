@@ -5,3 +5,4 @@ psycopg[binary]>=3.2
 whitenoise>=6.8
 
 openai>=2.0
+reportlab>=4.2,<5

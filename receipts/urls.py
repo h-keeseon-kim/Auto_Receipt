@@ -40,6 +40,7 @@ urlpatterns = [
     path("staff/card-statements/upload/", views.staff_upload_card_statement, name="staff_upload_card_statement"),
     path("staff/card-statements/status/", views.staff_card_statement_status, name="staff_card_statement_status"),
     path("staff/card-statements/<int:pk>/download/", views.staff_download_card_statement, name="staff_download_card_statement"),
+    path("staff/card-statements/<int:pk>/report.pdf", views.staff_download_card_statement_report, name="staff_download_card_statement_report"),
     path("staff/card-statements/<int:pk>/delete/", views.staff_delete_card_statement, name="staff_delete_card_statement"),
     path("staff/card-statements/<int:pk>/reconcile/", views.staff_reconcile_card_statement, name="staff_reconcile_card_statement"),
     path("staff/card-statement-items/<int:pk>/update/", views.staff_update_statement_item, name="staff_update_statement_item"),

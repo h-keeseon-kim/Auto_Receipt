@@ -2705,5 +2705,93 @@ class FinalWorkflowAcceptanceTests(TestCase):
         self.assertFalse(path.exists())
         self.assertTrue(CardStatement.objects.filter(pk=statement.pk).exists())
 
+    def test_staff_can_download_slack_shareable_statement_reconciliation_pdf(self):
+        receipt = self.create_receipt(service=self.subscription, filename="matched.pdf")
+        receipt.generated_filename = "260503_user_OpenAI_220_USD.pdf"
+        receipt.save(update_fields=["generated_filename"])
+        statement = CardStatement.objects.create(
+            period_month=date(2026, 6, 1),
+            file=SimpleUploadedFile("company-statement.pdf", b"%PDF-1.4 statement", content_type="application/pdf"),
+            original_filename="company-statement.pdf",
+            content_type="application/pdf",
+            status=CardStatementStatus.NEEDS_REVIEW,
+            card_last4="7210",
+            statement_period="2026-06",
+            payment_date=date(2026, 6, 29),
+            ai_admin_memo="1件の領収書が未提出です。",
+            uploaded_by=self.superuser,
+            processed_at=timezone.now(),
+            reconciled_at=timezone.now(),
+            expires_at=timezone.now() + timedelta(days=30),
+        )
+        CardStatementItem.objects.create(
+            statement=statement,
+            sequence=1,
+            line_reference="0276",
+            transaction_date=date(2026, 5, 3),
+            merchant_name="OPENAI *CHATGPT",
+            amount_jpy=Decimal("35949"),
+            original_amount=Decimal("220"),
+            original_currency="USD",
+            matched_user=self.user,
+            matched_catalog_service=self.subscription_catalog,
+            matched_service=self.subscription,
+            matched_receipt=receipt,
+            match_status=StatementMatchStatus.MATCHED,
+            receipt_required=True,
+            match_memo="提出済み領収書と一致しました。",
+        )
+        CardStatementItem.objects.create(
+            statement=statement,
+            sequence=2,
+            line_reference="0302",
+            transaction_date=date(2026, 5, 16),
+            merchant_name="OPENAI",
+            amount_jpy=Decimal("8236"),
+            original_amount=Decimal("49.92"),
+            original_currency="USD",
+            matched_user=self.user,
+            matched_catalog_service=self.api_catalog,
+            matched_service=self.api_service,
+            match_status=StatementMatchStatus.MATCHED,
+            receipt_required=True,
+            match_memo="対応する領収書が見つかりません。",
+        )
+
+        self.client.login(username="admin", password="admin-password-123")
+        page = self.client.get(reverse("staff_card_statements") + "?month=2026-06")
+        self.assertContains(page, "照合結果PDF")
+        self.assertContains(page, reverse("staff_download_card_statement_report", args=[statement.pk]))
+
+        response = self.client.get(reverse("staff_download_card_statement_report", args=[statement.pk]))
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response["Content-Type"], "application/pdf")
+        self.assertIn("attachment", response["Content-Disposition"])
+        self.assertIn("ReceiptHub_2026-06", response["Content-Disposition"])
+        payload = b"".join(response.streaming_content)
+        self.assertTrue(payload.startswith(b"%PDF-"))
+        self.assertGreater(len(payload), 5000)
+
+    def test_processing_statement_report_is_not_downloadable(self):
+        statement = CardStatement.objects.create(
+            period_month=date(2026, 6, 1),
+            file=SimpleUploadedFile("processing.pdf", b"%PDF-1.4 statement", content_type="application/pdf"),
+            original_filename="processing.pdf",
+            status=CardStatementStatus.PROCESSING,
+            expires_at=timezone.now() + timedelta(days=30),
+        )
+        CardStatementItem.objects.create(
+            statement=statement,
+            sequence=1,
+            merchant_name="OPENAI",
+            receipt_required=True,
+        )
+        self.client.login(username="admin", password="admin-password-123")
+
+        page = self.client.get(reverse("staff_card_statements") + "?month=2026-06")
+        self.assertNotContains(page, reverse("staff_download_card_statement_report", args=[statement.pk]))
+        response = self.client.get(reverse("staff_download_card_statement_report", args=[statement.pk]))
+        self.assertEqual(response.status_code, 404)
+
     def test_version_file_is_present_without_web_display_requirement(self):
-        self.assertEqual(Path("VERSION").read_text(encoding="utf-8").strip(), "1.2.0")
+        self.assertEqual(Path("VERSION").read_text(encoding="utf-8").strip(), "1.3.0")

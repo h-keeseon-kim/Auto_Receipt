@@ -16,6 +16,9 @@
                     {% csrf_token %}
                     <button type="submit" class="button small">最新の領収書と再照合</button>
                 </form>
+                {% if statement.items.count %}
+                    <a class="button small primary" href="{% url 'staff_download_card_statement_report' statement.pk %}" title="Slack共有用の照合結果PDFをダウンロード">照合結果PDF</a>
+                {% endif %}
             {% endif %}
             {% if statement.file_available %}<a class="button small" href="{% url 'staff_download_card_statement' statement.pk %}">明細DL</a>{% endif %}
             <form method="post" action="{% url 'staff_delete_card_statement' statement.pk %}" onsubmit="return confirm('この全社カード明細ファイルと照合履歴を削除しますか？');">
