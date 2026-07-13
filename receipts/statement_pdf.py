@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from collections import defaultdict
 from decimal import Decimal
 from io import BytesIO
 from xml.sax.saxutils import escape
@@ -27,7 +26,6 @@ MUTED = colors.HexColor("#64748B")
 BRAND = colors.HexColor("#2457D6")
 BORDER = colors.HexColor("#D7DFEA")
 HEADER_BG = colors.HexColor("#EEF3FF")
-SUCCESS_BG = colors.HexColor("#E8F7EC")
 MISSING_BG = colors.HexColor("#FFF3BF")
 REVIEW_BG = colors.HexColor("#FFE4C7")
 NEUTRAL_BG = colors.HexColor("#F5F7FA")
@@ -169,22 +167,6 @@ def _styles() -> dict[str, ParagraphStyle]:
             textColor=WHITE,
             alignment=TA_CENTER,
         ),
-        "metric_label": ParagraphStyle(
-            "metric_label",
-            fontName=FONT_GOTHIC,
-            fontSize=6.8,
-            leading=9,
-            textColor=MUTED,
-            alignment=TA_CENTER,
-        ),
-        "metric_value": ParagraphStyle(
-            "metric_value",
-            fontName=FONT_GOTHIC,
-            fontSize=12,
-            leading=15,
-            textColor=INK,
-            alignment=TA_CENTER,
-        ),
         "notice": ParagraphStyle(
             "notice",
             fontName=FONT_GOTHIC,
@@ -250,102 +232,9 @@ def _metadata_table(statement: CardStatement, styles: dict[str, ParagraphStyle])
     return table
 
 
-def _metrics_table(items: list[CardStatementItem], styles: dict[str, ParagraphStyle]) -> Table:
-    required = sum(1 for item in items if item.receipt_required)
-    receipt_found = sum(1 for item in items if item.receipt_required and _receipt_available(item))
-    missing = sum(1 for item in items if item.receipt_required and not _receipt_available(item))
-    manual = sum(1 for item in items if _manual_review(item))
-    ignored = sum(1 for item in items if item.match_status == StatementMatchStatus.IGNORED)
-    values = [
-        ("明細行", len(items)),
-        ("領収書対象", required),
-        ("領収書確認済み", receipt_found),
-        ("領収書未提出", missing),
-        ("手動確認", manual),
-        ("対象外", ignored),
-    ]
-    data = [
-        [_paragraph(label, styles["metric_label"]) for label, _ in values],
-        [_paragraph(str(value), styles["metric_value"]) for _, value in values],
-    ]
-    table = Table(data, colWidths=[43 * mm] * len(values), rowHeights=[9 * mm, 10 * mm])
-    commands = [
-        ("GRID", (0, 0), (-1, -1), 0.35, BORDER),
-        ("BACKGROUND", (0, 0), (-1, 0), NEUTRAL_BG),
-        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
-        ("LEFTPADDING", (0, 0), (-1, -1), 3),
-        ("RIGHTPADDING", (0, 0), (-1, -1), 3),
-    ]
-    for index, (_, value) in enumerate(values):
-        if index == 3 and value:
-            commands.append(("BACKGROUND", (index, 1), (index, 1), MISSING_BG))
-        elif index == 4 and value:
-            commands.append(("BACKGROUND", (index, 1), (index, 1), REVIEW_BG))
-        elif index == 2 and value:
-            commands.append(("BACKGROUND", (index, 1), (index, 1), SUCCESS_BG))
-    table.setStyle(TableStyle(commands))
-    return table
-
-
-def _user_summary_table(action_items: list[CardStatementItem], styles: dict[str, ParagraphStyle]) -> Table | Paragraph:
-    if not action_items:
-        return Paragraph("要対応の明細行はありません。", styles["notice"])
-
-    grouped: dict[str, dict[str, object]] = defaultdict(lambda: {"missing": 0, "review": 0, "services": set()})
-    for item in action_items:
-        user_label = item.matched_user_label
-        if user_label == "-":
-            user_label = "ユーザー未特定"
-        data = grouped[user_label]
-        if item.receipt_required and not _receipt_available(item):
-            data["missing"] = int(data["missing"]) + 1
-        if _manual_review(item):
-            data["review"] = int(data["review"]) + 1
-        service_label = item.matched_service_label
-        if service_label != "-":
-            services = data["services"]
-            assert isinstance(services, set)
-            services.add(service_label)
-
-    rows = [
-        [
-            _paragraph("ユーザー", styles["header"]),
-            _paragraph("未提出", styles["header"]),
-            _paragraph("要確認", styles["header"]),
-            _paragraph("関連サービス", styles["header"]),
-        ]
-    ]
-    for user_label in sorted(grouped, key=lambda value: (value == "ユーザー未特定", value.lower())):
-        data = grouped[user_label]
-        service_text = "、".join(sorted(data["services"])) if data["services"] else "-"
-        rows.append(
-            [
-                _paragraph(user_label, styles["body"]),
-                _paragraph(data["missing"], styles["body"]),
-                _paragraph(data["review"], styles["body"]),
-                _paragraph(service_text, styles["small"]),
-            ]
-        )
-    table = Table(rows, colWidths=[62 * mm, 22 * mm, 22 * mm, 152 * mm], repeatRows=1)
-    table.setStyle(
-        TableStyle(
-            [
-                ("BACKGROUND", (0, 0), (-1, 0), BRAND),
-                ("GRID", (0, 0), (-1, -1), 0.35, BORDER),
-                ("VALIGN", (0, 0), (-1, -1), "TOP"),
-                ("LEFTPADDING", (0, 0), (-1, -1), 4),
-                ("RIGHTPADDING", (0, 0), (-1, -1), 4),
-                ("TOPPADDING", (0, 0), (-1, -1), 4),
-                ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
-            ]
-        )
-    )
-    return table
-
-
 def _action_items_table(action_items: list[CardStatementItem], styles: dict[str, ParagraphStyle]) -> Table | Paragraph:
     if not action_items:
-        return Paragraph("未提出・手動確認対象の明細行はありません。", styles["notice"])
+        return Paragraph("未提出・確認対象の明細行はありません。", styles["notice"])
 
     rows = [
         [
@@ -479,43 +368,17 @@ def build_card_statement_reconciliation_pdf(statement: CardStatement) -> bytes:
         subject=f"{statement.period_month:%Y-%m} ご利用代金明細照合結果",
     )
 
-    generated_at = timezone.localtime(timezone.now()).strftime("%Y-%m-%d %H:%M")
     story: list = [
         Paragraph("ご利用代金明細 照合結果", styles["title"]),
-        Paragraph(
-            f"{statement.period_month:%Y年%m月}分 / 生成日時: {generated_at} / Slack共有用PDF",
-            styles["subtitle"],
-        ),
+        Paragraph(f"{statement.period_month:%Y年%m月}分", styles["subtitle"]),
         _metadata_table(statement, styles),
         Spacer(1, 3 * mm),
-        _metrics_table(items, styles),
-        Spacer(1, 3 * mm),
-        Paragraph(
-            "このPDFには複数ユーザーの利用状況が含まれます。共有先のSlackチャンネル権限を確認してください。"
-            "黄色は領収書未提出、薄橙色は対応関係の手動確認が必要な行です。",
-            styles["notice"],
-        ),
+        Paragraph("未提出・確認対象", styles["section"]),
+        _action_items_table(action_items, styles),
+        PageBreak(),
+        Paragraph("全明細照合結果", styles["section"]),
+        _all_items_table(items, styles),
     ]
-
-    if statement.ai_admin_memo:
-        story.extend(
-            [
-                Paragraph("解析メモ", styles["section"]),
-                Paragraph(_safe_text(statement.ai_admin_memo), styles["notice"]),
-            ]
-        )
-
-    story.extend(
-        [
-            Paragraph("ユーザー別 要対応サマリー", styles["section"]),
-            _user_summary_table(action_items, styles),
-            Paragraph("未提出・手動確認対象", styles["section"]),
-            _action_items_table(action_items, styles),
-            PageBreak(),
-            Paragraph("全明細照合結果", styles["section"]),
-            _all_items_table(items, styles),
-        ]
-    )
 
     document.build(story, onFirstPage=_page_callback, onLaterPages=_page_callback)
     return buffer.getvalue()

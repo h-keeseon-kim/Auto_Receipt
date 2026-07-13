@@ -2772,6 +2772,65 @@ class FinalWorkflowAcceptanceTests(TestCase):
         self.assertTrue(payload.startswith(b"%PDF-"))
         self.assertGreater(len(payload), 5000)
 
+    def test_statement_pdf_uses_simplified_sections(self):
+        from . import statement_pdf
+
+        statement = CardStatement.objects.create(
+            period_month=date(2026, 6, 1),
+            file=SimpleUploadedFile("company-statement.pdf", b"%PDF-1.4 statement", content_type="application/pdf"),
+            original_filename="company-statement.pdf",
+            content_type="application/pdf",
+            status=CardStatementStatus.NEEDS_REVIEW,
+            card_last4="7210",
+            statement_period="2026-06",
+            payment_date=date(2026, 6, 29),
+            ai_admin_memo="この解析メモはPDFに表示しません。",
+            uploaded_by=self.superuser,
+            processed_at=timezone.now(),
+            reconciled_at=timezone.now(),
+            expires_at=timezone.now() + timedelta(days=30),
+        )
+        CardStatementItem.objects.create(
+            statement=statement,
+            sequence=1,
+            line_reference="0302",
+            transaction_date=date(2026, 5, 16),
+            merchant_name="OPENAI",
+            amount_jpy=Decimal("8236"),
+            original_amount=Decimal("49.92"),
+            original_currency="USD",
+            matched_user=self.user,
+            matched_catalog_service=self.api_catalog,
+            matched_service=self.api_service,
+            match_status=StatementMatchStatus.MATCHED,
+            receipt_required=True,
+            match_memo="対応する領収書が見つかりません。",
+        )
+
+        captured_text: list[str] = []
+        original_paragraph = statement_pdf.Paragraph
+
+        def capture_paragraph(text, style, *args, **kwargs):
+            captured_text.append(str(text))
+            return original_paragraph(text, style, *args, **kwargs)
+
+        with mock.patch.object(statement_pdf, "Paragraph", side_effect=capture_paragraph):
+            payload = statement_pdf.build_card_statement_reconciliation_pdf(statement)
+
+        self.assertTrue(payload.startswith(b"%PDF-"))
+        rendered_text = "\n".join(captured_text)
+        self.assertIn("2026年06月分", rendered_text)
+        self.assertIn("未提出・確認対象", rendered_text)
+        self.assertNotIn("未提出・手動確認対象", rendered_text)
+        self.assertNotIn("ユーザー別 要対応サマリー", rendered_text)
+        self.assertNotIn("解析メモ", rendered_text)
+        self.assertNotIn("Slack共有用PDF", rendered_text)
+        self.assertNotIn("生成日時:", rendered_text)
+        self.assertNotIn("このPDFには複数ユーザー", rendered_text)
+        self.assertNotIn("明細行", rendered_text)
+        self.assertNotIn("領収書対象", rendered_text)
+        self.assertNotIn("領収書確認済み", rendered_text)
+
     def test_processing_statement_report_is_not_downloadable(self):
         statement = CardStatement.objects.create(
             period_month=date(2026, 6, 1),
@@ -2794,4 +2853,4 @@ class FinalWorkflowAcceptanceTests(TestCase):
         self.assertEqual(response.status_code, 404)
 
     def test_version_file_is_present_without_web_display_requirement(self):
-        self.assertEqual(Path("VERSION").read_text(encoding="utf-8").strip(), "1.3.0")
+        self.assertEqual(Path("VERSION").read_text(encoding="utf-8").strip(), "1.3.1")
