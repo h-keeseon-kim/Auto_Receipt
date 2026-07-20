@@ -144,6 +144,8 @@ class ReceiptAdmin(admin.ModelAdmin):
         "amount",
         "currency",
         "issued_on",
+        "upload_source",
+        "uploaded_by",
         "uploaded_at",
         "expires_at",
         "ai_filename_status",
@@ -152,8 +154,8 @@ class ReceiptAdmin(admin.ModelAdmin):
         "ai_check_period_match",
         "file_status",
     )
-    list_filter = ("is_extra", "billing_type_snapshot", "currency", "ai_filename_status", "ai_period_check_status", "ai_check_service_payee_related", "ai_check_period_match", "submission__period_month", "file_deleted_at")
-    search_fields = ("service_name_snapshot", "memo", "submission__user__username", "original_filename", "generated_filename", "ai_extracted_payee", "ai_filename_admin_memo", "ai_period_check_memo", "ai_service_payee_check_memo")
+    list_filter = ("is_extra", "upload_source", "billing_type_snapshot", "currency", "ai_filename_status", "ai_period_check_status", "ai_check_service_payee_related", "ai_check_period_match", "submission__period_month", "file_deleted_at")
+    search_fields = ("service_name_snapshot", "memo", "submission__user__username", "uploaded_by__username", "uploaded_by__email", "original_filename", "generated_filename", "ai_extracted_payee", "ai_filename_admin_memo", "ai_period_check_memo", "ai_service_payee_check_memo")
     readonly_fields = (
         "service_name_snapshot",
         "billing_type_snapshot",
@@ -177,6 +179,8 @@ class ReceiptAdmin(admin.ModelAdmin):
         "ai_check_period_match",
         "file_size",
         "content_type",
+        "upload_source",
+        "uploaded_by",
         "uploaded_at",
         "expires_at",
         "file_deleted_at",

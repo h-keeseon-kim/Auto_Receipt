@@ -59,6 +59,7 @@
                         <td>
                             <div class="table-actions">
                                 <a class="button small primary" href="{% url 'staff_user_month_status' row.user.pk %}?month={{ selected_month|date:'Y-m' }}">月別状況</a>
+                                <a class="button small" href="{% url 'staff_user_month_status' row.user.pk %}?month={{ selected_month|date:'Y-m' }}#staff-receipt-upload">代理アップロード</a>
                                 <a class="button small" href="{% url 'staff_services' %}?tab=users&user={{ row.user.pk }}">サービス</a>
                                 {% if row.submission %}
                                     <a class="button small" href="{% url 'staff_submission_detail' row.submission.pk %}">提出詳細</a>

@@ -566,7 +566,15 @@ class ReceiptBatchUploadForm(forms.Form):
         help_text="PDF / PNG / JPG / JPEG / WEBP。複数ファイルを一度に選択できます。各ファイル最大10MB。",
     )
 
-    def __init__(self, *args, user: User, period_month=None, selected_choice: str = "", **kwargs):
+    def __init__(
+        self,
+        *args,
+        user: User,
+        period_month=None,
+        selected_choice: str = "",
+        hide_file_input: bool = True,
+        **kwargs,
+    ):
         self.user = user
         self.period_month = period_month
         self.selected_service: RegisteredService | None = None
@@ -589,7 +597,8 @@ class ReceiptBatchUploadForm(forms.Form):
         if not self.is_bound and selected_choice in valid_values:
             self.initial["service"] = selected_choice
         apply_design_classes(self)
-        self.fields["files"].widget.attrs["class"] = "sr-only"
+        if hide_file_input:
+            self.fields["files"].widget.attrs["class"] = "sr-only"
 
     def clean_service(self):
         value = self.cleaned_data.get("service") or ""

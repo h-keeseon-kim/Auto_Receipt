@@ -43,6 +43,7 @@ from .models import (
     Receipt,
     ReceiptFilenameStatus,
     ReceiptPeriodCheckStatus,
+    ReceiptUploadSource,
     ReceiptResubmissionRequest,
     RegisteredService,
     MonthlyServiceDeclaration,
@@ -669,6 +670,8 @@ class ReceiptFlowTests(TestCase):
         self.assertIsNone(receipt.amount)
         self.assertIsNone(receipt.issued_on)
         self.assertEqual(receipt.memo, "")
+        self.assertEqual(receipt.upload_source, ReceiptUploadSource.USER)
+        self.assertEqual(receipt.uploaded_by, self.user)
 
         response = self.client.post(reverse("dashboard") + "?month=2026-06", {"action": "submit"})
         self.assertEqual(response.status_code, 302)
@@ -1352,6 +1355,155 @@ class StaffServiceAssignmentTests(TestCase):
         self.client.login(username="user@example.com", password="password123")
         response = self.client.get(reverse("history"))
         self.assertNotContains(response, "2026年06月")
+
+    def test_staff_can_proxy_upload_multiple_receipts_for_user_service(self):
+        service = RegisteredService.objects.create(
+            user=self.user,
+            catalog_service=self.catalog,
+            name=self.catalog.name,
+            billing_type=self.catalog.billing_type,
+        )
+        MonthlyServiceDeclaration.objects.create(
+            user=self.user,
+            service=service,
+            period_month=date(2026, 6, 1),
+            no_usage=True,
+            declared_by=self.user,
+        )
+        self.client.login(username="admin", password="admin-password-123")
+
+        page = self.client.get(
+            reverse("staff_user_month_status", args=[self.user.pk]) + "?month=2026-06"
+        )
+        self.assertEqual(page.status_code, 200)
+        self.assertContains(page, "管理者代理アップロード")
+        self.assertContains(page, "領収書を代理アップロード")
+        self.assertContains(page, service.display_name)
+
+        response = self.client.post(
+            reverse("staff_user_month_status", args=[self.user.pk]),
+            {
+                "action": "staff_add_receipts",
+                "month": "2026-06",
+                "service": str(service.pk),
+                "files": [
+                    SimpleUploadedFile("admin-a.pdf", b"%PDF-1.4 admin a", content_type="application/pdf"),
+                    SimpleUploadedFile("admin-b.pdf", b"%PDF-1.4 admin b", content_type="application/pdf"),
+                ],
+            },
+        )
+
+        self.assertEqual(response.status_code, 302)
+        self.assertIn("month=2026-06", response["Location"])
+        self.assertIn(f"service={service.pk}", response["Location"])
+        submission = Submission.objects.get(user=self.user, period_month=date(2026, 6, 1))
+        receipts = list(submission.receipts.order_by("original_filename"))
+        self.assertEqual([receipt.original_filename for receipt in receipts], ["admin-a.pdf", "admin-b.pdf"])
+        self.assertTrue(all(receipt.upload_source == ReceiptUploadSource.ADMIN for receipt in receipts))
+        self.assertTrue(all(receipt.uploaded_by == self.admin for receipt in receipts))
+        self.assertTrue(all(receipt.ai_filename_status == ReceiptFilenameStatus.NOT_PROCESSED for receipt in receipts))
+        self.assertFalse(
+            MonthlyServiceDeclaration.objects.filter(
+                user=self.user,
+                service=service,
+                period_month=date(2026, 6, 1),
+            ).exists()
+        )
+
+        self.client.logout()
+        self.client.login(username="user@example.com", password="password123")
+        user_page = self.client.get(reverse("dashboard") + "?month=2026-06")
+        self.assertContains(user_page, "admin-a.pdf")
+        self.assertContains(user_page, "admin-b.pdf")
+        self.assertContains(user_page, "管理者代理アップロード")
+
+    def test_staff_proxy_upload_to_submitted_month_returns_it_to_draft(self):
+        service = RegisteredService.objects.create(
+            user=self.user,
+            catalog_service=self.catalog,
+            name=self.catalog.name,
+            billing_type=self.catalog.billing_type,
+        )
+        submission = Submission.objects.create(
+            user=self.user,
+            period_month=date(2026, 6, 1),
+            status=SubmissionStatus.SUBMITTED,
+            submitted_at=timezone.now(),
+        )
+        self.client.login(username="admin", password="admin-password-123")
+
+        response = self.client.post(
+            reverse("staff_user_month_status", args=[self.user.pk]),
+            {
+                "action": "staff_add_receipts",
+                "month": "2026-06",
+                "service": str(service.pk),
+                "files": [SimpleUploadedFile("late.pdf", b"%PDF-1.4 late", content_type="application/pdf")],
+            },
+            follow=True,
+        )
+
+        self.assertEqual(response.status_code, 200)
+        submission.refresh_from_db()
+        self.assertEqual(submission.status, SubmissionStatus.DRAFT)
+        self.assertIsNone(submission.submitted_at)
+        self.assertContains(response, "対象月を下書きに戻しました")
+
+    def test_staff_proxy_upload_other_receipt_requires_memo_and_records_admin_source(self):
+        self.client.login(username="admin", password="admin-password-123")
+        url = reverse("staff_user_month_status", args=[self.user.pk])
+
+        invalid = self.client.post(
+            url,
+            {
+                "action": "staff_add_receipts",
+                "month": "2026-06",
+                "service": ReceiptBatchUploadForm.OTHER_VALUE,
+                "files": [SimpleUploadedFile("refund.pdf", b"%PDF-1.4 refund", content_type="application/pdf")],
+            },
+        )
+        self.assertEqual(invalid.status_code, 200)
+        self.assertContains(invalid, "どのような領収書かをメモに入力してください")
+        self.assertFalse(Receipt.objects.exists())
+
+        valid = self.client.post(
+            url,
+            {
+                "action": "staff_add_receipts",
+                "month": "2026-06",
+                "service": ReceiptBatchUploadForm.OTHER_VALUE,
+                "memo": "OpenAIからの返金領収書",
+                "files": [SimpleUploadedFile("refund.pdf", b"%PDF-1.4 refund", content_type="application/pdf")],
+            },
+        )
+        self.assertEqual(valid.status_code, 302)
+        receipt = Receipt.objects.get()
+        self.assertTrue(receipt.is_extra)
+        self.assertEqual(receipt.memo, "OpenAIからの返金領収書")
+        self.assertEqual(receipt.upload_source, ReceiptUploadSource.ADMIN)
+        self.assertEqual(receipt.uploaded_by, self.admin)
+
+    def test_staff_proxy_upload_rejects_service_registered_to_another_user(self):
+        other_service = RegisteredService.objects.create(
+            user=self.other_user,
+            name="Claude",
+            billing_type=BillingType.SUBSCRIPTION,
+        )
+        self.client.login(username="admin", password="admin-password-123")
+
+        response = self.client.post(
+            reverse("staff_user_month_status", args=[self.user.pk]),
+            {
+                "action": "staff_add_receipts",
+                "month": "2026-06",
+                "service": str(other_service.pk),
+                "files": [SimpleUploadedFile("wrong-user.pdf", b"%PDF-1.4 wrong", content_type="application/pdf")],
+            },
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "候補にありません")
+        self.assertFalse(Receipt.objects.exists())
 
     def test_staff_services_catalog_and_user_status_are_separate_tabs(self):
         for index in range(25):
@@ -2768,7 +2920,8 @@ class FinalWorkflowAcceptanceTests(TestCase):
         self.assertContains(response, "API利用確認待ち")
         self.assertContains(response, "全社ご利用代金明細との照合")
         self.assertContains(response, reverse("staff_card_statements") + "?month=2026-06")
-        self.assertNotContains(response, 'type="file"')
+        self.assertContains(response, "管理者代理アップロード")
+        self.assertContains(response, 'type="file"')
 
     @mock.patch("receipts.statement_processing.generate_card_statement_analysis")
     def test_global_statement_matches_receipt_from_another_user(self, mocked_analysis):
@@ -3125,4 +3278,4 @@ class FinalWorkflowAcceptanceTests(TestCase):
         self.assertEqual(response.status_code, 404)
 
     def test_version_file_is_present_without_web_display_requirement(self):
-        self.assertEqual(Path("VERSION").read_text(encoding="utf-8").strip(), "1.4.1")
+        self.assertEqual(Path("VERSION").read_text(encoding="utf-8").strip(), "1.4.2")

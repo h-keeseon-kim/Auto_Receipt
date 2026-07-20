@@ -65,6 +65,7 @@ from .models import (
     EmailDeliveryStatus,
     ReceiptFilenameStatus,
     ReceiptPeriodCheckStatus,
+    ReceiptUploadSource,
     ReceiptResubmissionRequest,
     RegisteredService,
     ResubmissionRequestStatus,
@@ -163,6 +164,11 @@ def save_receipt_batch(*, submission: Submission, form: ReceiptBatchUploadForm, 
     service = form.selected_service
     is_extra = form.is_extra
     memo = (form.cleaned_data.get("memo") or "").strip() if is_extra else ""
+    upload_source = (
+        ReceiptUploadSource.ADMIN
+        if uploaded_by.is_staff and uploaded_by.pk != submission.user_id
+        else ReceiptUploadSource.USER
+    )
     was_submitted = submission.is_submitted
     created_receipts: list[Receipt] = []
 
@@ -187,6 +193,8 @@ def save_receipt_batch(*, submission: Submission, form: ReceiptBatchUploadForm, 
                     original_filename=upload.name,
                     file_size=upload.size,
                     content_type=getattr(upload, "content_type", "") or "",
+                    upload_source=upload_source,
+                    uploaded_by=uploaded_by,
                     expires_at=receipt_expiry_from(timezone.now()),
                 )
                 receipt.full_clean()
@@ -195,7 +203,7 @@ def save_receipt_batch(*, submission: Submission, form: ReceiptBatchUploadForm, 
 
             if service is not None:
                 MonthlyServiceDeclaration.objects.filter(
-                    user=uploaded_by,
+                    user=locked_submission.user,
                     service=service,
                     period_month=locked_submission.period_month,
                 ).delete()
@@ -1118,7 +1126,7 @@ def staff_month_receipts_queryset(selected_month):
     user_ids = managed_users_queryset().values_list("id", flat=True)
     return (
         Receipt.objects.filter(submission__period_month=selected_month, submission__user_id__in=user_ids)
-        .select_related("submission", "submission__user", "service")
+        .select_related("submission", "submission__user", "service", "uploaded_by")
     )
 
 
@@ -1207,12 +1215,81 @@ def staff_ai_processing_status(request):
 @staff_member_required
 def staff_user_month_status(request, user_id: int):
     managed_user = get_managed_user(user_id)
-    selected_month, month_form = parse_month_from_request(request)
+    if request.method == "POST":
+        selected_month = parse_month_value(request.POST.get("month"))
+        month_form = MonthSelectForm(initial={"month": selected_month})
+    else:
+        selected_month, month_form = parse_month_from_request(request)
+
+    selected_upload_choice = (
+        request.POST.get("service", "")
+        if request.method == "POST"
+        else request.GET.get("service", "")
+    )
+    staff_upload_form = ReceiptBatchUploadForm(
+        request.POST or None,
+        request.FILES or None,
+        user=managed_user,
+        period_month=selected_month,
+        selected_choice=selected_upload_choice,
+        hide_file_input=False,
+    )
+
+    if request.method == "POST":
+        action = request.POST.get("action")
+        if action != "staff_add_receipts":
+            messages.error(request, "不明な操作です。")
+        elif staff_upload_form.is_valid():
+            submission, _ = Submission.objects.get_or_create(
+                user=managed_user,
+                period_month=selected_month,
+            )
+            try:
+                created_receipts, was_submitted, resolved_count = save_receipt_batch(
+                    submission=submission,
+                    form=staff_upload_form,
+                    uploaded_by=request.user,
+                )
+            except ValidationError as exc:
+                add_validation_errors(staff_upload_form, exc)
+            else:
+                count = len(created_receipts)
+                selected_label = (
+                    "その他"
+                    if staff_upload_form.is_extra
+                    else staff_upload_form.selected_service.display_name
+                )
+                messages.success(
+                    request,
+                    f"{managed_user.username} の {selected_month:%Y年%m月}分へ、{selected_label} の領収書を{count}件代理アップロードしました。",
+                )
+                if resolved_count:
+                    messages.success(request, f"再提出依頼を{resolved_count}件、対応済みにしました。")
+                if was_submitted:
+                    messages.warning(
+                        request,
+                        "提出済みの月へ領収書を追加したため、対象月を下書きに戻しました。ユーザーに内容確認と再提出を依頼してください。",
+                    )
+                selected_value = (
+                    ReceiptBatchUploadForm.OTHER_VALUE
+                    if staff_upload_form.is_extra
+                    else str(staff_upload_form.selected_service.pk)
+                )
+                return redirect(
+                    f"{reverse('staff_user_month_status', args=[managed_user.pk])}"
+                    f"?month={month_query(selected_month)}&service={selected_value}#staff-receipt-upload"
+                )
+
     monthly_summary = build_user_month_summary(managed_user, selected_month)
     available_services = RegisteredService.objects.uploadable_for(managed_user, selected_month).select_related("catalog_service")
     submission = (
         Submission.objects.filter(user=managed_user, period_month=selected_month)
-        .prefetch_related(Prefetch("receipts", queryset=Receipt.objects.select_related("service").order_by("uploaded_at", "pk")))
+        .prefetch_related(
+            Prefetch(
+                "receipts",
+                queryset=Receipt.objects.select_related("service", "uploaded_by").order_by("uploaded_at", "pk"),
+            )
+        )
         .first()
     )
     global_statement_count = CardStatement.objects.filter(period_month=selected_month).count()
@@ -1227,6 +1304,8 @@ def staff_user_month_status(request, user_id: int):
             "available_services": available_services,
             "submission": submission,
             "global_statement_count": global_statement_count,
+            "staff_upload_form": staff_upload_form,
+            "selected_upload_choice": selected_upload_choice,
         },
     )
 
@@ -1575,7 +1654,9 @@ def history(request):
 @login_required
 def submission_detail(request, pk: int):
     submission = get_object_or_404(
-        Submission.objects.select_related("user").prefetch_related("receipts__service"),
+        Submission.objects.select_related("user").prefetch_related(
+            Prefetch("receipts", queryset=Receipt.objects.select_related("service", "uploaded_by"))
+        ),
         pk=pk,
     )
     if submission.user != request.user and not request.user.is_staff:
@@ -1817,7 +1898,9 @@ def staff_email(request):
 @staff_member_required
 def staff_submission_detail(request, pk: int):
     submission = get_object_or_404(
-        Submission.objects.select_related("user").prefetch_related("receipts__service"),
+        Submission.objects.select_related("user").prefetch_related(
+            Prefetch("receipts", queryset=Receipt.objects.select_related("service", "uploaded_by"))
+        ),
         pk=pk,
     )
     return render(request, "receipts/staff_submission_detail.html", {"submission": submission})
@@ -1838,6 +1921,8 @@ def receipt_manifest_csv(submissions) -> str:
         "amount",
         "currency",
         "issued_on",
+        "upload_source",
+        "uploaded_by",
         "uploaded_at",
         "expires_at",
         "file_status",
@@ -1875,6 +1960,8 @@ def receipt_manifest_csv(submissions) -> str:
                 receipt.amount if receipt.amount is not None else "",
                 receipt.currency,
                 receipt.issued_on.isoformat() if receipt.issued_on else "",
+                receipt.get_upload_source_display(),
+                receipt.uploaded_by_label,
                 receipt.uploaded_at.isoformat() if receipt.uploaded_at else "",
                 receipt.expires_at.isoformat() if receipt.expires_at else "",
                 receipt.file_status_label,
@@ -1936,7 +2023,7 @@ def staff_download_month(request):
     queryset = (
         Submission.objects.filter(period_month=selected_month, status=SubmissionStatus.SUBMITTED)
         .select_related("user")
-        .prefetch_related(Prefetch("receipts", queryset=Receipt.objects.select_related("service")))
+        .prefetch_related(Prefetch("receipts", queryset=Receipt.objects.select_related("service", "uploaded_by")))
     )
     return build_receipts_zip(queryset, f"receipts_{selected_month:%Y-%m}_submitted")
 
@@ -1944,7 +2031,9 @@ def staff_download_month(request):
 @staff_member_required
 def staff_download_submission(request, pk: int):
     submission = get_object_or_404(
-        Submission.objects.select_related("user").prefetch_related(Prefetch("receipts", queryset=Receipt.objects.select_related("service"))),
+        Submission.objects.select_related("user").prefetch_related(
+            Prefetch("receipts", queryset=Receipt.objects.select_related("service", "uploaded_by"))
+        ),
         pk=pk,
     )
     return build_receipts_zip([submission], f"receipts_{submission.period_month:%Y-%m}_{safe_part(submission.user.get_username())}")

@@ -8,6 +8,7 @@
     </div>
     <div class="actions">
         <a class="button" href="{% url 'history' %}?month={{ submission.period_month|date:'Y-m' }}">一覧へ</a>
+        <a class="button" href="{% url 'staff_user_month_status' submission.user.pk %}?month={{ submission.period_month|date:'Y-m' }}#staff-receipt-upload">代理アップロード</a>
         <a class="button primary" href="{% url 'staff_download_submission' submission.pk %}">ZIPダウンロード</a>
     </div>
 </div>

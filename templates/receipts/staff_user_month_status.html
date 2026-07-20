@@ -26,6 +26,57 @@
     <div class="card"><span class="label">API利用確認待ち</span><strong class="{% if monthly_summary.api_pending_count %}danger{% endif %}">{{ monthly_summary.api_pending_count }}</strong></div>
 </section>
 
+<section class="card section" id="staff-receipt-upload">
+    <div class="section-header">
+        <div>
+            <h2>管理者代理アップロード</h2>
+            <p class="muted">ユーザー本人がアップロードできない場合に、対象サービスを選択して領収書を代理登録します。登録後はユーザー画面にも反映され、AI確認は通常どおり管理者が提出履歴から実行します。</p>
+        </div>
+    </div>
+    <form method="post" enctype="multipart/form-data" class="form-grid staff-receipt-upload-form" data-staff-receipt-upload-form>
+        {% csrf_token %}
+        <input type="hidden" name="action" value="staff_add_receipts">
+        <input type="hidden" name="month" value="{{ selected_month|date:'Y-m' }}">
+        {{ staff_upload_form.non_field_errors }}
+        <div class="form-row">
+            {{ staff_upload_form.service.errors }}
+            {{ staff_upload_form.service.label_tag }}
+            {{ staff_upload_form.service }}
+            {% if staff_upload_form.service.help_text %}<span class="helptext">{{ staff_upload_form.service.help_text }}</span>{% endif %}
+        </div>
+        <div class="form-row" data-staff-other-memo-field {% if selected_upload_choice != 'other' %}hidden{% endif %}>
+            {{ staff_upload_form.memo.errors }}
+            {{ staff_upload_form.memo.label_tag }}
+            {{ staff_upload_form.memo }}
+            {% if staff_upload_form.memo.help_text %}<span class="helptext">{{ staff_upload_form.memo.help_text }}</span>{% endif %}
+        </div>
+        <div class="form-row">
+            {{ staff_upload_form.files.errors }}
+            {{ staff_upload_form.files.label_tag }}
+            {{ staff_upload_form.files }}
+            {% if staff_upload_form.files.help_text %}<span class="helptext">{{ staff_upload_form.files.help_text }}</span>{% endif %}
+        </div>
+        <div class="actions">
+            <button type="submit" class="button primary">領収書を代理アップロード</button>
+        </div>
+        <p class="muted small">アップロード元は「管理者代理」として記録されます。提出済みの月へ追加した場合は下書きへ戻ります。</p>
+    </form>
+</section>
+
+<section class="card section">
+    <div class="section-header">
+        <div>
+            <h2>アップロード済み領収書</h2>
+            <p class="muted">ユーザー本人と管理者代理のアップロードをまとめて確認できます。</p>
+        </div>
+    </div>
+    {% if submission %}
+        {% include "receipts/_receipt_table.html" with receipts=submission.receipts.all submission=submission %}
+    {% else %}
+        <p class="muted center">対象月にアップロード済み領収書はありません。</p>
+    {% endif %}
+</section>
+
 <section class="card section">
     <div class="section-header">
         <div>
@@ -35,7 +86,7 @@
     </div>
     <div class="table-wrap scroll-box medium table-scroll-wide">
         <table class="monthly-service-status-table">
-            <thead><tr><th>サービス</th><th>種別</th><th>当月ステータス</th><th>領収書</th><th>補足</th></tr></thead>
+            <thead><tr><th>サービス</th><th>種別</th><th>当月ステータス</th><th>領収書</th><th>補足</th><th>操作</th></tr></thead>
             <tbody>
                 {% for row in monthly_summary.rows %}
                     <tr class="{% if row.status_code == 'missing' or row.status_code == 'api_pending' %}attention-row{% endif %}">
@@ -46,15 +97,17 @@
                             {% for receipt in row.receipts %}
                                 <div>
                                     {% if receipt.file_available %}<a href="{% url 'download_receipt' receipt.pk %}">{{ receipt.display_filename }}</a>{% else %}<span class="muted">{{ receipt.display_filename }}（削除済み）</span>{% endif %}
+                                    <div class="muted small">{{ receipt.uploader_label }}{% if receipt.uploaded_by %}（{{ receipt.uploaded_by_label }}）{% endif %}</div>
                                 </div>
                             {% empty %}-{% endfor %}
                         </td>
                         <td>
                             {% if row.no_usage_declared %}ユーザーが当月利用なしと申告{% elif row.status_code == 'api_pending' %}<span class="danger">利用有無の確認が必要</span>{% elif row.status_code == 'missing' %}<span class="danger">領収書アップロード待ち</span>{% else %}-{% endif %}
                         </td>
+                        <td><a class="button small" href="?month={{ selected_month|date:'Y-m' }}&service={{ row.service.pk }}#staff-receipt-upload">代理アップロード</a></td>
                     </tr>
                 {% empty %}
-                    <tr><td colspan="5" class="muted center">対象月の利用サービスはありません。</td></tr>
+                    <tr><td colspan="6" class="muted center">対象月の利用サービスはありません。「その他」の領収書は上の代理アップロード欄から追加できます。</td></tr>
                 {% endfor %}
             </tbody>
         </table>
@@ -71,4 +124,23 @@
     </div>
     <p>対象月にアップロードされている全社明細書: <strong>{{ global_statement_count }}</strong>件</p>
 </section>
+
+<script>
+(function () {
+    const form = document.querySelector("[data-staff-receipt-upload-form]");
+    if (!form) return;
+    const serviceSelect = form.querySelector("select[name='service']");
+    const memoField = form.querySelector("[data-staff-other-memo-field]");
+    const memoInput = form.querySelector("textarea[name='memo']");
+
+    function refreshMemoField() {
+        const isOther = serviceSelect && serviceSelect.value === "other";
+        if (memoField) memoField.hidden = !isOther;
+        if (!isOther && memoInput) memoInput.value = "";
+    }
+
+    if (serviceSelect) serviceSelect.addEventListener("change", refreshMemoField);
+    refreshMemoField();
+})();
+</script>
 {% endblock %}

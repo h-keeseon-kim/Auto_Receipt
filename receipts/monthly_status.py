@@ -125,7 +125,7 @@ def build_user_month_summary(user: User, period_month: date) -> UserMonthSummary
     if submission is not None:
         for receipt in (
             Receipt.objects.filter(submission=submission)
-            .select_related("service")
+            .select_related("service", "uploaded_by")
             .order_by("uploaded_at", "pk")
         ):
             if receipt.service_id is not None:

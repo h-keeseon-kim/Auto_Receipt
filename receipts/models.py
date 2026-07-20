@@ -84,6 +84,11 @@ class ReceiptPeriodCheckStatus(models.TextChoices):
     UNKNOWN = "unknown", "確認不可"
 
 
+class ReceiptUploadSource(models.TextChoices):
+    USER = "user", "ユーザー本人"
+    ADMIN = "admin", "管理者代理"
+
+
 class ResubmissionRequestStatus(models.TextChoices):
     OPEN = "open", "再提出待ち"
     RESOLVED = "resolved", "対応済み"
@@ -675,6 +680,20 @@ class Receipt(models.Model):
     ai_check_period_match = models.BooleanField("AI確認: 提出月一致", default=False)
     file_size = models.PositiveIntegerField("ファイルサイズ", null=True, blank=True)
     content_type = models.CharField("Content-Type", max_length=120, blank=True)
+    upload_source = models.CharField(
+        "アップロード元",
+        max_length=20,
+        choices=ReceiptUploadSource.choices,
+        default=ReceiptUploadSource.USER,
+    )
+    uploaded_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="uploaded_receipts",
+        verbose_name="アップロード実行者",
+    )
     uploaded_at = models.DateTimeField("アップロード日時", auto_now_add=True)
     expires_at = models.DateTimeField("ファイル保存期限", null=True, blank=True)
     file_deleted_at = models.DateTimeField("ファイル削除日時", null=True, blank=True)
@@ -740,6 +759,20 @@ class Receipt(models.Model):
         if self.is_extra:
             return "その他"
         return f"{self.service_name_snapshot}（{self.get_billing_type_snapshot_display()}）"
+
+    @property
+    def uploader_label(self) -> str:
+        if self.upload_source == ReceiptUploadSource.ADMIN:
+            return "管理者代理アップロード"
+        return "ユーザー本人アップロード"
+
+    @property
+    def uploaded_by_label(self) -> str:
+        if self.uploaded_by_id and self.uploaded_by:
+            return self.uploaded_by.get_username()
+        if self.upload_source == ReceiptUploadSource.USER and self.submission_id:
+            return self.submission.user.get_username()
+        return "-"
 
     @property
     def display_filename(self) -> str:

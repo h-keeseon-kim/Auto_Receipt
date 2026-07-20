@@ -12,6 +12,7 @@
             <div><strong>{{ receipt.display_filename|default:"-" }}</strong></div>
             {% if receipt.generated_filename and receipt.original_filename %}<div class="muted small">元: {{ receipt.original_filename }}</div>{% endif %}
             <div class="muted small">{{ receipt.file_size|filesizeformat }}</div>
+            <div class="muted small">アップロード元: {{ receipt.uploader_label }}（{{ receipt.uploaded_by_label }}）</div>
         </td>
         <td>
             <div class="ai-check-status">

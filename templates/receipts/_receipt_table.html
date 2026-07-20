@@ -29,6 +29,10 @@
                             <div class="muted small">元: {{ receipt.original_filename }}</div>
                         {% endif %}
                         <div class="muted small">{{ receipt.file_size|filesize }} / {{ receipt.file_status_label }}</div>
+                        <div class="muted small">
+                            アップロード元: {{ receipt.uploader_label }}
+                            {% if user.is_staff %}（{{ receipt.uploaded_by_label }}）{% endif %}
+                        </div>
                         {% if user.is_staff %}
                             <div class="small ai-file-meta">
                                 <div class="ai-check-status">
