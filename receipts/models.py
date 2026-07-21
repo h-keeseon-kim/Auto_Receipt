@@ -28,6 +28,22 @@ def add_months(value, months: int):
     return value.replace(year=year, month=month, day=day)
 
 
+def receipt_month_for_submission(period_month):
+    """提出月に対応する領収書月を返す。
+
+    ReceiptHubでは、7月提出は6月分の領収書を対象とする。
+    年をまたぐ場合も、1月提出は前年12月分として扱う。
+    """
+
+    return add_months(month_start(period_month), -1)
+
+
+def submission_month_for_receipt(receipt_month):
+    """領収書月に対応する提出月を返す。"""
+
+    return add_months(month_start(receipt_month), 1)
+
+
 def retention_months() -> int:
     return min(max(int(getattr(settings, "RECEIPT_RETENTION_MONTHS", 3)), 1), 3)
 
@@ -79,8 +95,8 @@ class ReceiptFilenameStatus(models.TextChoices):
 
 class ReceiptPeriodCheckStatus(models.TextChoices):
     NOT_CHECKED = "not_checked", "未確認"
-    MATCHED = "matched", "当月確認済み"
-    MISMATCHED = "mismatched", "提出月不一致"
+    MATCHED = "matched", "対象領収書月確認済み"
+    MISMATCHED = "mismatched", "対象領収書月不一致"
     UNKNOWN = "unknown", "確認不可"
 
 
@@ -197,12 +213,17 @@ class RegisteredServiceQuerySet(models.QuerySet):
         return self.filter(is_active=True)
 
     def uploadable_for(self, user, period_month=None):
+        """提出月に対してアップロード可能なサービスを返す。
+
+        final_receipt_month は実際の領収書月で管理するため、提出月の前月と比較する。
+        """
+
         queryset = self.filter(user=user)
         if period_month is None:
             return queryset.filter(is_active=True).order_by("name", "billing_type")
-        period_month = month_start(period_month)
+        target_receipt_month = receipt_month_for_submission(period_month)
         return queryset.filter(
-            Q(is_active=True) | Q(is_active=False, final_receipt_month__gte=period_month)
+            Q(is_active=True) | Q(is_active=False, final_receipt_month__gte=target_receipt_month)
         ).order_by("-is_active", "name", "billing_type")
 
 
@@ -314,8 +335,10 @@ class RegisteredService(models.Model):
             sync_user_account_status_from_services(self.user_id)
 
     def is_uploadable_for(self, period_month) -> bool:
-        period_month = month_start(period_month)
-        return self.is_active or bool(self.final_receipt_month and period_month <= self.final_receipt_month)
+        target_receipt_month = receipt_month_for_submission(period_month)
+        return self.is_active or bool(
+            self.final_receipt_month and target_receipt_month <= self.final_receipt_month
+        )
 
     @property
     def display_name(self) -> str:
@@ -503,6 +526,10 @@ class Submission(models.Model):
         return self.status == SubmissionStatus.SUBMITTED
 
     @property
+    def target_receipt_month(self):
+        return receipt_month_for_submission(self.period_month)
+
+    @property
     def receipt_count(self) -> int:
         if hasattr(self, "_prefetched_objects_cache") and "receipts" in self._prefetched_objects_cache:
             return len(self.receipts.all())
@@ -518,14 +545,14 @@ class Submission(models.Model):
         summary = build_user_month_summary(self.user, self.period_month)
         has_extra_receipt = self.receipts.available_files().filter(is_extra=True).exists()
         if not summary.rows and not has_extra_receipt:
-            raise ValidationError("対象月に提出対象となる利用サービスがありません。利用サービスを確認してください。")
+            raise ValidationError("対象領収書月に提出対象となる利用サービスがありません。利用サービスを確認してください。")
         if summary.rows and not summary.is_complete:
             unresolved = [row.service.display_name for row in (*summary.missing_required, *summary.api_pending)]
             preview = "、".join(unresolved[:5])
             if len(unresolved) > 5:
                 preview += f" ほか{len(unresolved) - 5}件"
             raise ValidationError(
-                f"未確認のサービスがあります（{preview}）。領収書をアップロードするか、従量課金 / APIは『当月利用なし』を選択してください。"
+                f"未確認のサービスがあります（{preview}）。領収書をアップロードするか、従量課金 / APIは『対象領収書月は利用なし』を選択してください。"
             )
         self.status = SubmissionStatus.SUBMITTED
         self.submitted_at = timezone.now()
@@ -669,12 +696,12 @@ class Receipt(models.Model):
     ai_extracted_card_last4 = models.CharField("AI抽出カード下4桁", max_length=4, blank=True)
     ai_receipt_month = models.CharField("AI判定領収書月", max_length=7, blank=True)
     ai_period_check_status = models.CharField(
-        "AI提出月確認ステータス",
+        "AI対象領収書月確認ステータス",
         max_length=20,
         choices=ReceiptPeriodCheckStatus.choices,
         default=ReceiptPeriodCheckStatus.NOT_CHECKED,
     )
-    ai_period_check_memo = models.TextField("AI提出月確認メモ", blank=True)
+    ai_period_check_memo = models.TextField("AI対象領収書月確認メモ", blank=True)
     ai_check_card_last4 = models.BooleanField("AI確認: カード末尾", default=False)
     ai_check_payee = models.BooleanField("AI確認: 払先", default=False)
     ai_check_service_payee_related = models.BooleanField("AI確認: サービス名と払先の関連性", default=False)
@@ -682,7 +709,7 @@ class Receipt(models.Model):
     ai_check_date = models.BooleanField("AI確認: 日付", default=False)
     ai_check_amount = models.BooleanField("AI確認: 金額", default=False)
     ai_check_currency = models.BooleanField("AI確認: 通貨", default=False)
-    ai_check_period_match = models.BooleanField("AI確認: 提出月一致", default=False)
+    ai_check_period_match = models.BooleanField("AI確認: 対象領収書月一致", default=False)
     file_size = models.PositiveIntegerField("ファイルサイズ", null=True, blank=True)
     content_type = models.CharField("Content-Type", max_length=120, blank=True)
     upload_source = models.CharField(
@@ -759,7 +786,7 @@ class Receipt(models.Model):
             if self.submission_id and self.service.user_id != self.submission.user_id:
                 raise ValidationError("自分の利用サービスだけを選択できます。")
             if self.submission_id and not self.service.is_uploadable_for(self.submission.period_month):
-                raise ValidationError("この提出月では選択できないサービスです。利用停止済みの場合は、最終領収書月までしか選択できません。")
+                raise ValidationError("この提出月の対象領収書月では選択できないサービスです。利用停止済みの場合は、最終領収書月までしか選択できません。")
 
     def save(self, *args, **kwargs):
         self.memo = (self.memo or "").strip()
@@ -852,7 +879,7 @@ class Receipt(models.Model):
             ("日付", self.ai_check_date),
             ("金額", self.ai_check_amount),
             ("通貨", self.ai_check_currency),
-            ("提出月一致", self.ai_check_period_match),
+            ("対象領収書月一致", self.ai_check_period_match),
         ]
 
     @property
@@ -1073,7 +1100,7 @@ class MonthlyServiceDeclaration(models.Model):
 class CardStatement(models.Model):
     """管理者がアップロードする全ユーザー共通のカード利用代金明細書。"""
 
-    period_month = models.DateField("対象月")
+    period_month = models.DateField("領収書月")
     file = models.FileField(
         "ご利用代金明細書",
         upload_to=statement_upload_path,
@@ -1087,7 +1114,7 @@ class CardStatement(models.Model):
     content_type = models.CharField("Content-Type", max_length=120, blank=True)
     status = models.CharField("解析ステータス", max_length=20, choices=CardStatementStatus.choices, default=CardStatementStatus.PROCESSING)
     card_last4 = models.CharField("カード下4桁", max_length=4, blank=True)
-    statement_period = models.CharField("AI判定対象月", max_length=7, blank=True)
+    statement_period = models.CharField("AI判定領収書月", max_length=7, blank=True)
     payment_date = models.DateField("支払日", null=True, blank=True)
     ai_admin_memo = models.TextField("AI管理者メモ", blank=True)
     uploaded_by = models.ForeignKey(
@@ -1257,24 +1284,24 @@ class CardStatementItem(models.Model):
         return f"{self.statement} / {self.line_reference or self.sequence} / {self.merchant_name}"
 
 
-DEFAULT_INITIAL_SUBJECT = "{app_name}: {target_month}分の領収書アップロードをお願いします"
+DEFAULT_INITIAL_SUBJECT = "{app_name}: {receipt_month}分の領収書アップロードをお願いします"
 DEFAULT_INITIAL_BODY = """{user_name} 様
 
 まだ領収書をアップロードしていない方にお送りします。
-{target_month}分について、以下のサービスの領収書をアップロードしてください。
+提出月 {target_month} の対象となる {receipt_month}分について、以下のサービスの領収書をアップロードしてください。
 
 {missing_services}
 
 アップロードページ: {upload_url}
 
-アップロード後は、対象月の領収書が揃っていることを確認して「提出する」を押してください。
+アップロード後は、対象領収書月の領収書が揃っていることを確認して「提出する」を押してください。
 
 {app_name}"""
-DEFAULT_URGENT_SUBJECT = "【重要】{app_name}: {target_month}分の領収書を本日中にアップロードしてください"
+DEFAULT_URGENT_SUBJECT = "【重要】{app_name}: {receipt_month}分の領収書を本日中にアップロードしてください"
 DEFAULT_URGENT_BODY = """{user_name} 様
 
 まだ領収書をアップロードしていない方にお送りします。
-{target_month}分の確認が完了していません。本日中にご対応ください。
+提出月 {target_month} の対象となる {receipt_month}分の確認が完了していません。本日中にご対応ください。
 
 未アップロードのサービス:
 {missing_services}
@@ -1282,7 +1309,7 @@ DEFAULT_URGENT_BODY = """{user_name} 様
 従量課金 / APIの利用確認が必要なサービス:
 {api_pending_services}
 
-APIサービスを利用していない場合は、アップロードページで「今月は利用なし」を選択してください。
+APIサービスを利用していない場合は、アップロードページで「対象領収書月は利用なし」を選択してください。
 
 アップロードページ: {upload_url}
 
@@ -1418,12 +1445,14 @@ def sync_user_account_status_after_service_delete(sender, instance: RegisteredSe
 def sync_statement_items_after_receipt_save(sender, instance: Receipt, **kwargs):
     if not instance.file_available:
         return
-    # カード明細は会社全体のため、対象月の全ユーザー領収書を使って再照合する。
+    # カード明細は領収書月で管理し、領収書は翌月の提出サイクルに属する。
     # OpenAI APIは呼ばず、保存済みの明細行に対してローカル照合だけを行う。
     from .statement_processing import reconcile_card_statement_items
 
     statement_ids = list(
-        CardStatement.objects.filter(period_month=instance.submission.period_month)
+        CardStatement.objects.filter(
+            period_month=receipt_month_for_submission(instance.submission.period_month)
+        )
         .exclude(status__in=[CardStatementStatus.PROCESSING, CardStatementStatus.FAILED])
         .values_list("pk", flat=True)
     )

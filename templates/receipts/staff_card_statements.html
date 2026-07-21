@@ -5,7 +5,7 @@
 <div class="page-title">
     <div>
         <h1>ご利用代金明細</h1>
-        <p class="muted">会社全体のカード明細を、対象月にすべての一般ユーザーがアップロードした領収書と一括照合します。</p>
+        <p class="muted">会社全体のカード明細を、領収書月に対応する翌月の提出サイクルにある全ユーザー領収書と一括照合します。</p>
     </div>
     <form method="get" class="month-form">
         {{ month_form.month.label_tag }}
@@ -25,7 +25,7 @@
     <div class="section-header">
         <div>
             <h2>{{ selected_month|date:"Y年m月" }}分の全社明細書をアップロード</h2>
-            <p class="muted">ユーザーは選択しません。AIが全明細行を抽出した後、対象月の全ユーザー領収書と一対一で照合し、未提出行を黄色で表示します。</p>
+            <p class="muted">ユーザーは選択しません。AIが全明細行を抽出した後、領収書月 {{ selected_month|date:"Y年m月" }}に対応する提出月 {{ submission_month|date:"Y年m月" }}の全ユーザー領収書と一対一で照合し、未提出行を黄色で表示します。</p>
         </div>
     </div>
     <form method="post" enctype="multipart/form-data" action="{% url 'staff_upload_card_statement' %}" class="statement-upload-form">

@@ -18,6 +18,7 @@ from .models import (
     ReceiptPeriodCheckStatus,
     ReceiptResubmissionRequest,
     SubmissionStatus,
+    receipt_month_for_submission,
 )
 
 logger = logging.getLogger(__name__)
@@ -85,8 +86,10 @@ def definite_ai_rejection_reasons(receipt: Receipt, result) -> list[str]:
         )
 
     if receipt.ai_period_check_status == ReceiptPeriodCheckStatus.MISMATCHED:
+        target_receipt_month = receipt_month_for_submission(receipt.submission.period_month)
         reasons.append(
-            f"領収書の対象月（{receipt.ai_receipt_month or '不明'}）が提出月（{receipt.submission.period_month:%Y-%m}）と一致しません"
+            f"領収書の対象月（{receipt.ai_receipt_month or '不明'}）が、"
+            f"提出月 {receipt.submission.period_month:%Y-%m} の対象領収書月（{target_receipt_month:%Y-%m}）と一致しません"
         )
     return list(dict.fromkeys(reasons))
 
@@ -121,7 +124,8 @@ def remove_receipt_for_automatic_resubmission(receipt_id: int, reasons: list[str
             original_filename=receipt.original_filename,
             display_filename=receipt.display_filename,
             message=(
-                f"自動確認の結果、{submission.period_month:%Y年%m月}分の "
+                f"自動確認の結果、{submission.period_month:%Y年%m月}提出"
+                f"（対象領収書月: {submission.target_receipt_month:%Y年%m月}）の "
                 f"{receipt_context} の領収書に明確な不一致が見つかりました。"
                 f"理由: {reason_text}。該当ファイルは提出項目から取り下げました。"
                 "内容を確認し、正しい領収書を再度アップロードしてください。"
@@ -222,35 +226,42 @@ def apply_ai_checklist_to_receipt(receipt: Receipt, result) -> list[str]:
 
 
 def apply_period_check_to_receipt(receipt: Receipt, result) -> list[str]:
-    """AIで抽出した日付が提出月と一致するかをReceiptに反映する。"""
+    """AIで抽出した日付が、提出月の前月に当たる領収書月かを反映する。"""
 
-    expected_month = receipt.submission.period_month if receipt.submission_id else None
+    submission_month = receipt.submission.period_month if receipt.submission_id else None
+    expected_receipt_month = receipt_month_for_submission(submission_month) if submission_month else None
     payment_date = getattr(result, "payment_date", None) if result is not None else None
     receipt.ai_check_period_match = False
     if payment_date:
         actual_month = payment_date.replace(day=1)
         receipt.ai_receipt_month = actual_month.strftime("%Y-%m")
-        if expected_month and actual_month == expected_month:
+        if expected_receipt_month and actual_month == expected_receipt_month:
             receipt.ai_period_check_status = ReceiptPeriodCheckStatus.MATCHED
-            receipt.ai_period_check_memo = f"領収書日付 {payment_date:%Y-%m-%d} は提出月 {expected_month:%Y-%m} と一致しています。"
+            receipt.ai_period_check_memo = (
+                f"領収書日付 {payment_date:%Y-%m-%d} は、提出月 {submission_month:%Y-%m} の "
+                f"対象領収書月 {expected_receipt_month:%Y-%m} と一致しています。"
+            )
             receipt.ai_check_period_match = True
-        elif expected_month:
+        elif expected_receipt_month:
             receipt.ai_period_check_status = ReceiptPeriodCheckStatus.MISMATCHED
             receipt.ai_period_check_memo = (
-                f"領収書日付 {payment_date:%Y-%m-%d} は提出月 {expected_month:%Y-%m} と一致しません。"
+                f"領収書日付 {payment_date:%Y-%m-%d} は、提出月 {submission_month:%Y-%m} の "
+                f"対象領収書月 {expected_receipt_month:%Y-%m} と一致しません。"
                 "ユーザーへ再アップロードを依頼してください。"
             )
         else:
             receipt.ai_period_check_status = ReceiptPeriodCheckStatus.UNKNOWN
-            receipt.ai_period_check_memo = f"領収書日付 {payment_date:%Y-%m-%d} を抽出しましたが、提出月を確認できませんでした。"
+            receipt.ai_period_check_memo = (
+                f"領収書日付 {payment_date:%Y-%m-%d} を抽出しましたが、対象領収書月を確認できませんでした。"
+            )
     else:
         receipt.ai_receipt_month = ""
         if result is not None and getattr(result, "status", "") == ReceiptFilenameStatus.SKIPPED:
             receipt.ai_period_check_status = ReceiptPeriodCheckStatus.NOT_CHECKED
-            receipt.ai_period_check_memo = "AIファイル名修正が未実行のため、提出月との一致確認も未実行です。"
+            receipt.ai_period_check_memo = "AIファイル名修正が未実行のため、対象領収書月との一致確認も未実行です。"
         else:
             receipt.ai_period_check_status = ReceiptPeriodCheckStatus.UNKNOWN
-            receipt.ai_period_check_memo = "領収書日付をAIで確認できなかったため、提出月との一致確認はできませんでした。"
+            receipt.ai_period_check_memo = "領収書日付をAIで確認できなかったため、対象領収書月との一致確認はできませんでした。"
     return ["ai_receipt_month", "ai_period_check_status", "ai_period_check_memo", "ai_check_period_match"]
 
 

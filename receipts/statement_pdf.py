@@ -188,7 +188,7 @@ def _metadata_table(statement: CardStatement, styles: dict[str, ParagraphStyle])
     card_label = f"****-{statement.card_last4}" if statement.card_last4 else "-"
     data = [
         [
-            _paragraph("対象月", styles["small"]),
+            _paragraph("領収書月", styles["small"]),
             _paragraph(statement.period_month.strftime("%Y年%m月"), styles["body"]),
             _paragraph("解析ステータス", styles["small"]),
             _paragraph(statement.get_status_display(), styles["body"]),
@@ -196,7 +196,7 @@ def _metadata_table(statement: CardStatement, styles: dict[str, ParagraphStyle])
             _paragraph(card_label, styles["body"]),
         ],
         [
-            _paragraph("AI判定対象月", styles["small"]),
+            _paragraph("AI判定領収書月", styles["small"]),
             _paragraph(statement.statement_period or "-", styles["body"]),
             _paragraph("支払日", styles["small"]),
             _paragraph(statement.payment_date.strftime("%Y-%m-%d") if statement.payment_date else "-", styles["body"]),

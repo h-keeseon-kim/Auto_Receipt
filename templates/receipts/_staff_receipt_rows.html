@@ -1,7 +1,7 @@
 {% for receipt in receipts %}
     <tr class="{% if receipt.ai_is_queued or receipt.is_ai_processing %}ai-processing-row{% elif receipt.needs_manual_review %}manual-review-row{% endif %}" data-receipt-row="{{ receipt.pk }}">
         <td><strong>{{ receipt.submission.user.username }}</strong></td>
-        <td>{{ receipt.submission.period_month|date:"Y年m月" }}</td>
+        <td>{{ receipt.submission.period_month|date:"Y年m月" }}<div class="muted small">領収書: {{ receipt.submission.target_receipt_month|date:"Y年m月" }}</div></td>
         <td><span class="badge {{ receipt.submission.status }}">{{ receipt.submission.get_status_display }}</span></td>
         <td>
             <strong>{{ receipt.service_display_name_snapshot }}</strong>
@@ -27,7 +27,7 @@
                     </label>
                 {% endfor %}
             </div>
-            {% if receipt.ai_receipt_month %}<div class="muted small">判定月: {{ receipt.ai_receipt_month }}</div>{% endif %}
+            {% if receipt.ai_receipt_month %}<div class="muted small">AI判定領収書月: {{ receipt.ai_receipt_month }}</div>{% endif %}
             {% if receipt.ai_extracted_payee %}<div class="muted small">払先: {{ receipt.ai_extracted_payee }}</div>{% endif %}
             {% if receipt.ai_extracted_card_last4 %}<div class="muted small">カード下4桁: {{ receipt.ai_extracted_card_last4 }}</div>{% endif %}
             {% if receipt.ai_service_payee_check_memo %}<div class="danger small">{{ receipt.ai_service_payee_check_memo|truncatechars:120 }}</div>{% endif %}
@@ -64,5 +64,5 @@
         </td>
     </tr>
 {% empty %}
-    <tr><td colspan="9" class="muted center">対象月にアップロード済み領収書はありません。</td></tr>
+    <tr><td colspan="9" class="muted center">この提出月にアップロード済み領収書はありません。</td></tr>
 {% endfor %}

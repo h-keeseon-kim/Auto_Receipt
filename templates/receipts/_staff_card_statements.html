@@ -30,7 +30,7 @@
 
     <section class="status-grid compact-grid">
         <div class="card"><span class="label">カード下4桁（{{ target_card_last4 }}）</span><strong class="{% if statement.card_last4 and statement.card_last4 != target_card_last4 %}danger{% endif %}">{{ statement.card_last4|default:"解析待ち" }}</strong></div>
-        <div class="card"><span class="label">AI判定対象月</span><strong class="{% if statement.statement_period and statement.statement_period != selected_month|date:'Y-m' %}danger{% endif %}">{{ statement.statement_period|default:"解析待ち" }}</strong></div>
+        <div class="card"><span class="label">AI判定領収書月</span><strong class="{% if statement.statement_period and statement.statement_period != selected_month|date:'Y-m' %}danger{% endif %}">{{ statement.statement_period|default:"解析待ち" }}</strong></div>
         <div class="card"><span class="label">支払日</span><strong>{{ statement.payment_date|date:"Y-m-d"|default:"-" }}</strong></div>
         <div class="card"><span class="label">明細行</span><strong>{{ statement.items.count }}</strong></div>
         <div class="card"><span class="label">領収書未提出行</span><strong class="{% if statement.missing_receipt_count %}danger{% endif %}">{{ statement.missing_receipt_count }}</strong></div>
@@ -97,6 +97,6 @@
 </section>
 {% empty %}
 <section class="card section">
-    <p class="muted center">この対象月の全社ご利用代金明細書はまだありません。</p>
+    <p class="muted center">この領収書月の全社ご利用代金明細書はまだありません。</p>
 </section>
 {% endfor %}

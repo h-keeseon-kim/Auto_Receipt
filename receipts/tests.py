@@ -60,6 +60,8 @@ from .models import (
     SubmissionStatus,
     UserAccountStatus,
     UserProfile,
+    receipt_month_for_submission,
+    submission_month_for_receipt,
 )
 
 
@@ -87,6 +89,11 @@ class ReceiptFlowTests(TestCase):
         response = self.client.get(reverse("home"))
 
         self.assertRedirects(response, reverse("user_services"))
+
+    def test_submission_month_maps_to_previous_receipt_month_across_year_boundary(self):
+        self.assertEqual(receipt_month_for_submission(date(2026, 7, 1)), date(2026, 6, 1))
+        self.assertEqual(receipt_month_for_submission(date(2026, 1, 1)), date(2025, 12, 1))
+        self.assertEqual(submission_month_for_receipt(date(2026, 6, 1)), date(2026, 7, 1))
 
     def test_dashboard_batch_upload_uses_plus_button_without_visible_submit_button(self):
         self.client.login(username="alice", password="password123")
@@ -183,7 +190,7 @@ class ReceiptFlowTests(TestCase):
         self.client.login(username="alice", password="password123")
 
         response = self.client.post(
-            reverse("dashboard") + "?month=2026-06",
+            reverse("dashboard") + "?month=2026-07",
             {
                 "action": "add_receipt",
                 "service": self.service.id,
@@ -217,6 +224,35 @@ class ReceiptFlowTests(TestCase):
         mocked_generate.assert_called_once()
 
     @mock.patch("receipts.ai_processing.generate_ai_receipt_filename")
+    def test_ai_rejects_receipt_from_submission_month_instead_of_previous_month(self, mocked_generate):
+        mocked_generate.return_value = ReceiptFilenameResult(
+            status=ReceiptFilenameStatus.GENERATED,
+            suggested_filename="260701_alice_OpenAI_220_USD.pdf",
+            payee="OpenAI",
+            payment_date=date(2026, 7, 1),
+            amount=Decimal("220.00"),
+            currency="USD",
+            card_last4="7210",
+        )
+        self.client.login(username="alice", password="password123")
+        self.client.post(
+            reverse("dashboard") + "?month=2026-07",
+            {
+                "action": "add_receipt",
+                "service": self.service.id,
+                "file": SimpleUploadedFile("july.pdf", b"%PDF-1.4 july", content_type="application/pdf"),
+            },
+        )
+
+        call_command("process_pending_receipts", "--limit", "10")
+
+        self.assertFalse(Receipt.objects.exists())
+        resubmission = ReceiptResubmissionRequest.objects.get()
+        self.assertIn("対象領収書月", resubmission.message)
+        self.assertIn("2026-06", resubmission.message)
+        self.assertIn("2026-07", resubmission.message)
+
+    @mock.patch("receipts.ai_processing.generate_ai_receipt_filename")
     def test_background_ai_period_mismatch_removes_receipt_and_requests_resubmission(self, mocked_generate):
         mocked_generate.return_value = ReceiptFilenameResult(
             status=ReceiptFilenameStatus.GENERATED,
@@ -230,7 +266,7 @@ class ReceiptFlowTests(TestCase):
         self.client.login(username="alice", password="password123")
 
         response = self.client.post(
-            reverse("dashboard") + "?month=2026-06",
+            reverse("dashboard") + "?month=2026-07",
             {
                 "action": "add_receipt",
                 "service": self.service.id,
@@ -241,7 +277,7 @@ class ReceiptFlowTests(TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(Receipt.objects.count(), 1)
-        self.assertNotContains(response, "提出月（2026年06月）ではなく 2026年05月")
+        self.assertNotContains(response, "対象領収書月（2026年06月）ではなく 2026年05月")
         self.assertContains(response, "AIによるファイル名修正・検査は、管理者が実行")
 
         call_command("process_pending_receipts", "--limit", "10")
@@ -250,10 +286,10 @@ class ReceiptFlowTests(TestCase):
         self.assertEqual(request_item.status, ResubmissionRequestStatus.OPEN)
         self.assertIn("対象月", request_item.message)
         self.assertIn("2026-05", request_item.message)
-        submission = Submission.objects.get(user=self.user, period_month=date(2026, 6, 1))
+        submission = Submission.objects.get(user=self.user, period_month=date(2026, 7, 1))
         self.assertEqual(submission.status, SubmissionStatus.DRAFT)
 
-        user_response = self.client.get(reverse("dashboard") + "?month=2026-06")
+        user_response = self.client.get(reverse("dashboard") + "?month=2026-07")
         self.assertContains(user_response, "再提出依頼")
         self.assertContains(user_response, "正しい領収書を再度アップロード")
 
@@ -316,15 +352,15 @@ class ReceiptFlowTests(TestCase):
         )
         self.client.login(username="alice", password="password123")
         self.client.post(
-            reverse("dashboard") + "?month=2026-06",
+            reverse("dashboard") + "?month=2026-07",
             {
                 "action": "add_receipt",
                 "service": self.service.id,
                 "file": SimpleUploadedFile("wrong-payee.pdf", b"%PDF-1.4 wrong", content_type="application/pdf"),
             },
         )
-        self.client.post(reverse("dashboard") + "?month=2026-06", {"action": "submit"})
-        submission = Submission.objects.get(user=self.user, period_month=date(2026, 6, 1))
+        self.client.post(reverse("dashboard") + "?month=2026-07", {"action": "submit"})
+        submission = Submission.objects.get(user=self.user, period_month=date(2026, 7, 1))
         self.assertTrue(submission.is_submitted)
 
         call_command("process_pending_receipts", "--limit", "10")
@@ -343,7 +379,7 @@ class ReceiptFlowTests(TestCase):
         admin = User.objects.create_superuser(username="admin", email="admin@example.com", password="admin-password-123")
         self.client.logout()
         self.client.login(username="admin", password="admin-password-123")
-        staff_response = self.client.get(reverse("history") + "?month=2026-06")
+        staff_response = self.client.get(reverse("history") + "?month=2026-07")
         self.assertContains(staff_response, "manual-review-row")
         self.assertContains(staff_response, "サービス/メモ関連要確認")
         self.assertContains(staff_response, "再提出指示")
@@ -351,10 +387,10 @@ class ReceiptFlowTests(TestCase):
 
         response = self.client.post(
             reverse("staff_request_receipt_resubmission", args=[receipt.pk]),
-            {"next": reverse("history") + "?month=2026-06"},
+            {"next": reverse("history") + "?month=2026-07"},
         )
 
-        self.assertRedirects(response, reverse("history") + "?month=2026-06")
+        self.assertRedirects(response, reverse("history") + "?month=2026-07")
         self.assertFalse(Receipt.objects.filter(pk=receipt.pk).exists())
         self.assertFalse(receipt_path.exists())
         request_item = ReceiptResubmissionRequest.objects.get()
@@ -366,12 +402,12 @@ class ReceiptFlowTests(TestCase):
 
         self.client.logout()
         self.client.login(username="alice", password="password123")
-        response = self.client.get(reverse("dashboard") + "?month=2026-06")
+        response = self.client.get(reverse("dashboard") + "?month=2026-07")
         self.assertContains(response, "再提出依頼があります")
         self.assertContains(response, "ChatGPT")
 
         response = self.client.post(
-            reverse("dashboard") + "?month=2026-06",
+            reverse("dashboard") + "?month=2026-07",
             {
                 "action": "add_receipt",
                 "service": self.service.id,
@@ -398,7 +434,7 @@ class ReceiptFlowTests(TestCase):
         self.client.login(username="alice", password="password123")
         submission = Submission.objects.create(
             user=self.user,
-            period_month=date(2026, 6, 1),
+            period_month=date(2026, 7, 1),
             status="submitted",
             submitted_at=timezone.now(),
         )
@@ -458,7 +494,7 @@ class ReceiptFlowTests(TestCase):
         self.client.login(username="alice", password="password123")
         submission = Submission.objects.create(
             user=self.user,
-            period_month=date(2026, 6, 1),
+            period_month=date(2026, 7, 1),
             status="submitted",
             submitted_at=timezone.now(),
         )
@@ -562,7 +598,7 @@ class ReceiptFlowTests(TestCase):
         )
         self.client.login(username="alice", password="password123")
         self.client.post(
-            reverse("dashboard") + "?month=2026-06",
+            reverse("dashboard") + "?month=2026-07",
             {
                 "action": "add_receipt",
                 "service": self.service.id,
@@ -583,7 +619,7 @@ class ReceiptFlowTests(TestCase):
         admin = User.objects.create_superuser(username="admin", email="admin@example.com", password="admin-password-123")
         self.client.logout()
         self.client.login(username="admin", password="admin-password-123")
-        response = self.client.get(reverse("history") + "?month=2026-06")
+        response = self.client.get(reverse("history") + "?month=2026-07")
 
         self.assertContains(response, "manual-review-row")
         self.assertContains(response, "サービス/払先関連")
@@ -861,7 +897,7 @@ class ReceiptFlowTests(TestCase):
 
     @mock.patch("receipts.ai_processing.generate_ai_receipt_filename")
     def test_extra_receipt_ai_uses_required_memo_as_hint_and_receipt_content_as_priority(self, mocked_generate):
-        submission = Submission.objects.create(user=self.user, period_month=date(2026, 6, 1))
+        submission = Submission.objects.create(user=self.user, period_month=date(2026, 7, 1))
         receipt = Receipt.objects.create(
             submission=submission,
             service=None,
@@ -1469,7 +1505,7 @@ class StaffServiceAssignmentTests(TestCase):
         submission.refresh_from_db()
         self.assertEqual(submission.status, SubmissionStatus.DRAFT)
         self.assertIsNone(submission.submitted_at)
-        self.assertContains(response, "対象月を下書きに戻しました")
+        self.assertContains(response, "下書きに戻しました")
 
     def test_staff_proxy_upload_other_receipt_requires_memo_and_records_admin_source(self):
         self.client.login(username="admin", password="admin-password-123")
@@ -2219,13 +2255,13 @@ class UserServiceRegistrationTests(TestCase):
         self.assertEqual(service.final_receipt_month, date(2026, 6, 1))
         self.assertEqual(service.stop_note, "解約済み")
 
-        response = self.client.get(reverse("dashboard") + "?month=2026-06")
+        response = self.client.get(reverse("dashboard") + "?month=2026-07")
         self.assertContains(response, "停止済み・最終 2026-06")
         form = response.context["upload_form"]
         service_values = {value for value, _label in form.fields["service"].choices}
         self.assertIn(str(service.id), service_values)
 
-        response = self.client.get(reverse("dashboard") + "?month=2026-07")
+        response = self.client.get(reverse("dashboard") + "?month=2026-08")
         form = response.context["upload_form"]
         service_values = {value for value, _label in form.fields["service"].choices}
         self.assertNotIn(str(service.id), service_values)
@@ -2249,7 +2285,7 @@ class UserServiceRegistrationTests(TestCase):
             deactivated_by=self.user,
             final_receipt_month=date(2026, 6, 1),
         )
-        submission = Submission.objects.create(user=self.user, period_month=date(2026, 7, 1))
+        submission = Submission.objects.create(user=self.user, period_month=date(2026, 8, 1))
         receipt = Receipt(
             submission=submission,
             service=service,
@@ -2387,7 +2423,7 @@ class EmailReminderTests(TestCase):
 
         self.assertEqual(len(mail.outbox), 3)
         self.assertEqual(EmailDeliveryLog.objects.filter(email_type=EmailType.REMINDER_INITIAL, status=EmailDeliveryStatus.SENT).count(), 3)
-        self.assertIn("2026年06月分について", mail.outbox[0].body)
+        self.assertIn("2026年05月分について", mail.outbox[0].body)
         self.assertIn("https://receipthub.example.com/dashboard/?month=2026-06", mail.outbox[0].body)
 
         call_command("send_receipt_reminders", "--kind", "initial", "--month", "2026-06")
@@ -2569,7 +2605,7 @@ class FinalWorkflowAcceptanceTests(TestCase):
         self.user.profile.refresh_from_db()
         self.assertEqual(self.user.profile.account_status, UserAccountStatus.ACTIVE)
 
-    def create_receipt(self, *, service=None, month=date(2026, 6, 1), filename="receipt.pdf"):
+    def create_receipt(self, *, service=None, month=date(2026, 7, 1), filename="receipt.pdf"):
         service = service or self.subscription
         submission, _ = Submission.objects.get_or_create(user=self.user, period_month=month)
         return Receipt.objects.create(
@@ -2586,7 +2622,7 @@ class FinalWorkflowAcceptanceTests(TestCase):
         receipt = self.create_receipt(service=self.subscription)
         submission = receipt.submission
 
-        summary = build_user_month_summary(self.user, date(2026, 6, 1))
+        summary = build_user_month_summary(self.user, date(2026, 7, 1))
         self.assertEqual(summary.uploaded_count, 1)
         self.assertEqual(summary.api_pending_count, 1)
         self.assertFalse(summary.is_complete)
@@ -2596,19 +2632,19 @@ class FinalWorkflowAcceptanceTests(TestCase):
         MonthlyServiceDeclaration.objects.create(
             user=self.user,
             service=self.api_service,
-            period_month=date(2026, 6, 1),
+            period_month=date(2026, 7, 1),
             no_usage=True,
             declared_by=self.user,
         )
         submission.submit()
         submission.refresh_from_db()
         self.assertTrue(submission.is_submitted)
-        self.assertTrue(build_user_month_summary(self.user, date(2026, 6, 1)).is_complete)
+        self.assertTrue(build_user_month_summary(self.user, date(2026, 7, 1)).is_complete)
 
     def test_dashboard_allows_metered_no_usage_declaration(self):
         self.client.login(username="user@example.com", password="password123")
         response = self.client.post(
-            reverse("dashboard") + "?month=2026-06",
+            reverse("dashboard") + "?month=2026-07",
             {"action": "declare_no_usage", "service_id": self.api_service.pk},
             follow=True,
         )
@@ -2617,19 +2653,19 @@ class FinalWorkflowAcceptanceTests(TestCase):
             MonthlyServiceDeclaration.objects.filter(
                 user=self.user,
                 service=self.api_service,
-                period_month=date(2026, 6, 1),
+                period_month=date(2026, 7, 1),
                 no_usage=True,
             ).exists()
         )
-        self.assertContains(response, "当月利用なし")
+        self.assertContains(response, "対象領収書月は利用なし")
 
     def test_normal_reminder_skips_api_only_pending_but_urgent_reminder_sends(self):
         self.create_receipt(service=self.subscription)
 
-        call_command("send_receipt_reminders", "--kind", "initial", "--month", "2026-06")
+        call_command("send_receipt_reminders", "--kind", "initial", "--month", "2026-07")
         self.assertEqual(len(mail.outbox), 0)
 
-        call_command("send_receipt_reminders", "--kind", "urgent", "--month", "2026-06")
+        call_command("send_receipt_reminders", "--kind", "urgent", "--month", "2026-07")
         self.assertEqual(len(mail.outbox), 1)
         self.assertTrue(mail.outbox[0].subject.startswith("【重要】"))
         self.assertIn("OpenAI API（従量課金 / API）", mail.outbox[0].body)
@@ -2656,11 +2692,11 @@ class FinalWorkflowAcceptanceTests(TestCase):
         schedule.initial_body_template = "{user_name}\n不足:\n{missing_services}\n{upload_url}"
         schedule.save()
 
-        call_command("send_receipt_reminders", "--kind", "initial", "--month", "2026-06")
+        call_command("send_receipt_reminders", "--kind", "initial", "--month", "2026-07")
         self.assertEqual(len(mail.outbox), 1)
-        self.assertEqual(mail.outbox[0].subject, "2026年06月 未提出のお知らせ")
+        self.assertEqual(mail.outbox[0].subject, "2026年07月 未提出のお知らせ")
         self.assertIn("ChatGPT（サブスク）", mail.outbox[0].body)
-        self.assertIn("https://receipthub.example.com/dashboard/?month=2026-06", mail.outbox[0].body)
+        self.assertIn("https://receipthub.example.com/dashboard/?month=2026-07", mail.outbox[0].body)
 
     def test_superuser_can_change_role_and_normal_admin_cannot(self):
         self.client.login(username="admin", password="admin-password-123")
@@ -2757,7 +2793,7 @@ class FinalWorkflowAcceptanceTests(TestCase):
         MonthlyServiceDeclaration.objects.create(
             user=self.user,
             service=self.api_service,
-            period_month=date(2026, 6, 1),
+            period_month=date(2026, 7, 1),
             no_usage=True,
             declared_by=self.user,
         )
@@ -2800,12 +2836,12 @@ class FinalWorkflowAcceptanceTests(TestCase):
             MonthlyServiceDeclaration.objects.filter(
                 user=self.user,
                 service=self.api_service,
-                period_month=date(2026, 6, 1),
+                period_month=date(2026, 7, 1),
             ).exists()
         )
         self.assertTrue(item.needs_highlight)
         self.assertEqual(item.receipt_status_label, "領収書未提出")
-        self.assertIn("当月利用なし", item.match_memo)
+        self.assertIn("対象領収書月は利用なし", item.match_memo)
         self.assertIn("利用なし", statement.ai_admin_memo)
 
     @mock.patch("receipts.statement_processing.generate_card_statement_analysis")
@@ -2933,7 +2969,7 @@ class FinalWorkflowAcceptanceTests(TestCase):
     def test_staff_month_page_shows_missing_services_and_links_to_global_statement_page(self):
         self.client.login(username="admin", password="admin-password-123")
         response = self.client.get(
-            reverse("staff_user_month_status", args=[self.user.pk]) + "?month=2026-06"
+            reverse("staff_user_month_status", args=[self.user.pk]) + "?month=2026-07"
         )
         self.assertEqual(response.status_code, 200)
         self.assertContains(response, "ChatGPT（サブスク）")
@@ -2961,7 +2997,7 @@ class FinalWorkflowAcceptanceTests(TestCase):
         )
         other_submission = Submission.objects.create(
             user=other_user,
-            period_month=date(2026, 6, 1),
+            period_month=date(2026, 7, 1),
         )
         other_receipt = Receipt.objects.create(
             submission=other_submission,
@@ -3300,7 +3336,7 @@ class FinalWorkflowAcceptanceTests(TestCase):
         self.assertEqual(response.status_code, 404)
 
     def test_version_file_is_present_without_web_display_requirement(self):
-        self.assertEqual(Path("VERSION").read_text(encoding="utf-8").strip(), "1.5.1")
+        self.assertEqual(Path("VERSION").read_text(encoding="utf-8").strip(), "1.5.2")
 
 
 @override_settings(PASSWORD_HASHERS=FAST_PASSWORD_HASHERS)

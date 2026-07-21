@@ -24,6 +24,7 @@ from .models import (
     UserAccountStatus,
     add_months,
     month_start,
+    receipt_month_for_submission,
 )
 from .monthly_status import UserMonthSummary, build_user_month_summary
 
@@ -133,6 +134,7 @@ def reminder_template_context(user: User, target_month: date, summary: UserMonth
         "app_name": getattr(settings, "APP_NAME", "ReceiptHub"),
         "user_name": user.get_full_name() or user.get_username(),
         "target_month": month_label(target_month),
+        "receipt_month": month_label(receipt_month_for_submission(target_month)),
         "upload_url": upload_url_for_month(target_month),
         "missing_services": service_list_text(summary.missing_required if summary else ()),
         "api_pending_services": service_list_text(summary.api_pending if summary else ()),

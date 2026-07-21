@@ -15,7 +15,8 @@
 </div>
 
 <section class="status-grid">
-    <div class="card"><span class="label">対象月</span><strong>{{ selected_month|date:"Y年m月" }}</strong></div>
+    <div class="card"><span class="label">提出月</span><strong>{{ selected_month|date:"Y年m月" }}</strong></div>
+    <div class="card"><span class="label">対象領収書月</span><strong>{{ target_receipt_month|date:"Y年m月" }}</strong></div>
     <div class="card"><span class="label">利用中ユーザー</span><strong>{{ stats.active_users }}</strong></div>
     <div class="card"><span class="label">提出済み</span><strong>{{ stats.submitted }}</strong></div>
     <div class="card"><span class="label">未提出ユーザー</span><strong class="{% if stats.incomplete_users %}danger{% endif %}">{{ stats.incomplete_users }}</strong></div>
@@ -27,7 +28,7 @@
     <div class="card"><span class="label">AI要確認</span><strong data-ai-summary="ai_review_count">{{ stats.ai_review_count }}</strong></div>
     <div class="card"><span class="label">手動確認対象</span><strong data-ai-summary="manual_review_count">{{ stats.manual_review_count }}</strong></div>
     <div class="card"><span class="label">サービス/メモ関連要確認</span><strong data-ai-summary="service_payee_review_count">{{ stats.service_payee_review_count }}</strong></div>
-    <div class="card"><span class="label">提出月不一致</span><strong data-ai-summary="period_mismatch_count">{{ stats.period_mismatch_count }}</strong></div>
+    <div class="card"><span class="label">対象領収書月不一致</span><strong data-ai-summary="period_mismatch_count">{{ stats.period_mismatch_count }}</strong></div>
     <div class="card"><span class="label">再提出待ち</span><strong>{{ stats.open_resubmission_request_count }}</strong></div>
 </section>
 
@@ -38,7 +39,7 @@
             <p class="muted">ユーザー名順です。「月別状況」からサービス単位の提出状況を確認できます。全社カード明細は専用ページで一括照合します。</p>
         </div>
         <div class="actions nowrap">
-            <a class="button" href="{% url 'staff_card_statements' %}?month={{ selected_month|date:'Y-m' }}">ご利用代金明細</a>
+            <a class="button" href="{% url 'staff_card_statements' %}?month={{ target_receipt_month|date:'Y-m' }}">ご利用代金明細</a>
             <a class="button primary" href="{% url 'staff_download_month' %}?month={{ selected_month|date:'Y-m' }}">提出済みZIP</a>
         </div>
     </div>
@@ -110,7 +111,7 @@
     <div class="section-header">
         <div>
             <h2>アップロード済み領収書</h2>
-            <p class="muted">対象月の領収書をアップロード日時の新しい順に表示します。AI修正・検査は未確認ファイルだけを処理します。</p>
+            <p class="muted">提出月 {{ selected_month|date:"Y年m月" }}（対象領収書月 {{ target_receipt_month|date:"Y年m月" }}）の領収書を、アップロード日時の新しい順に表示します。AI修正・検査は未確認ファイルだけを処理します。</p>
         </div>
         <form method="post" action="{% url 'staff_start_ai_processing' %}" class="ai-process-form" data-ai-process-form data-status-url="{% url 'staff_ai_processing_status' %}?month={{ selected_month|date:'Y-m' }}">
             {% csrf_token %}
@@ -122,7 +123,7 @@
     </div>
     <div class="table-wrap scroll-box large table-scroll-wide" aria-label="アップロード済み領収書テーブル" data-tutorial-target="staff-receipt-table">
         <table class="receipt-history-table">
-            <thead><tr><th>ユーザー</th><th>提出月</th><th>ステータス</th><th>サービス</th><th>ファイル</th><th>AI確認 / 提出月</th><th>保存状態</th><th>アップロード日時</th><th>操作</th></tr></thead>
+            <thead><tr><th>ユーザー</th><th>提出月</th><th>ステータス</th><th>サービス</th><th>ファイル</th><th>AI確認 / 対象領収書月</th><th>保存状態</th><th>アップロード日時</th><th>操作</th></tr></thead>
             <tbody data-ai-receipt-table-body>
                 {% include "receipts/_staff_receipt_rows.html" %}
             </tbody>

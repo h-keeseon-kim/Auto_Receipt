@@ -37,7 +37,7 @@
                             <div class="small ai-file-meta">
                                 <div class="ai-check-status">
                                     <span class="badge {{ receipt.ai_filename_badge_class }}">AI: {{ receipt.get_ai_filename_status_display }}</span>
-                                    <span class="badge {{ receipt.ai_period_check_badge_class }}">提出月: {{ receipt.get_ai_period_check_status_display }}</span>
+                                    <span class="badge {{ receipt.ai_period_check_badge_class }}">対象領収書月: {{ receipt.get_ai_period_check_status_display }}</span>
                                     <span class="badge {{ receipt.manual_review_badge_class }}">{{ receipt.manual_review_label }}</span>
                                 </div>
                                 <div class="ai-checklist" aria-label="AI確認項目">
@@ -47,7 +47,7 @@
                                         </label>
                                     {% endfor %}
                                 </div>
-                                {% if receipt.ai_receipt_month %}<div class="muted small">判定月: {{ receipt.ai_receipt_month }}</div>{% endif %}
+                                {% if receipt.ai_receipt_month %}<div class="muted small">AI判定領収書月: {{ receipt.ai_receipt_month }}</div>{% endif %}
                                 {% if receipt.ai_extracted_payee %}<div class="muted small">払先: {{ receipt.ai_extracted_payee }}</div>{% endif %}
                                 {% if receipt.ai_extracted_card_last4 %}<div class="muted small">カード下4桁: {{ receipt.ai_extracted_card_last4 }}</div>{% endif %}
                                 {% if receipt.ai_service_payee_check_memo %}<div class="danger small">{{ receipt.ai_service_payee_check_memo|linebreaksbr }}</div>{% endif %}

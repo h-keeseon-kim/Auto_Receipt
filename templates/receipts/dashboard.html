@@ -4,7 +4,7 @@
 <div class="page-title" data-tutorial-target="upload-page">
     <div>
         <h1>領収書アップロード</h1>
-        <p class="muted">対象月ごとに領収書をアップロードし、内容を確認してから提出します。</p>
+        <p class="muted">提出月の前月分にあたる領収書をアップロードし、内容を確認してから提出します。</p>
     </div>
     <form method="get" class="month-form" data-tutorial-target="upload-month-form">
         {{ month_form.month.label_tag }}
@@ -17,6 +17,11 @@
     <div class="card">
         <span class="label">提出月</span>
         <strong>{{ selected_month|date:"Y年m月" }}</strong>
+    </div>
+    <div class="card">
+        <span class="label">対象領収書月</span>
+        <strong>{{ target_receipt_month|date:"Y年m月" }}</strong>
+        <span class="muted small">提出月の前月</span>
     </div>
     <div class="card">
         <span class="label">ステータス</span>
@@ -42,12 +47,12 @@
     <div class="section-header">
         <div>
             <h2>従量課金 / API利用確認</h2>
-            <p class="muted">領収書が発生しなかったAPIサービスは「当月利用なし」を選択してください。利用があった場合は通常どおり領収書をアップロードします。</p>
+            <p class="muted">対象領収書月に領収書が発生しなかったAPIサービスは「利用なし」を選択してください。利用があった場合は通常どおり領収書をアップロードします。</p>
         </div>
     </div>
     <div class="table-wrap">
         <table>
-            <thead><tr><th>サービス</th><th>当月ステータス</th><th>操作</th></tr></thead>
+            <thead><tr><th>サービス</th><th>対象領収書月ステータス</th><th>操作</th></tr></thead>
             <tbody>
                 {% for row in monthly_summary.metered_rows %}
                     <tr>
@@ -66,11 +71,11 @@
                                     <button type="submit" class="button small">利用なしを取り消す</button>
                                 </form>
                             {% else %}
-                                <form method="post" class="inline-form" onsubmit="return confirm('この月はAPI利用がなく、領収書が発生していないことを記録しますか？');">
+                                <form method="post" class="inline-form" onsubmit="return confirm('対象領収書月はAPI利用がなく、領収書が発生していないことを記録しますか？');">
                                     {% csrf_token %}
                                     <input type="hidden" name="action" value="declare_no_usage">
                                     <input type="hidden" name="service_id" value="{{ row.service.pk }}">
-                                    <button type="submit" class="button small">当月利用なし</button>
+                                    <button type="submit" class="button small">対象領収書月は利用なし</button>
                                 </form>
                             {% endif %}
                         </td>
@@ -110,7 +115,7 @@
 {% if submission.is_submitted %}
     <section class="card section notice">
         <h2>提出済みです</h2>
-        <p>ファイル修正は可能です。登録サービスまたは「その他」に領収書を追加すると、この月は自動的に下書きへ戻るため、内容を確認して再度提出してください。</p>
+        <p>ファイル修正は可能です。登録サービスまたは「その他」に領収書を追加すると、この提出月は自動的に下書きへ戻るため、内容を確認して再度提出してください。</p>
         <a class="button primary" href="{{ submission.get_absolute_url }}">提出内容を見る</a>
     </section>
 {% endif %}
@@ -119,7 +124,7 @@
     <div class="section-header receipt-add-header">
         <div>
             <h2>領収書を追加</h2>
-            <p class="muted">サービスを選び、「＋ 領収書を追加」からファイルを選択します。同じサービスへ複数の領収書を追加でき、一度に複数ファイルも選択できます。</p>
+            <p class="muted">対象領収書月（{{ target_receipt_month|date:"Y年m月" }}）のサービスを選び、「＋ 領収書を追加」からファイルを選択します。同じサービスへ複数の領収書を追加でき、一度に複数ファイルも選択できます。</p>
         </div>
     </div>
 
@@ -161,7 +166,7 @@
     <div class="section-header">
         <h2>アップロード済み領収書</h2>
         {% if not submission.is_submitted %}
-            <form method="post" onsubmit="return confirm('この内容で提出しますか？提出後に領収書を追加した場合は、月が下書きへ戻り再提出が必要になります。');">
+            <form method="post" onsubmit="return confirm('この内容で提出しますか？提出後に領収書を追加した場合は、提出月が下書きへ戻り再提出が必要になります。');">
                 {% csrf_token %}
                 <input type="hidden" name="action" value="submit">
                 <button type="submit" class="button primary" data-tutorial-target="submit-receipts-button">提出する</button>

@@ -17,6 +17,7 @@
 <section class="status-grid">
     <div class="card"><span class="label">ユーザー</span><strong>{{ receipt.submission.user.username }}</strong></div>
     <div class="card"><span class="label">提出月</span><strong>{{ receipt.submission.period_month|date:"Y年m月" }}</strong></div>
+    <div class="card"><span class="label">対象領収書月</span><strong>{{ receipt.submission.target_receipt_month|date:"Y年m月" }}</strong></div>
     <div class="card"><span class="label">サービス</span><strong>{{ receipt.service_display_name_snapshot }}</strong></div>
     <div class="card"><span class="label">アップロード元</span><strong>{{ receipt.uploader_label }}</strong><div class="muted small">{{ receipt.uploaded_by_label }}</div></div>
 </section>

@@ -3,7 +3,8 @@
 {% block content %}
 <div class="page-title">
     <div>
-        <h1>{{ managed_user.username }} / {{ selected_month|date:"Y年m月" }}</h1>
+        <h1>{{ managed_user.username }} / {{ selected_month|date:"Y年m月" }}提出</h1>
+        <p class="muted"><strong>対象領収書月: {{ target_receipt_month|date:"Y年m月" }}</strong>（提出月の前月）</p>
         <p class="muted">利用サービスごとの領収書提出状況を確認できます。全社カード明細との照合は専用ページで行います。</p>
         <div class="actions">
             <a class="button" href="{% url 'history' %}?month={{ selected_month|date:'Y-m' }}">提出履歴へ戻る</a>
@@ -19,6 +20,7 @@
 
 <section class="status-grid">
     <div class="card"><span class="label">ユーザーステータス</span><strong class="badge {% if managed_user.profile.account_status == 'active' %}submitted{% else %}neutral{% endif %}">{{ managed_user.profile.get_account_status_display }}</strong></div>
+    <div class="card"><span class="label">対象領収書月</span><strong>{{ target_receipt_month|date:"Y年m月" }}</strong></div>
     <div class="card"><span class="label">提出ステータス</span>{% if submission %}<strong class="badge {{ submission.status }}">{{ submission.get_status_display }}</strong>{% else %}<strong class="badge neutral">未着手</strong>{% endif %}</div>
     <div class="card"><span class="label">提出対象サービス</span><strong>{{ monthly_summary.total_services }}</strong></div>
     <div class="card"><span class="label">確認済み</span><strong>{{ monthly_summary.progress_label }}</strong></div>
@@ -30,7 +32,7 @@
     <div class="section-header">
         <div>
             <h2>管理者代理アップロード</h2>
-            <p class="muted">ユーザー本人がアップロードできない場合に、対象サービスを選択して領収書を代理登録します。登録後はユーザー画面にも反映され、下の「確認」から領収書本体・AI検査・ファイル名修正まで行えます。</p>
+            <p class="muted">ユーザー本人がアップロードできない場合に、対象領収書月（{{ target_receipt_month|date:"Y年m月" }}）のサービスを選択して領収書を代理登録します。登録後はユーザー画面にも反映され、下の「確認」から領収書本体・AI検査・ファイル名修正まで行えます。</p>
         </div>
     </div>
 
@@ -115,7 +117,7 @@
     {% if submission %}
         {% include "receipts/_receipt_table.html" with receipts=submission.receipts.all submission=submission %}
     {% else %}
-        <p class="muted center">対象月にアップロード済み領収書はありません。</p>
+        <p class="muted center">この提出月にアップロード済み領収書はありません。</p>
     {% endif %}
 </section>
 
@@ -123,12 +125,12 @@
     <div class="section-header">
         <div>
             <h2>月別サービス状況</h2>
-            <p class="muted">各サービスに領収書があるか、または従量課金 / APIが「当月利用なし」と申告されているかを表示します。</p>
+            <p class="muted">各サービスに対象領収書月の領収書があるか、または従量課金 / APIが「対象領収書月は利用なし」と申告されているかを表示します。</p>
         </div>
     </div>
     <div class="table-wrap scroll-box medium table-scroll-wide">
         <table class="monthly-service-status-table">
-            <thead><tr><th>サービス</th><th>種別</th><th>当月ステータス</th><th>領収書</th><th>補足</th><th>操作</th></tr></thead>
+            <thead><tr><th>サービス</th><th>種別</th><th>対象領収書月ステータス</th><th>領収書</th><th>補足</th><th>操作</th></tr></thead>
             <tbody>
                 {% for row in monthly_summary.rows %}
                     <tr class="{% if row.status_code == 'missing' or row.status_code == 'api_pending' %}attention-row{% endif %}">
@@ -144,12 +146,12 @@
                             {% empty %}-{% endfor %}
                         </td>
                         <td>
-                            {% if row.no_usage_declared %}ユーザーが当月利用なしと申告{% elif row.status_code == 'api_pending' %}<span class="danger">利用有無の確認が必要</span>{% elif row.status_code == 'missing' %}<span class="danger">領収書アップロード待ち</span>{% else %}-{% endif %}
+                            {% if row.no_usage_declared %}ユーザーが対象領収書月は利用なしと申告{% elif row.status_code == 'api_pending' %}<span class="danger">利用有無の確認が必要</span>{% elif row.status_code == 'missing' %}<span class="danger">領収書アップロード待ち</span>{% else %}-{% endif %}
                         </td>
                         <td><a class="button small" href="?month={{ selected_month|date:'Y-m' }}&service={{ row.service.pk }}#staff-receipt-upload">代理アップロード</a></td>
                     </tr>
                 {% empty %}
-                    <tr><td colspan="6" class="muted center">対象月の利用サービスはありません。「その他」の領収書は上の代理アップロード欄から追加できます。</td></tr>
+                    <tr><td colspan="6" class="muted center">対象領収書月の利用サービスはありません。「その他」の領収書は上の代理アップロード欄から追加できます。</td></tr>
                 {% endfor %}
             </tbody>
         </table>
@@ -160,11 +162,11 @@
     <div class="section-header">
         <div>
             <h2>全社ご利用代金明細との照合</h2>
-            <p class="muted">ご利用代金明細書はユーザー別ではなく、対象月の全ユーザー領収書とまとめて照合します。</p>
+            <p class="muted">ご利用代金明細書はユーザー別ではなく、対象領収書月の全ユーザー領収書とまとめて照合します。</p>
         </div>
-        <a class="button primary" href="{% url 'staff_card_statements' %}?month={{ selected_month|date:'Y-m' }}">ご利用代金明細を確認</a>
+        <a class="button primary" href="{% url 'staff_card_statements' %}?month={{ target_receipt_month|date:'Y-m' }}">ご利用代金明細を確認</a>
     </div>
-    <p>対象月にアップロードされている全社明細書: <strong>{{ global_statement_count }}</strong>件</p>
+    <p>対象領収書月にアップロードされている全社明細書: <strong>{{ global_statement_count }}</strong>件</p>
 </section>
 
 <script>

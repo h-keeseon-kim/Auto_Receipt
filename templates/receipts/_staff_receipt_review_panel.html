@@ -28,7 +28,7 @@
             <div><dt>元ファイル名</dt><dd>{{ receipt.original_filename|default:"-" }}</dd></div>
             <div><dt>AI抽出払先</dt><dd>{{ receipt.ai_extracted_payee|default:"-" }}</dd></div>
             <div><dt>カード下4桁</dt><dd>{{ receipt.ai_extracted_card_last4|default:"-" }}</dd></div>
-            <div><dt>AI判定月</dt><dd>{{ receipt.ai_receipt_month|default:"-" }}</dd></div>
+            <div><dt>AI判定領収書月</dt><dd>{{ receipt.ai_receipt_month|default:"-" }}</dd></div>
         </dl>
         {% if receipt.ai_service_payee_check_memo %}<div class="message notice small">{{ receipt.ai_service_payee_check_memo|linebreaksbr }}</div>{% endif %}
         {% if receipt.ai_filename_admin_memo %}<div class="message notice small">{{ receipt.ai_filename_admin_memo|linebreaksbr }}</div>{% endif %}

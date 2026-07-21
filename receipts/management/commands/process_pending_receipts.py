@@ -7,7 +7,7 @@ from receipts.models import Receipt, ReceiptFilenameStatus
 
 
 class Command(BaseCommand):
-    help = "未処理の領収書に対してAIファイル名修正・提出月確認を実行します。"
+    help = "未処理の領収書に対してAIファイル名修正・対象領収書月確認を実行します。"
 
     def add_arguments(self, parser):
         parser.add_argument(

@@ -12,6 +12,7 @@ from .models import (
     RegisteredService,
     Submission,
     month_start,
+    receipt_month_for_submission,
 )
 
 
@@ -43,7 +44,7 @@ class ServiceMonthStatus:
     def status_label(self) -> str:
         return {
             "uploaded": "領収書あり",
-            "no_usage": "当月利用なし",
+            "no_usage": "対象領収書月は利用なし",
             "api_pending": "API利用確認待ち",
             "missing": "領収書未提出",
         }[self.status_code]
@@ -63,6 +64,10 @@ class UserMonthSummary:
     user: User
     period_month: date
     rows: tuple[ServiceMonthStatus, ...]
+
+    @property
+    def target_receipt_month(self) -> date:
+        return receipt_month_for_submission(self.period_month)
 
     @property
     def total_services(self) -> int:

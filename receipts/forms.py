@@ -32,6 +32,7 @@ from .models import (
     ServiceRegistrationSource,
     UserAccountStatus,
     UserProfile,
+    receipt_month_for_submission,
     sync_user_account_status_from_services,
     validate_upload_size,
 )
@@ -617,7 +618,7 @@ class ReceiptBatchUploadForm(forms.Form):
             raise forms.ValidationError("サービスを選択してください。") from exc
         service = RegisteredService.objects.filter(pk=service_id, user=self.user).first()
         if service is None or not service.is_uploadable_for(self.period_month):
-            raise forms.ValidationError("この提出月で利用できるサービスを選択してください。")
+            raise forms.ValidationError("この提出月の対象領収書月で利用できるサービスを選択してください。")
         self.is_extra = False
         self.selected_service = service
         return value
@@ -647,7 +648,7 @@ class ReceiptUploadForm(forms.ModelForm):
             "file": "領収書ファイルアップロード",
         }
         help_texts = {
-            "service": "登録済みサービスから選択します。利用停止済みサービスは最終領収書月まで選択できます。",
+            "service": "登録済みサービスから選択します。利用停止済みサービスは、最終領収書月に対応する提出月まで選択できます。",
             "file": "PDF / PNG / JPG / JPEG / WEBP。最大10MB。ファイル本体は最大3ヶ月保存されます。",
         }
 
@@ -773,7 +774,7 @@ class StaffReceiptReviewForm(forms.Form):
     ai_check_date = forms.BooleanField(label="日付", required=False)
     ai_check_amount = forms.BooleanField(label="金額", required=False)
     ai_check_currency = forms.BooleanField(label="通貨", required=False)
-    ai_check_period_match = forms.BooleanField(label="提出月一致", required=False)
+    ai_check_period_match = forms.BooleanField(label="対象領収書月一致", required=False)
     admin_review_note = forms.CharField(
         label="管理者確認メモ",
         required=False,
@@ -801,6 +802,10 @@ class StaffReceiptReviewForm(forms.Form):
         super().__init__(*args, **kwargs)
         if receipt.is_extra:
             self.fields["ai_check_service_payee_related"].label = "メモ / 領収書関連"
+        target_receipt_month = receipt_month_for_submission(receipt.submission.period_month)
+        self.fields["ai_check_period_match"].label = (
+            f"対象領収書月一致（{target_receipt_month:%Y年%m月}）"
+        )
         apply_design_classes(self)
 
     def clean_generated_filename(self):
@@ -860,8 +865,10 @@ class StaffReceiptReviewForm(forms.Form):
             receipt.admin_reviewed_at = timezone.now()
             receipt.ai_filename_status = ReceiptFilenameStatus.GENERATED
             receipt.ai_period_check_status = ReceiptPeriodCheckStatus.MATCHED
+            target_receipt_month = receipt_month_for_submission(receipt.submission.period_month)
             receipt.ai_period_check_memo = (
-                f"管理者 {reviewed_by.get_username()} が提出月との一致を確認しました。"
+                f"管理者 {reviewed_by.get_username()} が、提出月 {receipt.submission.period_month:%Y-%m} の "
+                f"対象領収書月 {target_receipt_month:%Y-%m} との一致を確認しました。"
             )
         else:
             receipt.admin_review_status = ReceiptAdminReviewStatus.NOT_REVIEWED
@@ -1183,6 +1190,7 @@ class EmailReminderScheduleForm(forms.ModelForm):
         "app_name",
         "user_name",
         "target_month",
+        "receipt_month",
         "upload_url",
         "missing_services",
         "api_pending_services",
@@ -1216,10 +1224,10 @@ class EmailReminderScheduleForm(forms.ModelForm):
             "urgent_body_template": forms.Textarea(attrs={"rows": 12}),
         }
         help_texts = {
-            "initial_subject_template": "利用可能な変数: {app_name} {target_month} {user_name}",
-            "initial_body_template": "利用可能な変数: {app_name} {user_name} {target_month} {upload_url} {missing_services}",
+            "initial_subject_template": "利用可能な変数: {app_name} {target_month} {receipt_month} {user_name}",
+            "initial_body_template": "利用可能な変数: {app_name} {user_name} {target_month} {receipt_month} {upload_url} {missing_services}",
             "urgent_subject_template": "【重要】は未入力でも送信時に自動付与されます。",
-            "urgent_body_template": "利用可能な変数: {app_name} {user_name} {target_month} {upload_url} {missing_services} {api_pending_services}",
+            "urgent_body_template": "利用可能な変数: {app_name} {user_name} {target_month} {receipt_month} {upload_url} {missing_services} {api_pending_services}",
         }
 
     def __init__(self, *args, **kwargs):

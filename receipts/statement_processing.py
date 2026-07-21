@@ -24,6 +24,7 @@ from .models import (
     RegisteredService,
     ServiceCatalog,
     StatementMatchStatus,
+    submission_month_for_receipt,
 )
 from .statement_ai import generate_card_statement_analysis
 
@@ -126,9 +127,14 @@ def _registered_services_for_period(period_month: date) -> list[RegisteredServic
 
 
 def _available_receipts_for_period(period_month: date) -> list[Receipt]:
+    submission_month = submission_month_for_receipt(period_month)
     return list(
         Receipt.objects.available_files()
-        .filter(submission__period_month=period_month, submission__user__is_staff=False, submission__user__is_superuser=False)
+        .filter(
+            submission__period_month=submission_month,
+            submission__user__is_staff=False,
+            submission__user__is_superuser=False,
+        )
         .select_related("submission__user", "service", "service__catalog_service")
         .order_by("uploaded_at", "pk")
     )
@@ -156,7 +162,7 @@ def _pick_best_receipt_for_service(
 
 
 def reconcile_card_statement_items(statement_id: int, *, preserve_manual: bool = True) -> CardStatement:
-    """カード明細を、対象月に全ユーザーが提出した領収書と一対一で再照合する。"""
+    """カード明細の対象月を、翌月提出サイクルの全ユーザー領収書と一対一で再照合する。"""
 
     statement = CardStatement.objects.get(pk=statement_id)
     if statement.status == CardStatementStatus.PROCESSING:
@@ -290,12 +296,12 @@ def reconcile_card_statement_items(statement_id: int, *, preserve_manual: bool =
             deleted, _ = MonthlyServiceDeclaration.objects.filter(
                 user=item.matched_service.user,
                 service=item.matched_service,
-                period_month=statement.period_month,
+                period_month=submission_month_for_receipt(statement.period_month),
                 no_usage=True,
             ).delete()
             if deleted:
                 conflict = (
-                    f"{item.matched_service.user.username} の {item.matched_service.display_name} は「当月利用なし」申告でしたが、"
+                    f"{item.matched_service.user.username} の {item.matched_service.display_name} は「対象領収書月は利用なし」申告でしたが、"
                     "カード明細に請求があるため申告を取り消しました。"
                 )
                 no_usage_conflicts.append(conflict)
@@ -335,8 +341,10 @@ def reconcile_card_statement_items(statement_id: int, *, preserve_manual: bool =
                 else CardStatementStatus.COMPLETED
             )
         extraction_memo = (statement.ai_admin_memo or "").split("【照合結果】", 1)[0].strip()
+        submission_month = submission_month_for_receipt(statement.period_month)
         reconciliation_memo = (
-            f"【照合結果】対象月の全ユーザー領収書{len(receipts)}件と照合し、"
+            f"【照合結果】領収書月 {statement.period_month:%Y-%m} "
+            f"（提出月 {submission_month:%Y-%m}）の全ユーザー領収書{len(receipts)}件と照合し、"
             f"領収書未提出{missing_count}件、手動確認{manual_review_count}件です。"
         )
         if no_usage_conflicts:
