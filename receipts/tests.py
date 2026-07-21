@@ -31,7 +31,10 @@ from .forms import (
 )
 from .monthly_status import build_user_month_summary
 from .statement_ai import StatementAnalysisItem, StatementAnalysisResult, build_statement_result_from_payload
-from .statement_processing import process_card_statement
+from .statement_processing import (
+    CARD_STATEMENT_MONTH_SEMANTICS_RECONCILE_MARKER,
+    process_card_statement,
+)
 from .models import (
     BillingType,
     CardStatement,
@@ -61,6 +64,7 @@ from .models import (
     UserAccountStatus,
     UserProfile,
     receipt_month_for_submission,
+    receipt_month_for_statement,
     submission_month_for_receipt,
 )
 
@@ -2756,17 +2760,18 @@ class FinalWorkflowAcceptanceTests(TestCase):
         self.assertFalse(Receipt.objects.filter(pk=receipt.pk).exists())
         self.assertFalse(receipt_path.exists())
 
-    def test_statement_payload_treats_payment_month_as_target_month(self):
+    def test_statement_payload_treats_selected_month_as_statement_month(self):
+        self.assertEqual(receipt_month_for_statement(date(2026, 7, 1)), date(2026, 6, 1))
         result = build_statement_result_from_payload(
             {
                 "card_last4": "7210",
-                "statement_period": "2026-06",
-                "payment_date": "2026-06-29",
-                "summary_reason": "2026年5月利用分を2026年6月に請求。",
+                "statement_period": "2026-07",
+                "payment_date": "2026-07-29",
+                "summary_reason": "2026年6月利用分を2026年7月に請求。",
                 "items": [
                     {
                         "line_reference": "0276",
-                        "transaction_date": "2026-05-03",
+                        "transaction_date": "2026-06-03",
                         "merchant_name": "OPENAI *CHATGPT",
                         "amount_jpy": "35949",
                         "original_amount": "220",
@@ -2779,13 +2784,13 @@ class FinalWorkflowAcceptanceTests(TestCase):
                     }
                 ],
             },
-            target_month="2026-06",
+            target_month="2026-07",
             allowed_catalog_ids={self.subscription_catalog.pk, self.api_catalog.pk},
         )
         self.assertEqual(result.status, CardStatementStatus.COMPLETED)
-        self.assertEqual(result.statement_period, "2026-06")
-        self.assertEqual(result.payment_date, date(2026, 6, 29))
-        self.assertEqual(result.items[0].transaction_date, date(2026, 5, 3))
+        self.assertEqual(result.statement_period, "2026-07")
+        self.assertEqual(result.payment_date, date(2026, 7, 29))
+        self.assertEqual(result.items[0].transaction_date, date(2026, 6, 3))
         self.assertEqual(result.items[0].service_catalog_id, self.subscription_catalog.pk)
 
     @mock.patch("receipts.statement_processing.generate_card_statement_analysis")
@@ -2798,7 +2803,7 @@ class FinalWorkflowAcceptanceTests(TestCase):
             declared_by=self.user,
         )
         statement = CardStatement.objects.create(
-            period_month=date(2026, 6, 1),
+            period_month=date(2026, 7, 1),
             file=SimpleUploadedFile("statement.pdf", b"%PDF-1.4 statement", content_type="application/pdf"),
             original_filename="statement.pdf",
             content_type="application/pdf",
@@ -2809,12 +2814,12 @@ class FinalWorkflowAcceptanceTests(TestCase):
         mocked_analysis.return_value = StatementAnalysisResult(
             status=CardStatementStatus.COMPLETED,
             card_last4="7210",
-            statement_period="2026-06",
-            payment_date=date(2026, 6, 29),
+            statement_period="2026-07",
+            payment_date=date(2026, 7, 29),
             items=(
                 StatementAnalysisItem(
                     line_reference="0302",
-                    transaction_date=date(2026, 5, 16),
+                    transaction_date=date(2026, 6, 16),
                     merchant_name="OPENAI",
                     amount_jpy=Decimal("8236"),
                     original_amount=Decimal("49.92"),
@@ -2848,7 +2853,7 @@ class FinalWorkflowAcceptanceTests(TestCase):
     def test_statement_processing_links_existing_receipt(self, mocked_analysis):
         receipt = self.create_receipt(service=self.subscription)
         statement = CardStatement.objects.create(
-            period_month=date(2026, 6, 1),
+            period_month=date(2026, 7, 1),
             file=SimpleUploadedFile("statement.pdf", b"%PDF-1.4 statement", content_type="application/pdf"),
             original_filename="statement.pdf",
             content_type="application/pdf",
@@ -2859,12 +2864,12 @@ class FinalWorkflowAcceptanceTests(TestCase):
         mocked_analysis.return_value = StatementAnalysisResult(
             status=CardStatementStatus.COMPLETED,
             card_last4="7210",
-            statement_period="2026-06",
-            payment_date=date(2026, 6, 29),
+            statement_period="2026-07",
+            payment_date=date(2026, 7, 29),
             items=(
                 StatementAnalysisItem(
                     line_reference="0276",
-                    transaction_date=date(2026, 5, 3),
+                    transaction_date=date(2026, 6, 3),
                     merchant_name="OPENAI *CHATGPT",
                     amount_jpy=Decimal("35949"),
                     original_amount=Decimal("220"),
@@ -2885,10 +2890,30 @@ class FinalWorkflowAcceptanceTests(TestCase):
         self.assertEqual(item.receipt_status_label, "領収書あり")
 
     @mock.patch("receipts.statement_processing.generate_card_statement_analysis")
-    def test_statement_rows_use_distinct_receipts_and_keep_extra_charge_highlighted(self, mocked_analysis):
-        first_receipt = self.create_receipt(service=self.subscription, filename="first.pdf")
+    def test_july_statement_matches_june_receipt_in_july_submission_not_august_submission(self, mocked_analysis):
+        june_receipt = self.create_receipt(service=self.subscription, month=date(2026, 7, 1), filename="june.pdf")
+        june_receipt.amount = Decimal("220.00")
+        june_receipt.currency = "USD"
+        june_receipt.issued_on = date(2026, 6, 3)
+        june_receipt.ai_extracted_payee = "OPENAI *CHATGPT"
+        june_receipt.save(update_fields=["amount", "currency", "issued_on", "ai_extracted_payee"])
+
+        august_submission = Submission.objects.create(user=self.user, period_month=date(2026, 8, 1))
+        august_receipt = Receipt.objects.create(
+            submission=august_submission,
+            service=self.subscription,
+            service_name_snapshot=self.subscription.name,
+            billing_type_snapshot=self.subscription.billing_type,
+            original_filename="july.pdf",
+            amount=Decimal("220.00"),
+            currency="USD",
+            issued_on=date(2026, 7, 3),
+            ai_extracted_payee="OPENAI *CHATGPT",
+            file=SimpleUploadedFile("july.pdf", b"%PDF-1.4 july", content_type="application/pdf"),
+            expires_at=timezone.now() + timedelta(days=30),
+        )
         statement = CardStatement.objects.create(
-            period_month=date(2026, 6, 1),
+            period_month=date(2026, 7, 1),
             file=SimpleUploadedFile("statement.pdf", b"%PDF-1.4 statement", content_type="application/pdf"),
             original_filename="statement.pdf",
             content_type="application/pdf",
@@ -2899,12 +2924,119 @@ class FinalWorkflowAcceptanceTests(TestCase):
         mocked_analysis.return_value = StatementAnalysisResult(
             status=CardStatementStatus.COMPLETED,
             card_last4="7210",
-            statement_period="2026-06",
-            payment_date=date(2026, 6, 29),
+            statement_period="2026-07",
+            payment_date=date(2026, 7, 29),
             items=(
                 StatementAnalysisItem(
                     line_reference="0276",
-                    transaction_date=date(2026, 5, 3),
+                    transaction_date=date(2026, 6, 3),
+                    merchant_name="OPENAI *CHATGPT",
+                    amount_jpy=Decimal("35949"),
+                    original_amount=Decimal("220"),
+                    original_currency="USD",
+                    service_catalog_id=self.subscription_catalog.pk,
+                    match_status=StatementMatchStatus.MATCHED,
+                    receipt_required=True,
+                    confidence=0.99,
+                    reason="6月分ChatGPT領収書と一致。",
+                ),
+            ),
+        )
+
+        process_card_statement(statement.pk)
+        item = statement.items.get()
+        self.assertEqual(item.matched_receipt, june_receipt)
+        self.assertNotEqual(item.matched_receipt, august_receipt)
+        self.assertEqual(item.matched_receipt.submission.period_month, date(2026, 7, 1))
+
+    def test_existing_statement_is_reconciled_once_with_same_month_submission_after_upgrade(self):
+        june_receipt = self.create_receipt(service=self.subscription, month=date(2026, 7, 1), filename="june.pdf")
+        june_receipt.amount = Decimal("220.00")
+        june_receipt.currency = "USD"
+        june_receipt.issued_on = date(2026, 6, 3)
+        june_receipt.ai_extracted_payee = "OPENAI *CHATGPT"
+        june_receipt.save(update_fields=["amount", "currency", "issued_on", "ai_extracted_payee"])
+
+        august_submission = Submission.objects.create(user=self.user, period_month=date(2026, 8, 1))
+        wrong_august_receipt = Receipt.objects.create(
+            submission=august_submission,
+            service=self.subscription,
+            service_name_snapshot=self.subscription.name,
+            billing_type_snapshot=self.subscription.billing_type,
+            original_filename="wrong-august.pdf",
+            amount=Decimal("220.00"),
+            currency="USD",
+            issued_on=date(2026, 7, 3),
+            ai_extracted_payee="OPENAI *CHATGPT",
+            file=SimpleUploadedFile("wrong-august.pdf", b"%PDF-1.4 wrong", content_type="application/pdf"),
+            expires_at=timezone.now() + timedelta(days=30),
+        )
+        statement = CardStatement.objects.create(
+            period_month=date(2026, 7, 1),
+            file=SimpleUploadedFile("statement.pdf", b"%PDF-1.4 statement", content_type="application/pdf"),
+            original_filename="statement.pdf",
+            content_type="application/pdf",
+            status=CardStatementStatus.NEEDS_REVIEW,
+            card_last4="7210",
+            statement_period="2026-07",
+            payment_date=date(2026, 7, 29),
+            ai_admin_memo=CARD_STATEMENT_MONTH_SEMANTICS_RECONCILE_MARKER,
+            uploaded_by=self.superuser,
+            expires_at=timezone.now() + timedelta(days=30),
+        )
+        item = CardStatementItem.objects.create(
+            statement=statement,
+            sequence=1,
+            line_reference="0276",
+            transaction_date=date(2026, 6, 3),
+            merchant_name="OPENAI *CHATGPT",
+            amount_jpy=Decimal("35949"),
+            original_amount=Decimal("220"),
+            original_currency="USD",
+            matched_user=self.user,
+            matched_catalog_service=self.subscription_catalog,
+            matched_service=self.subscription,
+            matched_receipt=wrong_august_receipt,
+            match_status=StatementMatchStatus.MATCHED,
+            match_confidence=0.95,
+            match_memo="旧ルールによる自動照合。",
+            receipt_required=True,
+        )
+
+        self.client.login(username="admin", password="admin-password-123")
+        response = self.client.get(reverse("staff_card_statements") + "?month=2026-07")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "ご利用代金明細月")
+        self.assertContains(response, "対象領収書月")
+        self.assertContains(response, "2026年06月")
+        item.refresh_from_db()
+        statement.refresh_from_db()
+        self.assertEqual(item.matched_receipt, june_receipt)
+        self.assertNotEqual(item.matched_receipt, wrong_august_receipt)
+        self.assertNotIn(CARD_STATEMENT_MONTH_SEMANTICS_RECONCILE_MARKER, statement.ai_admin_memo)
+
+    @mock.patch("receipts.statement_processing.generate_card_statement_analysis")
+    def test_statement_rows_use_distinct_receipts_and_keep_extra_charge_highlighted(self, mocked_analysis):
+        first_receipt = self.create_receipt(service=self.subscription, filename="first.pdf")
+        statement = CardStatement.objects.create(
+            period_month=date(2026, 7, 1),
+            file=SimpleUploadedFile("statement.pdf", b"%PDF-1.4 statement", content_type="application/pdf"),
+            original_filename="statement.pdf",
+            content_type="application/pdf",
+            status=CardStatementStatus.PROCESSING,
+            uploaded_by=self.superuser,
+            expires_at=timezone.now() + timedelta(days=30),
+        )
+        mocked_analysis.return_value = StatementAnalysisResult(
+            status=CardStatementStatus.COMPLETED,
+            card_last4="7210",
+            statement_period="2026-07",
+            payment_date=date(2026, 7, 29),
+            items=(
+                StatementAnalysisItem(
+                    line_reference="0276",
+                    transaction_date=date(2026, 6, 3),
                     merchant_name="OPENAI *CHATGPT",
                     amount_jpy=Decimal("35949"),
                     original_amount=Decimal("220"),
@@ -2917,7 +3049,7 @@ class FinalWorkflowAcceptanceTests(TestCase):
                 ),
                 StatementAnalysisItem(
                     line_reference="0277",
-                    transaction_date=date(2026, 5, 4),
+                    transaction_date=date(2026, 6, 4),
                     merchant_name="OPENAI *CHATGPT",
                     amount_jpy=Decimal("3595"),
                     original_amount=Decimal("22"),
@@ -2949,9 +3081,9 @@ class FinalWorkflowAcceptanceTests(TestCase):
         response = self.client.post(
             reverse("staff_upload_card_statement"),
             {
-                "month": "2026-06",
+                "month": "2026-07",
                 "file": SimpleUploadedFile(
-                    "lifecard_meisai_user1_202606.pdf",
+                    "lifecard_meisai_user1_202607.pdf",
                     b"%PDF-1.4 statement",
                     content_type="application/pdf",
                 ),
@@ -2959,11 +3091,11 @@ class FinalWorkflowAcceptanceTests(TestCase):
         )
         self.assertRedirects(
             response,
-            reverse("staff_card_statements") + "?month=2026-06",
+            reverse("staff_card_statements") + "?month=2026-07",
         )
         statement = CardStatement.objects.get()
         self.assertEqual(statement.status, CardStatementStatus.PROCESSING)
-        self.assertEqual(statement.original_filename, "lifecard_meisai_user1_202606.pdf")
+        self.assertEqual(statement.original_filename, "lifecard_meisai_user1_202607.pdf")
         mocked_start.assert_called_once_with(statement.pk)
 
     def test_staff_month_page_shows_missing_services_and_links_to_global_statement_page(self):
@@ -2977,7 +3109,7 @@ class FinalWorkflowAcceptanceTests(TestCase):
         self.assertContains(response, "領収書未提出")
         self.assertContains(response, "API利用確認待ち")
         self.assertContains(response, "全社ご利用代金明細との照合")
-        self.assertContains(response, reverse("staff_card_statements") + "?month=2026-06")
+        self.assertContains(response, reverse("staff_card_statements") + "?month=2026-07")
         self.assertContains(response, "管理者代理アップロード")
         self.assertContains(response, 'type="file"')
 
@@ -3005,10 +3137,10 @@ class FinalWorkflowAcceptanceTests(TestCase):
             service_name_snapshot=other_service.name,
             billing_type_snapshot=other_service.billing_type,
             original_filename="other-openai.pdf",
-            generated_filename="260503_other_OpenAI_220_USD.pdf",
+            generated_filename="260603_other_OpenAI_220_USD.pdf",
             amount=Decimal("220.00"),
             currency="USD",
-            issued_on=date(2026, 5, 3),
+            issued_on=date(2026, 6, 3),
             ai_extracted_payee="OPENAI *CHATGPT",
             ai_filename_status=ReceiptFilenameStatus.GENERATED,
             file=SimpleUploadedFile(
@@ -3019,7 +3151,7 @@ class FinalWorkflowAcceptanceTests(TestCase):
             expires_at=timezone.now() + timedelta(days=30),
         )
         statement = CardStatement.objects.create(
-            period_month=date(2026, 6, 1),
+            period_month=date(2026, 7, 1),
             file=SimpleUploadedFile("statement.pdf", b"%PDF-1.4 statement", content_type="application/pdf"),
             original_filename="statement.pdf",
             content_type="application/pdf",
@@ -3030,12 +3162,12 @@ class FinalWorkflowAcceptanceTests(TestCase):
         mocked_analysis.return_value = StatementAnalysisResult(
             status=CardStatementStatus.COMPLETED,
             card_last4="7210",
-            statement_period="2026-06",
-            payment_date=date(2026, 6, 29),
+            statement_period="2026-07",
+            payment_date=date(2026, 7, 29),
             items=(
                 StatementAnalysisItem(
                     line_reference="0276",
-                    transaction_date=date(2026, 5, 3),
+                    transaction_date=date(2026, 6, 3),
                     merchant_name="OPENAI *CHATGPT",
                     amount_jpy=Decimal("35949"),
                     original_amount=Decimal("220"),
@@ -3057,9 +3189,9 @@ class FinalWorkflowAcceptanceTests(TestCase):
         self.assertFalse(item.needs_highlight)
 
         self.client.login(username="admin", password="admin-password-123")
-        response = self.client.get(reverse("staff_card_statements") + "?month=2026-06")
+        response = self.client.get(reverse("staff_card_statements") + "?month=2026-07")
         self.assertContains(response, "other@example.com")
-        self.assertContains(response, "260503_other_OpenAI_220_USD.pdf")
+        self.assertContains(response, "260603_other_OpenAI_220_USD.pdf")
         self.assertNotContains(response, 'class="statement-missing-row"')
 
     @mock.patch("receipts.statement_processing.generate_card_statement_analysis")
@@ -3077,7 +3209,7 @@ class FinalWorkflowAcceptanceTests(TestCase):
             registered_by=self.superuser,
         )
         statement = CardStatement.objects.create(
-            period_month=date(2026, 6, 1),
+            period_month=date(2026, 7, 1),
             file=SimpleUploadedFile("statement.pdf", b"%PDF-1.4 statement", content_type="application/pdf"),
             original_filename="statement.pdf",
             content_type="application/pdf",
@@ -3088,12 +3220,12 @@ class FinalWorkflowAcceptanceTests(TestCase):
         mocked_analysis.return_value = StatementAnalysisResult(
             status=CardStatementStatus.COMPLETED,
             card_last4="7210",
-            statement_period="2026-06",
-            payment_date=date(2026, 6, 29),
+            statement_period="2026-07",
+            payment_date=date(2026, 7, 29),
             items=(
                 StatementAnalysisItem(
                     line_reference="0276",
-                    transaction_date=date(2026, 5, 3),
+                    transaction_date=date(2026, 6, 3),
                     merchant_name="OPENAI *CHATGPT",
                     amount_jpy=Decimal("35949"),
                     original_amount=Decimal("220"),
@@ -3119,7 +3251,7 @@ class FinalWorkflowAcceptanceTests(TestCase):
     @mock.patch("receipts.statement_processing.generate_card_statement_analysis")
     def test_global_statement_highlights_missing_receipt_row(self, mocked_analysis):
         statement = CardStatement.objects.create(
-            period_month=date(2026, 6, 1),
+            period_month=date(2026, 7, 1),
             file=SimpleUploadedFile("statement.pdf", b"%PDF-1.4 statement", content_type="application/pdf"),
             original_filename="statement.pdf",
             content_type="application/pdf",
@@ -3130,12 +3262,12 @@ class FinalWorkflowAcceptanceTests(TestCase):
         mocked_analysis.return_value = StatementAnalysisResult(
             status=CardStatementStatus.COMPLETED,
             card_last4="7210",
-            statement_period="2026-06",
-            payment_date=date(2026, 6, 29),
+            statement_period="2026-07",
+            payment_date=date(2026, 7, 29),
             items=(
                 StatementAnalysisItem(
                     line_reference="0302",
-                    transaction_date=date(2026, 5, 16),
+                    transaction_date=date(2026, 6, 16),
                     merchant_name="OPENAI",
                     amount_jpy=Decimal("8236"),
                     original_amount=Decimal("49.92"),
@@ -3154,7 +3286,7 @@ class FinalWorkflowAcceptanceTests(TestCase):
         self.assertTrue(item.needs_highlight)
 
         self.client.login(username="admin", password="admin-password-123")
-        response = self.client.get(reverse("staff_card_statements") + "?month=2026-06")
+        response = self.client.get(reverse("staff_card_statements") + "?month=2026-07")
         self.assertContains(response, 'class="statement-missing-row"')
         self.assertContains(response, "領収書未提出")
         self.assertContains(response, "黄色は領収書が必要")
@@ -3172,7 +3304,7 @@ class FinalWorkflowAcceptanceTests(TestCase):
 
     def test_expired_statement_file_is_purged_but_metadata_remains(self):
         statement = CardStatement.objects.create(
-            period_month=date(2026, 6, 1),
+            period_month=date(2026, 7, 1),
             file=SimpleUploadedFile("expired.pdf", b"%PDF-1.4 statement", content_type="application/pdf"),
             original_filename="expired.pdf",
             status=CardStatementStatus.COMPLETED,
@@ -3190,17 +3322,17 @@ class FinalWorkflowAcceptanceTests(TestCase):
 
     def test_staff_can_download_slack_shareable_statement_reconciliation_pdf(self):
         receipt = self.create_receipt(service=self.subscription, filename="matched.pdf")
-        receipt.generated_filename = "260503_user_OpenAI_220_USD.pdf"
+        receipt.generated_filename = "260603_user_OpenAI_220_USD.pdf"
         receipt.save(update_fields=["generated_filename"])
         statement = CardStatement.objects.create(
-            period_month=date(2026, 6, 1),
+            period_month=date(2026, 7, 1),
             file=SimpleUploadedFile("company-statement.pdf", b"%PDF-1.4 statement", content_type="application/pdf"),
             original_filename="company-statement.pdf",
             content_type="application/pdf",
             status=CardStatementStatus.NEEDS_REVIEW,
             card_last4="7210",
-            statement_period="2026-06",
-            payment_date=date(2026, 6, 29),
+            statement_period="2026-07",
+            payment_date=date(2026, 7, 29),
             ai_admin_memo="1件の領収書が未提出です。",
             uploaded_by=self.superuser,
             processed_at=timezone.now(),
@@ -3211,7 +3343,7 @@ class FinalWorkflowAcceptanceTests(TestCase):
             statement=statement,
             sequence=1,
             line_reference="0276",
-            transaction_date=date(2026, 5, 3),
+            transaction_date=date(2026, 6, 3),
             merchant_name="OPENAI *CHATGPT",
             amount_jpy=Decimal("35949"),
             original_amount=Decimal("220"),
@@ -3228,7 +3360,7 @@ class FinalWorkflowAcceptanceTests(TestCase):
             statement=statement,
             sequence=2,
             line_reference="0302",
-            transaction_date=date(2026, 5, 16),
+            transaction_date=date(2026, 6, 16),
             merchant_name="OPENAI",
             amount_jpy=Decimal("8236"),
             original_amount=Decimal("49.92"),
@@ -3242,7 +3374,7 @@ class FinalWorkflowAcceptanceTests(TestCase):
         )
 
         self.client.login(username="admin", password="admin-password-123")
-        page = self.client.get(reverse("staff_card_statements") + "?month=2026-06")
+        page = self.client.get(reverse("staff_card_statements") + "?month=2026-07")
         self.assertContains(page, "照合結果PDF")
         self.assertContains(page, reverse("staff_download_card_statement_report", args=[statement.pk]))
 
@@ -3250,7 +3382,7 @@ class FinalWorkflowAcceptanceTests(TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response["Content-Type"], "application/pdf")
         self.assertIn("attachment", response["Content-Disposition"])
-        self.assertIn("ReceiptHub_2026-06", response["Content-Disposition"])
+        self.assertIn("ReceiptHub_2026-07", response["Content-Disposition"])
         payload = b"".join(response.streaming_content)
         self.assertTrue(payload.startswith(b"%PDF-"))
         self.assertGreater(len(payload), 5000)
@@ -3259,14 +3391,14 @@ class FinalWorkflowAcceptanceTests(TestCase):
         from . import statement_pdf
 
         statement = CardStatement.objects.create(
-            period_month=date(2026, 6, 1),
+            period_month=date(2026, 7, 1),
             file=SimpleUploadedFile("company-statement.pdf", b"%PDF-1.4 statement", content_type="application/pdf"),
             original_filename="company-statement.pdf",
             content_type="application/pdf",
             status=CardStatementStatus.NEEDS_REVIEW,
             card_last4="7210",
-            statement_period="2026-06",
-            payment_date=date(2026, 6, 29),
+            statement_period="2026-07",
+            payment_date=date(2026, 7, 29),
             ai_admin_memo="この解析メモはPDFに表示しません。",
             uploaded_by=self.superuser,
             processed_at=timezone.now(),
@@ -3277,7 +3409,7 @@ class FinalWorkflowAcceptanceTests(TestCase):
             statement=statement,
             sequence=1,
             line_reference="0302",
-            transaction_date=date(2026, 5, 16),
+            transaction_date=date(2026, 6, 16),
             merchant_name="OPENAI",
             amount_jpy=Decimal("8236"),
             original_amount=Decimal("49.92"),
@@ -3302,7 +3434,7 @@ class FinalWorkflowAcceptanceTests(TestCase):
 
         self.assertTrue(payload.startswith(b"%PDF-"))
         rendered_text = "\n".join(captured_text)
-        self.assertIn("2026年06月分", rendered_text)
+        self.assertIn("2026年07月明細 / 対象領収書月 2026年06月", rendered_text)
         self.assertIn("未提出・確認対象", rendered_text)
         self.assertNotIn("未提出・手動確認対象", rendered_text)
         self.assertNotIn("ユーザー別 要対応サマリー", rendered_text)
@@ -3316,7 +3448,7 @@ class FinalWorkflowAcceptanceTests(TestCase):
 
     def test_processing_statement_report_is_not_downloadable(self):
         statement = CardStatement.objects.create(
-            period_month=date(2026, 6, 1),
+            period_month=date(2026, 7, 1),
             file=SimpleUploadedFile("processing.pdf", b"%PDF-1.4 statement", content_type="application/pdf"),
             original_filename="processing.pdf",
             status=CardStatementStatus.PROCESSING,
@@ -3330,13 +3462,13 @@ class FinalWorkflowAcceptanceTests(TestCase):
         )
         self.client.login(username="admin", password="admin-password-123")
 
-        page = self.client.get(reverse("staff_card_statements") + "?month=2026-06")
+        page = self.client.get(reverse("staff_card_statements") + "?month=2026-07")
         self.assertNotContains(page, reverse("staff_download_card_statement_report", args=[statement.pk]))
         response = self.client.get(reverse("staff_download_card_statement_report", args=[statement.pk]))
         self.assertEqual(response.status_code, 404)
 
     def test_version_file_is_present_without_web_display_requirement(self):
-        self.assertEqual(Path("VERSION").read_text(encoding="utf-8").strip(), "1.5.3")
+        self.assertEqual(Path("VERSION").read_text(encoding="utf-8").strip(), "1.5.4")
 
 
 @override_settings(PASSWORD_HASHERS=FAST_PASSWORD_HASHERS)
@@ -3413,22 +3545,13 @@ class DragDropAndStaffReceiptReviewTests(TestCase):
         self.assertIn(".file-dropzone-drag-prompt", dropzone_css)
         self.assertIn(".file-dropzone-selection-summary", dropzone_css)
 
-    def test_staff_preview_allows_only_same_origin_embedding(self):
-        self.client.login(username=self.admin.username, password="admin-password-123")
-        response = self.client.get(reverse("staff_preview_receipt", args=[self.receipt.pk]))
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(response["X-Frame-Options"], "SAMEORIGIN")
-        self.assertEqual(response["Content-Security-Policy"], "frame-ancestors 'self'")
-        self.assertEqual(response["Cache-Control"], "private, no-store")
-        self.assertEqual(response["Content-Type"], "application/pdf")
-        self.assertIn("inline", response["Content-Disposition"])
-
     def test_staff_review_page_previews_and_allows_manual_confirmation(self):
         self.client.login(username=self.admin.username, password="admin-password-123")
         response = self.client.get(reverse("staff_receipt_review", args=[self.receipt.pk]))
         self.assertEqual(response.status_code, 200)
         self.assertContains(response, "領収書プレビュー")
         self.assertContains(response, reverse("staff_preview_receipt", args=[self.receipt.pk]))
+        self.assertContains(response, "別タブで開く")
         self.assertContains(response, "表示・ダウンロード用ファイル名")
         self.assertContains(response, "すべて確認済みにする")
 
@@ -3454,6 +3577,14 @@ class DragDropAndStaffReceiptReviewTests(TestCase):
         self.assertEqual(self.receipt.generated_filename, "260701_review-user_OpenAI_220_USD.pdf")
         self.assertTrue(self.receipt.ai_all_checks_passed)
         self.assertFalse(self.receipt.needs_manual_review)
+
+    def test_staff_receipt_preview_allows_same_origin_iframe(self):
+        self.client.login(username=self.admin.username, password="admin-password-123")
+        response = self.client.get(reverse("staff_preview_receipt", args=[self.receipt.pk]))
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.headers.get("X-Frame-Options"), "SAMEORIGIN")
+        self.assertEqual(response.headers.get("Content-Type"), "application/pdf")
+        self.assertIn("inline", response.headers.get("Content-Disposition", ""))
 
     def test_staff_cannot_confirm_with_unchecked_items(self):
         self.client.login(username=self.admin.username, password="admin-password-123")

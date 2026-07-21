@@ -24,11 +24,33 @@ from .models import (
     RegisteredService,
     ServiceCatalog,
     StatementMatchStatus,
-    submission_month_for_receipt,
+    receipt_month_for_statement,
 )
 from .statement_ai import generate_card_statement_analysis
 
 logger = logging.getLogger(__name__)
+
+
+CARD_STATEMENT_MONTH_SEMANTICS_RECONCILE_MARKER = (
+    "【月次ルール更新】明細月と対象領収書月の対応を修正したため、最新の領収書と再照合します。"
+)
+
+
+def reconcile_pending_card_statement_month_semantics(*, period_month=None, statement_id=None) -> int:
+    """v1.5.4移行で保留した既存明細を、保存済み行だけで一度だけ再照合する。"""
+
+    queryset = CardStatement.objects.filter(
+        ai_admin_memo__contains=CARD_STATEMENT_MONTH_SEMANTICS_RECONCILE_MARKER
+    ).exclude(status__in=[CardStatementStatus.PROCESSING, CardStatementStatus.FAILED])
+    if period_month is not None:
+        queryset = queryset.filter(period_month=period_month)
+    if statement_id is not None:
+        queryset = queryset.filter(pk=statement_id)
+
+    statement_ids = list(queryset.order_by("pk").values_list("pk", flat=True))
+    for pending_statement_id in statement_ids:
+        reconcile_card_statement_items(pending_statement_id)
+    return len(statement_ids)
 
 
 def _normalize_text(value: str) -> str:
@@ -117,21 +139,23 @@ def _receipt_match_score(item: CardStatementItem, receipt: Receipt) -> int:
     return score
 
 
-def _registered_services_for_period(period_month: date) -> list[RegisteredService]:
+def _registered_services_for_period(statement_month: date) -> list[RegisteredService]:
+    target_receipt_month = receipt_month_for_statement(statement_month)
     return list(
         RegisteredService.objects.filter(user__is_active=True, user__is_staff=False, user__is_superuser=False)
-        .filter(Q(is_active=True) | Q(is_active=False, final_receipt_month__gte=period_month))
+        .filter(Q(is_active=True) | Q(is_active=False, final_receipt_month__gte=target_receipt_month))
         .select_related("user", "catalog_service")
         .order_by("user__username", "name", "billing_type")
     )
 
 
-def _available_receipts_for_period(period_month: date) -> list[Receipt]:
-    submission_month = submission_month_for_receipt(period_month)
+def _available_receipts_for_statement_month(statement_month: date) -> list[Receipt]:
+    """明細月と同じ提出サイクルに保存された前月分領収書を返す。"""
+
     return list(
         Receipt.objects.available_files()
         .filter(
-            submission__period_month=submission_month,
+            submission__period_month=statement_month,
             submission__user__is_staff=False,
             submission__user__is_superuser=False,
         )
@@ -162,7 +186,7 @@ def _pick_best_receipt_for_service(
 
 
 def reconcile_card_statement_items(statement_id: int, *, preserve_manual: bool = True) -> CardStatement:
-    """カード明細の対象月を、翌月提出サイクルの全ユーザー領収書と一対一で再照合する。"""
+    """明細月と同じ提出サイクルにある前月分領収書を、全ユーザー横断で一対一照合する。"""
 
     statement = CardStatement.objects.get(pk=statement_id)
     if statement.status == CardStatementStatus.PROCESSING:
@@ -178,7 +202,7 @@ def reconcile_card_statement_items(statement_id: int, *, preserve_manual: bool =
             "matched_receipt__service__catalog_service",
         ).order_by("sequence", "pk")
     )
-    receipts = _available_receipts_for_period(statement.period_month)
+    receipts = _available_receipts_for_statement_month(statement.period_month)
     services = _registered_services_for_period(statement.period_month)
 
     services_by_catalog: dict[int, list[RegisteredService]] = defaultdict(list)
@@ -296,7 +320,7 @@ def reconcile_card_statement_items(statement_id: int, *, preserve_manual: bool =
             deleted, _ = MonthlyServiceDeclaration.objects.filter(
                 user=item.matched_service.user,
                 service=item.matched_service,
-                period_month=submission_month_for_receipt(statement.period_month),
+                period_month=statement.period_month,
                 no_usage=True,
             ).delete()
             if deleted:
@@ -340,11 +364,16 @@ def reconcile_card_statement_items(statement_id: int, *, preserve_manual: bool =
                 if card_or_period_problem or not items or missing_count or manual_review_count
                 else CardStatementStatus.COMPLETED
             )
-        extraction_memo = (statement.ai_admin_memo or "").split("【照合結果】", 1)[0].strip()
-        submission_month = submission_month_for_receipt(statement.period_month)
+        extraction_memo = (statement.ai_admin_memo or "").split("【照合結果】", 1)[0]
+        extraction_memo = extraction_memo.replace(
+            CARD_STATEMENT_MONTH_SEMANTICS_RECONCILE_MARKER,
+            "",
+        ).strip()
+        target_receipt_month = receipt_month_for_statement(statement.period_month)
         reconciliation_memo = (
-            f"【照合結果】領収書月 {statement.period_month:%Y-%m} "
-            f"（提出月 {submission_month:%Y-%m}）の全ユーザー領収書{len(receipts)}件と照合し、"
+            f"【照合結果】明細月 {statement.period_month:%Y-%m} "
+            f"（対象領収書月 {target_receipt_month:%Y-%m} / 提出月 {statement.period_month:%Y-%m}）の"
+            f"全ユーザー領収書{len(receipts)}件と照合し、"
             f"領収書未提出{missing_count}件、手動確認{manual_review_count}件です。"
         )
         if no_usage_conflicts:

@@ -19,7 +19,7 @@ from .ai_filename import (
     parse_iso_date,
     target_card_last4,
 )
-from .models import CardStatementStatus, StatementMatchStatus
+from .models import CardStatementStatus, StatementMatchStatus, receipt_month_for_statement
 
 
 @dataclass(frozen=True)
@@ -105,14 +105,17 @@ def generate_card_statement_analysis(
 
     catalogs = service_payload(service_catalogs)
     target_month = period_month.strftime("%Y-%m")
+    target_receipt_month = receipt_month_for_statement(period_month).strftime("%Y-%m")
     target_last4 = target_card_last4()
     prompt = (
         "このファイルは会社全体で利用している法人クレジットカードのご利用代金明細書です。"
         "特定の1ユーザーの明細ではありません。表にあるすべての利用明細行を漏れなく抽出してください。\n"
-        f"管理対象月: {target_month}\n"
+        f"管理対象のご利用代金明細月: {target_month}\n"
+        f"この明細と照合する対象領収書月: {target_receipt_month}\n"
         f"確認対象カード末尾4桁: {target_last4}\n"
-        "statement_period は利用日ではなく、請求・支払対象月を YYYY-MM で返してください。"
-        "例えば利用日が5月で支払日が6月29日なら statement_period は 2026-06 です。\n"
+        "statement_period は利用日ではなく、明細書の請求・支払対象月を YYYY-MM で返してください。"
+        "例えば利用日が6月で支払日が7月29日なら statement_period は 2026-07 です。"
+        "この場合、領収書照合の対象月は前月の2026-06で、ユーザー提出月は2026-07です。\n"
         "各明細について、明細番号、ご利用先、利用日、当月請求金額（円）、外貨金額・通貨を抽出してください。\n"
         "service_catalog_id は次のサービスマスター一覧の id からだけ選びます。"
         "ユーザーはここでは特定しません。サービス名とカード明細の請求名義は完全一致しない場合があります。"
@@ -142,7 +145,7 @@ def generate_card_statement_analysis(
                         {
                             "type": "input_text",
                             "text": (
-                                "あなたは法人カード明細と、複数ユーザーが提出した領収書を照合する監査補助AIです。"
+                                "あなたは法人カード明細と、複数ユーザーが提出した前月分領収書を照合する監査補助AIです。"
                                 "まず明細表の全行を正確に抽出し、確信できない関係は曖昧として残してください。"
                             ),
                         }
@@ -186,7 +189,7 @@ def statement_schema() -> dict[str, Any]:
             "additionalProperties": False,
             "properties": {
                 "card_last4": {"type": ["string", "null"]},
-                "statement_period": {"type": ["string", "null"], "description": "請求・支払対象月 YYYY-MM"},
+                "statement_period": {"type": ["string", "null"], "description": "明細書の請求・支払月 YYYY-MM"},
                 "payment_date": {"type": ["string", "null"], "description": "支払日 YYYY-MM-DD"},
                 "summary_reason": {"type": "string"},
                 "items": {
@@ -264,7 +267,7 @@ def build_statement_result_from_payload(
     if card_last4 != target_last4:
         issues.append(f"カード末尾が{target_last4}ではなく{card_last4 or '確認不可'}として解析されました。")
     if statement_period != target_month:
-        issues.append(f"明細対象月が{target_month}ではなく{statement_period or '確認不可'}として解析されました。")
+        issues.append(f"明細月が{target_month}ではなく{statement_period or '確認不可'}として解析されました。")
 
     items: list[StatementAnalysisItem] = []
     for index, raw in enumerate(payload.get("items") or [], start=1):

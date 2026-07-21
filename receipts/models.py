@@ -44,6 +44,16 @@ def submission_month_for_receipt(receipt_month):
     return add_months(month_start(receipt_month), 1)
 
 
+def receipt_month_for_statement(statement_month):
+    """ご利用代金明細の月に対応する領収書月を返す。
+
+    ReceiptHubでは、7月分の全社ご利用代金明細は6月分の領収書と照合する。
+    ユーザーの7月提出サイクルにも、同じ6月分領収書が保存される。
+    """
+
+    return receipt_month_for_submission(statement_month)
+
+
 def retention_months() -> int:
     return min(max(int(getattr(settings, "RECEIPT_RETENTION_MONTHS", 3)), 1), 3)
 
@@ -1100,7 +1110,7 @@ class MonthlyServiceDeclaration(models.Model):
 class CardStatement(models.Model):
     """管理者がアップロードする全ユーザー共通のカード利用代金明細書。"""
 
-    period_month = models.DateField("領収書月")
+    period_month = models.DateField("明細月")
     file = models.FileField(
         "ご利用代金明細書",
         upload_to=statement_upload_path,
@@ -1114,7 +1124,7 @@ class CardStatement(models.Model):
     content_type = models.CharField("Content-Type", max_length=120, blank=True)
     status = models.CharField("解析ステータス", max_length=20, choices=CardStatementStatus.choices, default=CardStatementStatus.PROCESSING)
     card_last4 = models.CharField("カード下4桁", max_length=4, blank=True)
-    statement_period = models.CharField("AI判定領収書月", max_length=7, blank=True)
+    statement_period = models.CharField("AI判定明細月", max_length=7, blank=True)
     payment_date = models.DateField("支払日", null=True, blank=True)
     ai_admin_memo = models.TextField("AI管理者メモ", blank=True)
     uploaded_by = models.ForeignKey(
@@ -1155,6 +1165,21 @@ class CardStatement(models.Model):
         return bool(self.file) and self.file_deleted_at is None
 
     @property
+    def target_receipt_month(self):
+        """この明細月と照合する実際の領収書月。"""
+
+        return receipt_month_for_statement(self.period_month)
+
+    @property
+    def submission_month(self):
+        """対象領収書が保存される提出月。
+
+        明細月と提出月は同じで、どちらも前月分の領収書を対象とする。
+        """
+
+        return month_start(self.period_month)
+
+    @property
     def missing_receipt_count(self) -> int:
         return self.items.filter(receipt_required=True).filter(
             Q(matched_receipt__isnull=True)
@@ -1183,7 +1208,7 @@ class CardStatement(models.Model):
         return True
 
     def __str__(self) -> str:
-        return f"全ユーザー / {self.period_month:%Y-%m} / {self.get_status_display()}"
+        return f"全ユーザー / 明細月 {self.period_month:%Y-%m} / {self.get_status_display()}"
 
 
 class CardStatementItem(models.Model):
@@ -1445,13 +1470,14 @@ def sync_user_account_status_after_service_delete(sender, instance: RegisteredSe
 def sync_statement_items_after_receipt_save(sender, instance: Receipt, **kwargs):
     if not instance.file_available:
         return
-    # カード明細は領収書月で管理し、領収書は翌月の提出サイクルに属する。
+    # カード明細月と提出月は同じ月を使い、その前月分の領収書を照合する。
+    # 例: 7月分明細 ↔ 7月提出サイクルに保存された6月分領収書。
     # OpenAI APIは呼ばず、保存済みの明細行に対してローカル照合だけを行う。
     from .statement_processing import reconcile_card_statement_items
 
     statement_ids = list(
         CardStatement.objects.filter(
-            period_month=receipt_month_for_submission(instance.submission.period_month)
+            period_month=month_start(instance.submission.period_month)
         )
         .exclude(status__in=[CardStatementStatus.PROCESSING, CardStatementStatus.FAILED])
         .values_list("pk", flat=True)

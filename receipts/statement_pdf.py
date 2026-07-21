@@ -188,31 +188,35 @@ def _metadata_table(statement: CardStatement, styles: dict[str, ParagraphStyle])
     card_label = f"****-{statement.card_last4}" if statement.card_last4 else "-"
     data = [
         [
-            _paragraph("領収書月", styles["small"]),
+            _paragraph("明細月 / 提出月", styles["small"]),
             _paragraph(statement.period_month.strftime("%Y年%m月"), styles["body"]),
+            _paragraph("対象領収書月", styles["small"]),
+            _paragraph(statement.target_receipt_month.strftime("%Y年%m月"), styles["body"]),
             _paragraph("解析ステータス", styles["small"]),
             _paragraph(statement.get_status_display(), styles["body"]),
+        ],
+        [
+            _paragraph("AI判定明細月", styles["small"]),
+            _paragraph(statement.statement_period or "-", styles["body"]),
+            _paragraph("支払日", styles["small"]),
+            _paragraph(statement.payment_date.strftime("%Y-%m-%d") if statement.payment_date else "-", styles["body"]),
             _paragraph("カード番号", styles["small"]),
             _paragraph(card_label, styles["body"]),
         ],
         [
-            _paragraph("AI判定領収書月", styles["small"]),
-            _paragraph(statement.statement_period or "-", styles["body"]),
-            _paragraph("支払日", styles["small"]),
-            _paragraph(statement.payment_date.strftime("%Y-%m-%d") if statement.payment_date else "-", styles["body"]),
             _paragraph("元ファイル", styles["small"]),
             _paragraph(statement.original_filename or "-", styles["body"]),
-        ],
-        [
             _paragraph("アップロード", styles["small"]),
             _paragraph(local_uploaded.strftime("%Y-%m-%d %H:%M") if local_uploaded else "-", styles["body"]),
-            _paragraph("解析完了", styles["small"]),
-            _paragraph(local_processed.strftime("%Y-%m-%d %H:%M") if local_processed else "-", styles["body"]),
-            _paragraph("最終照合", styles["small"]),
-            _paragraph(local_reconciled.strftime("%Y-%m-%d %H:%M") if local_reconciled else "-", styles["body"]),
+            _paragraph("解析 / 最終照合", styles["small"]),
+            _paragraph(
+                f"{local_processed.strftime('%Y-%m-%d %H:%M') if local_processed else '-'} / "
+                f"{local_reconciled.strftime('%Y-%m-%d %H:%M') if local_reconciled else '-'}",
+                styles["body"],
+            ),
         ],
     ]
-    table = Table(data, colWidths=[22 * mm, 40 * mm, 24 * mm, 35 * mm, 22 * mm, 115 * mm])
+    table = Table(data, colWidths=[24 * mm, 48 * mm, 24 * mm, 43 * mm, 25 * mm, 94 * mm])
     table.setStyle(
         TableStyle(
             [
@@ -370,7 +374,10 @@ def build_card_statement_reconciliation_pdf(statement: CardStatement) -> bytes:
 
     story: list = [
         Paragraph("ご利用代金明細 照合結果", styles["title"]),
-        Paragraph(f"{statement.period_month:%Y年%m月}分", styles["subtitle"]),
+        Paragraph(
+            f"{statement.period_month:%Y年%m月}明細 / 対象領収書月 {statement.target_receipt_month:%Y年%m月}",
+            styles["subtitle"],
+        ),
         _metadata_table(statement, styles),
         Spacer(1, 3 * mm),
         Paragraph("未提出・確認対象", styles["section"]),

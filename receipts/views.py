@@ -83,10 +83,14 @@ from .models import (
     UserProfile,
     receipt_expiry_from,
     receipt_month_for_submission,
-    submission_month_for_receipt,
+    receipt_month_for_statement,
 )
 from .monthly_status import build_user_month_summary
-from .statement_processing import reconcile_card_statement_items, start_background_statement_processing
+from .statement_processing import (
+    reconcile_card_statement_items,
+    reconcile_pending_card_statement_month_semantics,
+    start_background_statement_processing,
+)
 from .statement_pdf import build_card_statement_reconciliation_pdf, reconciliation_report_filename
 
 
@@ -95,12 +99,12 @@ def safe_part(value: str, fallback: str = "item") -> str:
     return value or fallback
 
 
-def parse_month_from_request(request):
-    form = MonthSelectForm(request.GET or None)
+def parse_month_from_request(request, *, month_label=None):
+    form = MonthSelectForm(request.GET or None, month_label=month_label)
     if form.is_valid():
         return form.cleaned_data["month"], form
     initial_month = current_month()
-    return initial_month, MonthSelectForm(initial={"month": initial_month})
+    return initial_month, MonthSelectForm(initial={"month": initial_month}, month_label=month_label)
 
 
 def month_query(value) -> str:
@@ -1155,7 +1159,7 @@ def staff_receipt_review(request, pk: int):
                 messages.success(request, f"{receipt.display_filename} を管理者確認済みにしました。")
             else:
                 messages.success(request, "確認内容とファイル名を保存しました。未チェック項目があるため、確認待ちのままです。")
-            reconcile_card_statement_items_for_receipt_month(receipt.submission.period_month)
+            reconcile_card_statement_items_for_submission_month(receipt.submission.period_month)
             return redirect("staff_receipt_review", pk=receipt.pk)
 
     return render(
@@ -1168,11 +1172,10 @@ def staff_receipt_review(request, pk: int):
     )
 
 
-def reconcile_card_statement_items_for_receipt_month(period_month):
-    """提出月の対象領収書月に属する全社明細を、API再実行なしで再照合する。"""
+def reconcile_card_statement_items_for_submission_month(period_month):
+    """提出月と同じ明細月の全社明細を、API再実行なしで再照合する。"""
 
-    receipt_month = receipt_month_for_submission(period_month)
-    for statement_id in CardStatement.objects.filter(period_month=receipt_month).exclude(
+    for statement_id in CardStatement.objects.filter(period_month=period_month).exclude(
         status__in=[CardStatementStatus.PROCESSING, CardStatementStatus.FAILED]
     ).values_list("pk", flat=True):
         reconcile_card_statement_items(statement_id)
@@ -1267,8 +1270,6 @@ def staff_preview_receipt(request, pk: int):
         content_type=content_type,
     )
     response["X-Content-Type-Options"] = "nosniff"
-    response["Content-Security-Policy"] = "frame-ancestors 'self'"
-    response["Cache-Control"] = "private, no-store"
     return response
 
 
@@ -1317,7 +1318,7 @@ def staff_replace_receipt_file(request, pk: int):
                 old_storage.delete(old_file_name)
         except Exception:
             pass
-    reconcile_card_statement_items_for_receipt_month(receipt.submission.period_month)
+    reconcile_card_statement_items_for_submission_month(receipt.submission.period_month)
     messages.success(request, "領収書ファイルを差し替えました。AI確認は未確認へ戻ったため、再度実行してください。")
     return redirect("staff_receipt_review", pk=receipt.pk)
 
@@ -1516,9 +1517,7 @@ def staff_user_month_status(request, user_id: int):
         )
         .first()
     )
-    global_statement_count = CardStatement.objects.filter(
-        period_month=receipt_month_for_submission(selected_month)
-    ).count()
+    global_statement_count = CardStatement.objects.filter(period_month=selected_month).count()
     return render(
         request,
         "receipts/staff_user_month_status.html",
@@ -1543,10 +1542,11 @@ def staff_user_month_status(request, user_id: int):
     )
 
 
-def global_statement_services(period_month):
+def global_statement_services(statement_month):
+    target_receipt_month = receipt_month_for_statement(statement_month)
     return (
         RegisteredService.objects.filter(user__is_active=True, user__is_staff=False, user__is_superuser=False)
-        .filter(Q(is_active=True) | Q(is_active=False, final_receipt_month__gte=period_month))
+        .filter(Q(is_active=True) | Q(is_active=False, final_receipt_month__gte=target_receipt_month))
         .select_related("user", "catalog_service")
         .order_by("user__username", "name", "billing_type")
     )
@@ -1575,9 +1575,12 @@ def global_statement_queryset(period_month):
 
 @staff_member_required
 def staff_card_statements(request):
-    selected_month, month_form = parse_month_from_request(request)
-    # この画面の月は提出月ではなく、ご利用代金明細・領収書そのものの対象月。
-    month_form.fields["month"].label = "領収書月"
+    selected_month, month_form = parse_month_from_request(
+        request,
+        month_label="ご利用代金明細月",
+    )
+    reconcile_pending_card_statement_month_semantics(period_month=selected_month)
+    # 明細月とユーザー提出月は同じ月。照合対象の領収書はその前月分。
     statements = global_statement_queryset(selected_month)
     available_services = global_statement_services(selected_month)
     stats = {
@@ -1591,7 +1594,7 @@ def staff_card_statements(request):
         "receipts/staff_card_statements.html",
         {
             "selected_month": selected_month,
-            "submission_month": submission_month_for_receipt(selected_month),
+            "target_receipt_month": receipt_month_for_statement(selected_month),
             "month_form": month_form,
             "statements": statements,
             "statement_form": CardStatementUploadForm(),
@@ -1632,8 +1635,8 @@ def staff_upload_card_statement(request):
         messages.success(
             request,
             f"全ユーザー共通のご利用代金明細書をアップロードしました。AIで全明細行を抽出し、"
-            f"領収書月 {selected_month:%Y年%m月}（提出月 {submission_month_for_receipt(selected_month):%Y年%m月}）の"
-            "全ユーザー領収書と照合しています。",
+            f"明細月・提出月 {selected_month:%Y年%m月} の対象領収書月 "
+            f"{receipt_month_for_statement(selected_month):%Y年%m月} に属する全ユーザー領収書と照合しています。",
         )
     return redirect(f"{reverse('staff_card_statements')}?month={month_query(selected_month)}")
 
@@ -1641,11 +1644,13 @@ def staff_upload_card_statement(request):
 @staff_member_required
 def staff_card_statement_status(request):
     selected_month = parse_month_value(request.GET.get("month"))
+    reconcile_pending_card_statement_month_semantics(period_month=selected_month)
     statements = global_statement_queryset(selected_month)
     html = render_to_string(
         "receipts/_staff_card_statements.html",
         {
             "selected_month": selected_month,
+            "target_receipt_month": receipt_month_for_statement(selected_month),
             "statements": statements,
             "available_services": global_statement_services(selected_month),
             "target_card_last4": target_card_last4(),
@@ -1668,6 +1673,7 @@ def staff_download_card_statement(request, pk: int):
 @staff_member_required
 def staff_download_card_statement_report(request, pk: int):
     base_statement = get_object_or_404(CardStatement, pk=pk)
+    reconcile_pending_card_statement_month_semantics(statement_id=base_statement.pk)
     statement = get_object_or_404(global_statement_queryset(base_statement.period_month), pk=pk)
     if statement.status in {CardStatementStatus.PROCESSING, CardStatementStatus.FAILED}:
         raise Http404("AI解析・照合が完了してから照合結果PDFをダウンロードしてください。")
@@ -1704,7 +1710,7 @@ def staff_reconcile_card_statement(request, pk: int):
         messages.error(request, "AI解析に失敗した明細書は再照合できません。明細書を削除して再アップロードしてください。")
     else:
         reconcile_card_statement_items(statement.pk)
-        messages.success(request, "この領収書月に対応する提出月の全ユーザー領収書と再照合しました。")
+        messages.success(request, "この明細月と同じ提出月にある前月分の全ユーザー領収書と再照合しました。")
     return redirect(f"{reverse('staff_card_statements')}?month={month_query(statement.period_month)}#statement-{statement.pk}")
 
 

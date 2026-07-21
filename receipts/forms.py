@@ -122,8 +122,10 @@ def current_month():
 class MonthSelectForm(forms.Form):
     month = MonthField(label="提出月", initial=current_month)
 
-    def __init__(self, *args, **kwargs):
+    def __init__(self, *args, month_label=None, **kwargs):
         super().__init__(*args, **kwargs)
+        if month_label:
+            self.fields["month"].label = month_label
         apply_design_classes(self)
 
 
