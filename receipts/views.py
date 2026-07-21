@@ -35,6 +35,7 @@ from .forms import (
     CardStatementUploadForm,
     ReceiptBatchUploadForm,
     ReceiptFileReplaceForm,
+    StaffReceiptReviewForm,
     ReceiptUploadForm,
     RegisterForm,
     ServiceExceptionRequestForm,
@@ -1114,6 +1115,199 @@ def staff_request_receipt_resubmission(request, pk: int):
     return redirect_back_or(request, fallback_url)
 
 
+def staff_receipt_queryset():
+    return Receipt.objects.select_related(
+        "submission",
+        "submission__user",
+        "service",
+        "service__catalog_service",
+        "uploaded_by",
+        "admin_reviewed_by",
+    ).filter(
+        submission__user__is_staff=False,
+        submission__user__is_superuser=False,
+    )
+
+
+@staff_member_required
+def staff_receipt_review(request, pk: int):
+    """領収書をプレビューし、AI結果・チェック項目・表示ファイル名を管理者が確定する。"""
+
+    receipt = get_object_or_404(staff_receipt_queryset(), pk=pk)
+    form = StaffReceiptReviewForm(request.POST or None, receipt=receipt)
+    if request.method == "POST":
+        if receipt.ai_is_queued or receipt.is_ai_processing:
+            messages.error(request, "AI抽出中は確認内容を変更できません。処理完了後に再度確認してください。")
+        elif form.is_valid():
+            confirm = request.POST.get("review_action") == "confirm"
+            form.save(reviewed_by=request.user, confirm=confirm)
+            if confirm:
+                messages.success(request, f"{receipt.display_filename} を管理者確認済みにしました。")
+            else:
+                messages.success(request, "確認内容とファイル名を保存しました。未チェック項目があるため、確認待ちのままです。")
+            reconcile_card_statement_items_for_receipt_month(receipt.submission.period_month)
+            return redirect("staff_receipt_review", pk=receipt.pk)
+
+    return render(
+        request,
+        "receipts/staff_receipt_review.html",
+        {
+            "receipt": receipt,
+            "review_form": form,
+        },
+    )
+
+
+def reconcile_card_statement_items_for_receipt_month(period_month):
+    """領収書の確認・差し替え後に、同月の全社明細をAPI再実行なしで再照合する。"""
+
+    for statement_id in CardStatement.objects.filter(period_month=period_month).exclude(
+        status__in=[CardStatementStatus.PROCESSING, CardStatementStatus.FAILED]
+    ).values_list("pk", flat=True):
+        reconcile_card_statement_items(statement_id)
+
+
+@staff_member_required
+@require_POST
+def staff_start_receipt_ai_processing(request, pk: int):
+    receipt = get_object_or_404(staff_receipt_queryset(), pk=pk)
+    claimed_ids = claim_pending_receipts_for_ai_processing(
+        Receipt.objects.filter(pk=receipt.pk).available_files(),
+        limit=1,
+    )
+    if claimed_ids:
+        start_background_ai_processing(claimed_ids)
+        message = "AIで情報を抽出中です。完了後、この画面へ自動反映します。"
+    elif receipt.ai_is_queued or receipt.is_ai_processing:
+        message = "この領収書はAIで情報を抽出中です。"
+    else:
+        message = "この領収書はすでにAI確認済みです。再検査せず、必要な補正は管理者確認欄で行ってください。"
+
+    payload = {"ok": True, "started": bool(claimed_ids), "message": message}
+    if request.headers.get("x-requested-with") == "XMLHttpRequest":
+        return JsonResponse(payload)
+    if claimed_ids:
+        messages.success(request, message)
+    else:
+        messages.info(request, message)
+    return redirect("staff_receipt_review", pk=receipt.pk)
+
+
+@staff_member_required
+def staff_receipt_ai_status(request, pk: int):
+    receipt = staff_receipt_queryset().filter(pk=pk).first()
+    if receipt is None:
+        resubmission = (
+            ReceiptResubmissionRequest.objects.select_related("user")
+            .filter(original_receipt_id=pk)
+            .order_by("-created_at")
+            .first()
+        )
+        redirect_url = reverse("history")
+        if resubmission is not None:
+            redirect_url = (
+                f"{reverse('staff_user_month_status', args=[resubmission.user_id])}"
+                f"?month={month_query(resubmission.period_month)}"
+            )
+        return JsonResponse(
+            {
+                "ok": True,
+                "deleted": True,
+                "redirect_url": redirect_url,
+                "message": "AI確認で明確な不一致が見つかったため、領収書を取り下げて再提出依頼を作成しました。",
+            }
+        )
+    html = render_to_string(
+        "receipts/_staff_receipt_review_panel.html",
+        {
+            "receipt": receipt,
+            "review_form": StaffReceiptReviewForm(receipt=receipt),
+        },
+        request=request,
+    )
+    return JsonResponse(
+        {
+            "ok": True,
+            "html": html,
+            "processing": receipt.ai_is_queued or receipt.is_ai_processing,
+            "status": receipt.ai_filename_status,
+        }
+    )
+
+
+@staff_member_required
+def staff_preview_receipt(request, pk: int):
+    receipt = get_object_or_404(staff_receipt_queryset(), pk=pk)
+    if not receipt.file_available:
+        raise Http404("保存期限が過ぎたか、領収書ファイルが削除済みです。")
+    filename = receipt.display_filename or receipt.original_filename or Path(receipt.file.name).name
+    content_type = {
+        ".pdf": "application/pdf",
+        ".png": "image/png",
+        ".jpg": "image/jpeg",
+        ".jpeg": "image/jpeg",
+        ".webp": "image/webp",
+    }.get(Path(filename).suffix.lower(), "application/octet-stream")
+    response = FileResponse(
+        receipt.file.open("rb"),
+        as_attachment=False,
+        filename=filename,
+        content_type=content_type,
+    )
+    response["X-Content-Type-Options"] = "nosniff"
+    return response
+
+
+@staff_member_required
+@require_POST
+def staff_replace_receipt_file(request, pk: int):
+    receipt = get_object_or_404(staff_receipt_queryset(), pk=pk)
+    form = ReceiptFileReplaceForm(request.POST, request.FILES)
+    if not form.is_valid():
+        for errors in form.errors.values():
+            for error in errors:
+                messages.error(request, error)
+        return redirect("staff_receipt_review", pk=receipt.pk)
+
+    upload = form.cleaned_data["file"]
+    old_storage = receipt.file.storage if receipt.file else None
+    old_file_name = receipt.file.name if receipt.file else ""
+    receipt.file = upload
+    receipt.original_filename = upload.name
+    receipt.file_size = upload.size
+    receipt.content_type = getattr(upload, "content_type", "") or ""
+    receipt.expires_at = receipt_expiry_from(timezone.now())
+    receipt.file_deleted_at = None
+    receipt.file_delete_reason = ""
+    receipt.upload_source = ReceiptUploadSource.ADMIN
+    receipt.uploaded_by = request.user
+    ai_reset_fields = reset_ai_processing_state(receipt, save=False, clear_extracted_values=True)
+    receipt.save(
+        update_fields=[
+            "file",
+            "original_filename",
+            "file_size",
+            "content_type",
+            "expires_at",
+            "file_deleted_at",
+            "file_delete_reason",
+            "upload_source",
+            "uploaded_by",
+            *ai_reset_fields,
+            "updated_at",
+        ]
+    )
+    if old_storage is not None and old_file_name and old_file_name != receipt.file.name:
+        try:
+            if old_storage.exists(old_file_name):
+                old_storage.delete(old_file_name)
+        except Exception:
+            pass
+    reconcile_card_statement_items_for_receipt_month(receipt.submission.period_month)
+    messages.success(request, "領収書ファイルを差し替えました。AI確認は未確認へ戻ったため、再度実行してください。")
+    return redirect("staff_receipt_review", pk=receipt.pk)
+
+
 
 def parse_month_value(value):
     form = MonthSelectForm({"month": value})
@@ -1126,7 +1320,7 @@ def staff_month_receipts_queryset(selected_month):
     user_ids = managed_users_queryset().values_list("id", flat=True)
     return (
         Receipt.objects.filter(submission__period_month=selected_month, submission__user_id__in=user_ids)
-        .select_related("submission", "submission__user", "service", "uploaded_by")
+        .select_related("submission", "submission__user", "service", "uploaded_by", "admin_reviewed_by")
     )
 
 
@@ -1232,7 +1426,7 @@ def staff_user_month_status(request, user_id: int):
         user=managed_user,
         period_month=selected_month,
         selected_choice=selected_upload_choice,
-        hide_file_input=False,
+        hide_file_input=True,
     )
 
     if request.method == "POST":
@@ -1287,7 +1481,7 @@ def staff_user_month_status(request, user_id: int):
         .prefetch_related(
             Prefetch(
                 "receipts",
-                queryset=Receipt.objects.select_related("service", "uploaded_by").order_by("uploaded_at", "pk"),
+                queryset=Receipt.objects.select_related("service", "uploaded_by", "admin_reviewed_by").order_by("uploaded_at", "pk"),
             )
         )
         .first()
@@ -1655,7 +1849,7 @@ def history(request):
 def submission_detail(request, pk: int):
     submission = get_object_or_404(
         Submission.objects.select_related("user").prefetch_related(
-            Prefetch("receipts", queryset=Receipt.objects.select_related("service", "uploaded_by"))
+            Prefetch("receipts", queryset=Receipt.objects.select_related("service", "uploaded_by", "admin_reviewed_by"))
         ),
         pk=pk,
     )
@@ -1899,7 +2093,7 @@ def staff_email(request):
 def staff_submission_detail(request, pk: int):
     submission = get_object_or_404(
         Submission.objects.select_related("user").prefetch_related(
-            Prefetch("receipts", queryset=Receipt.objects.select_related("service", "uploaded_by"))
+            Prefetch("receipts", queryset=Receipt.objects.select_related("service", "uploaded_by", "admin_reviewed_by"))
         ),
         pk=pk,
     )
@@ -1943,6 +2137,11 @@ def receipt_manifest_csv(submissions) -> str:
         "ai_check_amount",
         "ai_check_currency",
         "ai_check_period_match",
+        "admin_review_status",
+        "admin_reviewed_by",
+        "admin_reviewed_at",
+        "admin_review_note",
+        "admin_filename_overridden",
         "file_size",
         "memo",
     ])
@@ -1982,6 +2181,11 @@ def receipt_manifest_csv(submissions) -> str:
                 "yes" if receipt.ai_check_amount else "no",
                 "yes" if receipt.ai_check_currency else "no",
                 "yes" if receipt.ai_check_period_match else "no",
+                receipt.get_admin_review_status_display(),
+                receipt.admin_reviewer_label,
+                receipt.admin_reviewed_at.isoformat() if receipt.admin_reviewed_at else "",
+                receipt.admin_review_note,
+                "yes" if receipt.admin_filename_overridden else "no",
                 receipt.file_size or "",
                 receipt.memo,
             ])
@@ -2023,7 +2227,7 @@ def staff_download_month(request):
     queryset = (
         Submission.objects.filter(period_month=selected_month, status=SubmissionStatus.SUBMITTED)
         .select_related("user")
-        .prefetch_related(Prefetch("receipts", queryset=Receipt.objects.select_related("service", "uploaded_by")))
+        .prefetch_related(Prefetch("receipts", queryset=Receipt.objects.select_related("service", "uploaded_by", "admin_reviewed_by")))
     )
     return build_receipts_zip(queryset, f"receipts_{selected_month:%Y-%m}_submitted")
 
@@ -2032,7 +2236,7 @@ def staff_download_month(request):
 def staff_download_submission(request, pk: int):
     submission = get_object_or_404(
         Submission.objects.select_related("user").prefetch_related(
-            Prefetch("receipts", queryset=Receipt.objects.select_related("service", "uploaded_by"))
+            Prefetch("receipts", queryset=Receipt.objects.select_related("service", "uploaded_by", "admin_reviewed_by"))
         ),
         pk=pk,
     )

@@ -53,6 +53,10 @@
                                 {% if receipt.ai_service_payee_check_memo %}<div class="danger small">{{ receipt.ai_service_payee_check_memo|linebreaksbr }}</div>{% endif %}
                                 {% if receipt.ai_filename_admin_memo %}<div class="danger small">{{ receipt.ai_filename_admin_memo|linebreaksbr }}</div>{% endif %}
                                 {% if receipt.ai_period_check_memo %}<div class="muted small">{{ receipt.ai_period_check_memo|linebreaksbr }}</div>{% endif %}
+                                {% if receipt.admin_reviewed %}
+                                    <div class="success small">管理者確認: {{ receipt.admin_reviewer_label }} / {{ receipt.admin_reviewed_at|date:"Y-m-d H:i" }}</div>
+                                    {% if receipt.admin_review_note %}<div class="muted small">{{ receipt.admin_review_note|linebreaksbr }}</div>{% endif %}
+                                {% endif %}
                             </div>
                         {% endif %}
                     </td>
@@ -68,8 +72,15 @@
                             <form method="post" action="{% url 'replace_receipt_file' receipt.pk %}" enctype="multipart/form-data" class="replace-file-form">
                                 {% csrf_token %}
                                 <input type="hidden" name="next" value="{{ request.get_full_path }}">
-                                <label class="sr-only" for="replace-file-{{ receipt.pk }}">修正後ファイル</label>
-                                <input id="replace-file-{{ receipt.pk }}" type="file" name="file" accept=".pdf,.png,.jpg,.jpeg,.webp" required>
+                                <div class="file-dropzone compact inline-dropzone" data-file-dropzone data-max-files="1">
+                                    <label class="sr-only" for="replace-file-{{ receipt.pk }}">修正後ファイル</label>
+                                    <input id="replace-file-{{ receipt.pk }}" class="sr-only" type="file" name="file" accept=".pdf,.png,.jpg,.jpeg,.webp" required data-file-dropzone-input>
+                                    <button type="button" class="file-dropzone-trigger" data-file-dropzone-trigger>
+                                        <strong>ファイルを選択</strong>
+                                        <span>またはドロップ</span>
+                                    </button>
+                                    <div class="file-dropzone-files muted small" data-file-dropzone-files>未選択</div>
+                                </div>
                                 <button type="submit" class="button small">ファイル修正</button>
                             </form>
                         {% endif %}
@@ -80,6 +91,7 @@
                             </form>
                         {% endif %}
                         {% if user.is_staff and receipt.submission.user != user %}
+                            <a class="button small primary" href="{% url 'staff_receipt_review' receipt.pk %}">確認</a>
                             {% if receipt.needs_manual_review %}
                                 <form method="post" action="{% url 'staff_request_receipt_resubmission' receipt.pk %}" onsubmit="return confirm('この領収書に再提出を指示しますか？対象ファイルと履歴は提出項目から削除され、ユーザーは再アップロードできます。');">
                                     {% csrf_token %}

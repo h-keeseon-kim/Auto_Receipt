@@ -26,6 +26,7 @@ from .forms import (
     ReceiptBatchUploadForm,
     ReceiptUploadForm,
     ServiceExceptionRequestForm,
+    StaffReceiptReviewForm,
     UserServiceRegistrationForm,
 )
 from .monthly_status import build_user_month_summary
@@ -41,6 +42,7 @@ from .models import (
     EmailDeliveryStatus,
     EmailType,
     Receipt,
+    ReceiptAdminReviewStatus,
     ReceiptFilenameStatus,
     ReceiptPeriodCheckStatus,
     ReceiptUploadSource,
@@ -3278,4 +3280,159 @@ class FinalWorkflowAcceptanceTests(TestCase):
         self.assertEqual(response.status_code, 404)
 
     def test_version_file_is_present_without_web_display_requirement(self):
-        self.assertEqual(Path("VERSION").read_text(encoding="utf-8").strip(), "1.4.2")
+        self.assertEqual(Path("VERSION").read_text(encoding="utf-8").strip(), "1.5.0")
+
+
+@override_settings(PASSWORD_HASHERS=FAST_PASSWORD_HASHERS)
+class DragDropAndStaffReceiptReviewTests(TestCase):
+    def setUp(self):
+        self.media_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.media_dir.cleanup)
+        self.override = override_settings(MEDIA_ROOT=self.media_dir.name)
+        self.override.enable()
+        self.addCleanup(self.override.disable)
+        self.admin = User.objects.create_superuser(
+            username="admin-review",
+            email="",
+            password="admin-password-123",
+        )
+        self.user = User.objects.create_user(
+            username="review-user@example.com",
+            email="review-user@example.com",
+            password="user-password-123",
+        )
+        self.catalog = ServiceCatalog.objects.create(
+            name="ChatGPT",
+            billing_type=BillingType.SUBSCRIPTION,
+            created_by=self.admin,
+        )
+        self.service = RegisteredService.objects.create(
+            user=self.user,
+            catalog_service=self.catalog,
+            name=self.catalog.name,
+            billing_type=self.catalog.billing_type,
+            registered_by=self.admin,
+        )
+        self.submission = Submission.objects.create(
+            user=self.user,
+            period_month=date(2026, 7, 1),
+        )
+        self.receipt = Receipt.objects.create(
+            submission=self.submission,
+            service=self.service,
+            service_name_snapshot=self.service.name,
+            billing_type_snapshot=self.service.billing_type,
+            file=SimpleUploadedFile("receipt.pdf", b"%PDF-1.4 receipt", content_type="application/pdf"),
+            original_filename="receipt.pdf",
+            content_type="application/pdf",
+            file_size=18,
+            uploaded_by=self.admin,
+            upload_source=ReceiptUploadSource.ADMIN,
+        )
+
+    def test_receipt_and_statement_upload_pages_have_drag_drop_zones(self):
+        self.client.login(username=self.user.username, password="user-password-123")
+        dashboard = self.client.get(reverse("dashboard") + "?month=2026-07")
+        self.assertEqual(dashboard.status_code, 200)
+        self.assertContains(dashboard, "data-file-dropzone")
+        self.assertContains(dashboard, "ドラッグ＆ドロップ")
+
+        self.client.logout()
+        self.client.login(username=self.admin.username, password="admin-password-123")
+        user_month = self.client.get(
+            reverse("staff_user_month_status", args=[self.user.pk]) + "?month=2026-07"
+        )
+        self.assertContains(user_month, "代理アップロードする領収書を選択")
+        self.assertContains(user_month, reverse("staff_receipt_review", args=[self.receipt.pk]))
+
+        statement_page = self.client.get(reverse("staff_card_statements") + "?month=2026-07")
+        self.assertContains(statement_page, "ご利用代金明細書を選択")
+        self.assertContains(statement_page, "data-file-dropzone")
+
+    def test_staff_review_page_previews_and_allows_manual_confirmation(self):
+        self.client.login(username=self.admin.username, password="admin-password-123")
+        response = self.client.get(reverse("staff_receipt_review", args=[self.receipt.pk]))
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "領収書プレビュー")
+        self.assertContains(response, reverse("staff_preview_receipt", args=[self.receipt.pk]))
+        self.assertContains(response, "表示・ダウンロード用ファイル名")
+        self.assertContains(response, "すべて確認済みにする")
+
+        payload = {
+            "generated_filename": "260701_review-user_OpenAI_220_USD.pdf",
+            "ai_check_card_last4": "on",
+            "ai_check_payee": "on",
+            "ai_check_service_payee_related": "on",
+            "ai_check_date": "on",
+            "ai_check_amount": "on",
+            "ai_check_currency": "on",
+            "ai_check_period_match": "on",
+            "admin_review_note": "領収書本体を確認しました。",
+            "review_action": "confirm",
+        }
+        response = self.client.post(reverse("staff_receipt_review", args=[self.receipt.pk]), payload)
+        self.assertRedirects(response, reverse("staff_receipt_review", args=[self.receipt.pk]))
+        self.receipt.refresh_from_db()
+        self.assertEqual(self.receipt.admin_review_status, ReceiptAdminReviewStatus.CONFIRMED)
+        self.assertEqual(self.receipt.admin_reviewed_by, self.admin)
+        self.assertIsNotNone(self.receipt.admin_reviewed_at)
+        self.assertTrue(self.receipt.admin_filename_overridden)
+        self.assertEqual(self.receipt.generated_filename, "260701_review-user_OpenAI_220_USD.pdf")
+        self.assertTrue(self.receipt.ai_all_checks_passed)
+        self.assertFalse(self.receipt.needs_manual_review)
+
+    def test_staff_cannot_confirm_with_unchecked_items(self):
+        self.client.login(username=self.admin.username, password="admin-password-123")
+        response = self.client.post(
+            reverse("staff_receipt_review", args=[self.receipt.pk]),
+            {
+                "generated_filename": "receipt.pdf",
+                "ai_check_card_last4": "on",
+                "review_action": "confirm",
+            },
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "すべての確認項目へチェック")
+        self.receipt.refresh_from_db()
+        self.assertEqual(self.receipt.admin_review_status, ReceiptAdminReviewStatus.NOT_REVIEWED)
+
+    def test_processed_receipt_is_not_rechecked(self):
+        self.receipt.ai_filename_status = ReceiptFilenameStatus.GENERATED
+        self.receipt.ai_filename_checked_at = timezone.now()
+        self.receipt.save(update_fields=["ai_filename_status", "ai_filename_checked_at"])
+        self.client.login(username=self.admin.username, password="admin-password-123")
+        response = self.client.post(
+            reverse("staff_start_receipt_ai_processing", args=[self.receipt.pk]),
+            HTTP_X_REQUESTED_WITH="XMLHttpRequest",
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertFalse(response.json()["started"])
+        self.assertIn("すでにAI確認済み", response.json()["message"])
+
+    @mock.patch("receipts.views.start_background_ai_processing")
+    def test_unprocessed_receipt_can_start_single_ai_check(self, start_background):
+        self.client.login(username=self.admin.username, password="admin-password-123")
+        response = self.client.post(
+            reverse("staff_start_receipt_ai_processing", args=[self.receipt.pk]),
+            HTTP_X_REQUESTED_WITH="XMLHttpRequest",
+        )
+        self.assertTrue(response.json()["started"])
+        self.receipt.refresh_from_db()
+        self.assertEqual(self.receipt.ai_filename_status, ReceiptFilenameStatus.PROCESSING)
+        start_background.assert_called_once_with([self.receipt.pk])
+
+    def test_normal_user_cannot_open_staff_review(self):
+        self.client.login(username=self.user.username, password="user-password-123")
+        response = self.client.get(reverse("staff_receipt_review", args=[self.receipt.pk]))
+        self.assertEqual(response.status_code, 302)
+
+    def test_staff_review_form_keeps_original_extension(self):
+        form = StaffReceiptReviewForm(
+            {
+                "generated_filename": "renamed.png",
+                "review_action": "save",
+            },
+            receipt=self.receipt,
+        )
+        self.assertFalse(form.is_valid())
+        self.assertIn("元ファイルと同じ拡張子", str(form.errors))

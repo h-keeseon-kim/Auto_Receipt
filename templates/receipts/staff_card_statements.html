@@ -34,7 +34,15 @@
         <div class="form-row">
             {{ statement_form.file.errors }}
             {{ statement_form.file.label_tag }}
-            {{ statement_form.file }}
+            <div class="file-dropzone statement-dropzone" data-file-dropzone data-max-files="1">
+                {{ statement_form.file }}
+                <button type="button" class="file-dropzone-trigger" data-file-dropzone-trigger>
+                    <span class="file-dropzone-icon" aria-hidden="true">＋</span>
+                    <strong>ご利用代金明細書を選択</strong>
+                    <span>またはPDF・画像をここへドラッグ＆ドロップ</span>
+                </button>
+                <div class="file-dropzone-files muted small" data-file-dropzone-files>ファイル未選択</div>
+            </div>
             {% if statement_form.file.help_text %}<span class="helptext">{{ statement_form.file.help_text }}</span>{% endif %}
         </div>
         <button type="submit" class="button primary">明細書をアップロードして全ユーザー照合</button>

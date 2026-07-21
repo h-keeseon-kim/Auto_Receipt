@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import string
 from datetime import date
+from pathlib import Path
+import re
 
 from django import forms
 from django.conf import settings
@@ -19,6 +21,9 @@ from .models import (
     CardStatement,
     EmailReminderSchedule,
     Receipt,
+    ReceiptAdminReviewStatus,
+    ReceiptFilenameStatus,
+    ReceiptPeriodCheckStatus,
     RegisteredService,
     ServiceCatalog,
     ServiceDeactivationSource,
@@ -751,6 +756,137 @@ class ReceiptFileReplaceForm(forms.Form):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         apply_design_classes(self)
+
+
+class StaffReceiptReviewForm(forms.Form):
+    """管理者がAI結果を確認・補正し、表示ファイル名とチェック項目を確定する。"""
+
+    generated_filename = forms.CharField(
+        label="表示・ダウンロード用ファイル名",
+        required=False,
+        max_length=255,
+        help_text="実ファイルの保存名は変更せず、画面・ダウンロード・ZIPで使う名前だけを変更します。",
+    )
+    ai_check_card_last4 = forms.BooleanField(label="カード末尾7210", required=False)
+    ai_check_payee = forms.BooleanField(label="払先", required=False)
+    ai_check_service_payee_related = forms.BooleanField(label="サービス / 払先関連", required=False)
+    ai_check_date = forms.BooleanField(label="日付", required=False)
+    ai_check_amount = forms.BooleanField(label="金額", required=False)
+    ai_check_currency = forms.BooleanField(label="通貨", required=False)
+    ai_check_period_match = forms.BooleanField(label="提出月一致", required=False)
+    admin_review_note = forms.CharField(
+        label="管理者確認メモ",
+        required=False,
+        max_length=2000,
+        widget=forms.Textarea(attrs={"rows": 4, "placeholder": "確認内容や補足を記載します。ユーザーには表示されません。"}),
+    )
+
+    CHECK_FIELDS = (
+        "ai_check_card_last4",
+        "ai_check_payee",
+        "ai_check_service_payee_related",
+        "ai_check_date",
+        "ai_check_amount",
+        "ai_check_currency",
+        "ai_check_period_match",
+    )
+
+    def __init__(self, *args, receipt: Receipt, **kwargs):
+        self.receipt = receipt
+        initial = kwargs.setdefault("initial", {})
+        initial.setdefault("generated_filename", receipt.display_filename)
+        for field_name in self.CHECK_FIELDS:
+            initial.setdefault(field_name, getattr(receipt, field_name))
+        initial.setdefault("admin_review_note", receipt.admin_review_note)
+        super().__init__(*args, **kwargs)
+        if receipt.is_extra:
+            self.fields["ai_check_service_payee_related"].label = "メモ / 領収書関連"
+        apply_design_classes(self)
+
+    def clean_generated_filename(self):
+        raw = (self.cleaned_data.get("generated_filename") or "").strip()
+        if not raw:
+            return ""
+        if Path(raw).name != raw or any(separator in raw for separator in ("/", "\\")):
+            raise forms.ValidationError("フォルダーを含まないファイル名だけを入力してください。")
+        cleaned = re.sub(r"[\x00-\x1f<>:\"/\\|?*]+", "_", raw)
+        cleaned = re.sub(r"\s+", "_", cleaned).strip("._ ")
+        if not cleaned:
+            raise forms.ValidationError("有効なファイル名を入力してください。")
+
+        current_suffix = Path(
+            self.receipt.original_filename
+            or (self.receipt.file.name if self.receipt.file else "")
+        ).suffix.lower()
+        suffix = Path(cleaned).suffix.lower()
+        allowed_suffixes = {".pdf", ".png", ".jpg", ".jpeg", ".webp"}
+        if not suffix and current_suffix:
+            cleaned = f"{cleaned}{current_suffix}"
+            suffix = current_suffix
+        if suffix not in allowed_suffixes:
+            raise forms.ValidationError("拡張子は PDF / PNG / JPG / JPEG / WEBP のいずれかにしてください。")
+        if current_suffix and suffix != current_suffix:
+            raise forms.ValidationError("元ファイルと同じ拡張子を使用してください。")
+        return cleaned[:255]
+
+    def clean(self):
+        cleaned = super().clean()
+        if self.data.get("review_action") == "confirm":
+            unchecked = [self.fields[name].label for name in self.CHECK_FIELDS if not cleaned.get(name)]
+            if unchecked:
+                raise forms.ValidationError(
+                    "確認済みにするには、すべての確認項目へチェックを入れてください。未確認: "
+                    + "、".join(unchecked)
+                )
+            if not cleaned.get("generated_filename"):
+                self.add_error("generated_filename", "確認済みにするにはファイル名を入力してください。")
+        return cleaned
+
+    def save(self, *, reviewed_by: User, confirm: bool) -> Receipt:
+        receipt = self.receipt
+        previous_display_filename = receipt.display_filename
+        receipt.generated_filename = self.cleaned_data.get("generated_filename") or ""
+        receipt.admin_filename_overridden = receipt.admin_filename_overridden or bool(
+            receipt.generated_filename and receipt.generated_filename != previous_display_filename
+        )
+        for field_name in self.CHECK_FIELDS:
+            setattr(receipt, field_name, bool(self.cleaned_data.get(field_name)))
+        receipt.admin_review_note = (self.cleaned_data.get("admin_review_note") or "").strip()
+        receipt.ai_filename_checked_at = receipt.ai_filename_checked_at or timezone.now()
+
+        if confirm:
+            receipt.admin_review_status = ReceiptAdminReviewStatus.CONFIRMED
+            receipt.admin_reviewed_by = reviewed_by
+            receipt.admin_reviewed_at = timezone.now()
+            receipt.ai_filename_status = ReceiptFilenameStatus.GENERATED
+            receipt.ai_period_check_status = ReceiptPeriodCheckStatus.MATCHED
+            receipt.ai_period_check_memo = (
+                f"管理者 {reviewed_by.get_username()} が提出月との一致を確認しました。"
+            )
+        else:
+            receipt.admin_review_status = ReceiptAdminReviewStatus.NOT_REVIEWED
+            receipt.admin_reviewed_by = None
+            receipt.admin_reviewed_at = None
+            if receipt.ai_has_check_result and not receipt.ai_all_checks_passed:
+                receipt.ai_filename_status = ReceiptFilenameStatus.NEEDS_REVIEW
+
+        receipt.save(
+            update_fields=[
+                "generated_filename",
+                "admin_filename_overridden",
+                *self.CHECK_FIELDS,
+                "admin_review_note",
+                "admin_review_status",
+                "admin_reviewed_by",
+                "admin_reviewed_at",
+                "ai_filename_status",
+                "ai_filename_checked_at",
+                "ai_period_check_status",
+                "ai_period_check_memo",
+                "updated_at",
+            ]
+        )
+        return receipt
 
 
 class CardStatementUploadForm(forms.ModelForm):

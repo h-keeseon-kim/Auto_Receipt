@@ -13,6 +13,7 @@ from django.utils import timezone
 from .ai_filename import filename_user_part_from_user, generate_ai_receipt_filename, target_card_last4
 from .models import (
     Receipt,
+    ReceiptAdminReviewStatus,
     ReceiptFilenameStatus,
     ReceiptPeriodCheckStatus,
     ReceiptResubmissionRequest,
@@ -42,6 +43,11 @@ AI_RESET_FIELDS = [
     "ai_receipt_month",
     "ai_period_check_status",
     "ai_period_check_memo",
+    "admin_review_status",
+    "admin_reviewed_by",
+    "admin_reviewed_at",
+    "admin_review_note",
+    "admin_filename_overridden",
     *AI_CHECK_FIELDS,
 ]
 
@@ -142,6 +148,11 @@ def reset_ai_processing_state(receipt: Receipt, *, save: bool = False, clear_ext
     receipt.ai_receipt_month = ""
     receipt.ai_period_check_status = ReceiptPeriodCheckStatus.NOT_CHECKED
     receipt.ai_period_check_memo = ""
+    receipt.admin_review_status = ReceiptAdminReviewStatus.NOT_REVIEWED
+    receipt.admin_reviewed_by = None
+    receipt.admin_reviewed_at = None
+    receipt.admin_review_note = ""
+    receipt.admin_filename_overridden = False
     receipt.ai_check_card_last4 = False
     receipt.ai_check_payee = False
     receipt.ai_check_service_payee_related = False
@@ -405,6 +416,11 @@ def claim_pending_receipts_for_ai_processing(queryset: QuerySet, *, limit: int |
             ai_check_amount=False,
             ai_check_currency=False,
             ai_check_period_match=False,
+            admin_review_status=ReceiptAdminReviewStatus.NOT_REVIEWED,
+            admin_reviewed_by=None,
+            admin_reviewed_at=None,
+            admin_review_note="",
+            admin_filename_overridden=False,
             updated_at=now,
         )
         return list(

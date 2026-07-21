@@ -141,11 +141,15 @@
         </div>
         <div class="form-row receipt-file-picker-panel" data-receipt-file-picker-panel hidden>
             {{ upload_form.files.errors }}
-            {{ upload_form.files }}
-            <button type="button" class="button primary receipt-file-picker-button" data-receipt-file-picker-button>
-                <span class="plus-icon" aria-hidden="true">＋</span>
-                <span data-receipt-file-picker-label>領収書を追加</span>
-            </button>
+            <div class="file-dropzone" data-file-dropzone>
+                {{ upload_form.files }}
+                <button type="button" class="file-dropzone-trigger receipt-file-picker-button" data-file-dropzone-trigger data-receipt-file-picker-button>
+                    <span class="file-dropzone-icon" aria-hidden="true">＋</span>
+                    <strong data-receipt-file-picker-label>領収書を追加</strong>
+                    <span>または領収書をここへドラッグ＆ドロップ</span>
+                </button>
+                <div class="file-dropzone-files muted small" data-file-dropzone-files>ファイル未選択</div>
+            </div>
             {% if upload_form.files.help_text %}<span class="helptext">{{ upload_form.files.help_text }}</span>{% endif %}
             <p class="muted small auto-upload-note">ファイル選択後、自動で下の「アップロード済み領収書」に追加されます。</p>
         </div>
@@ -226,9 +230,6 @@
     }
 
     if (pickerButton && fileInput) {
-        pickerButton.addEventListener("click", function () {
-            if (!pickerButton.disabled) fileInput.click();
-        });
         fileInput.addEventListener("change", function () {
             const count = fileInput.files ? fileInput.files.length : 0;
             if (!count) return;

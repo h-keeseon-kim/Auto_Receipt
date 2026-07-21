@@ -89,6 +89,11 @@ class ReceiptUploadSource(models.TextChoices):
     ADMIN = "admin", "管理者代理"
 
 
+class ReceiptAdminReviewStatus(models.TextChoices):
+    NOT_REVIEWED = "not_reviewed", "未確認"
+    CONFIRMED = "confirmed", "管理者確認済み"
+
+
 class ResubmissionRequestStatus(models.TextChoices):
     OPEN = "open", "再提出待ち"
     RESOLVED = "resolved", "対応済み"
@@ -694,6 +699,23 @@ class Receipt(models.Model):
         related_name="uploaded_receipts",
         verbose_name="アップロード実行者",
     )
+    admin_review_status = models.CharField(
+        "管理者確認ステータス",
+        max_length=20,
+        choices=ReceiptAdminReviewStatus.choices,
+        default=ReceiptAdminReviewStatus.NOT_REVIEWED,
+    )
+    admin_reviewed_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="reviewed_receipts",
+        verbose_name="確認管理者",
+    )
+    admin_reviewed_at = models.DateTimeField("管理者確認日時", null=True, blank=True)
+    admin_review_note = models.TextField("管理者確認メモ", blank=True)
+    admin_filename_overridden = models.BooleanField("管理者によるファイル名修正", default=False)
     uploaded_at = models.DateTimeField("アップロード日時", auto_now_add=True)
     expires_at = models.DateTimeField("ファイル保存期限", null=True, blank=True)
     file_deleted_at = models.DateTimeField("ファイル削除日時", null=True, blank=True)
@@ -775,6 +797,16 @@ class Receipt(models.Model):
         return "-"
 
     @property
+    def admin_reviewed(self) -> bool:
+        return self.admin_review_status == ReceiptAdminReviewStatus.CONFIRMED and bool(self.admin_reviewed_at)
+
+    @property
+    def admin_reviewer_label(self) -> str:
+        if self.admin_reviewed_by_id and self.admin_reviewed_by:
+            return self.admin_reviewed_by.get_username()
+        return "-"
+
+    @property
     def display_filename(self) -> str:
         if self.generated_filename:
             return self.generated_filename
@@ -851,12 +883,14 @@ class Receipt(models.Model):
 
     @property
     def needs_manual_review(self) -> bool:
-        return self.ai_requires_manual_review
+        return self.ai_requires_manual_review and not self.admin_reviewed
 
     @property
     def manual_review_badge_class(self) -> str:
         if self.ai_is_queued or self.is_ai_processing:
             return "processing"
+        if self.admin_reviewed:
+            return "submitted"
         if not self.ai_has_check_result:
             return "neutral"
         return "draft" if self.ai_requires_manual_review else "submitted"
@@ -867,6 +901,8 @@ class Receipt(models.Model):
             return "AI待機中"
         if self.is_ai_processing:
             return "AI抽出中"
+        if self.admin_reviewed:
+            return "管理者確認済み"
         if not self.ai_has_check_result:
             return "チェック待ち"
         if self.needs_manual_review:

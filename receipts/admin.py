@@ -40,6 +40,11 @@ class ReceiptInline(admin.TabularInline):
         "ai_check_amount",
         "ai_check_currency",
         "ai_check_period_match",
+        "admin_review_status",
+        "admin_reviewed_by",
+        "admin_reviewed_at",
+        "admin_review_note",
+        "admin_filename_overridden",
         "file_size",
         "content_type",
         "uploaded_at",
@@ -71,6 +76,11 @@ class ReceiptInline(admin.TabularInline):
         "ai_check_amount",
         "ai_check_currency",
         "ai_check_period_match",
+        "admin_review_status",
+        "admin_reviewed_by",
+        "admin_reviewed_at",
+        "admin_review_note",
+        "admin_filename_overridden",
         "expires_at",
         "file_deleted_at",
     )
@@ -152,9 +162,10 @@ class ReceiptAdmin(admin.ModelAdmin):
         "ai_period_check_status",
         "ai_check_service_payee_related",
         "ai_check_period_match",
+        "admin_review_status",
         "file_status",
     )
-    list_filter = ("is_extra", "upload_source", "billing_type_snapshot", "currency", "ai_filename_status", "ai_period_check_status", "ai_check_service_payee_related", "ai_check_period_match", "submission__period_month", "file_deleted_at")
+    list_filter = ("is_extra", "upload_source", "admin_review_status", "billing_type_snapshot", "currency", "ai_filename_status", "ai_period_check_status", "ai_check_service_payee_related", "ai_check_period_match", "submission__period_month", "file_deleted_at")
     search_fields = ("service_name_snapshot", "memo", "submission__user__username", "uploaded_by__username", "uploaded_by__email", "original_filename", "generated_filename", "ai_extracted_payee", "ai_filename_admin_memo", "ai_period_check_memo", "ai_service_payee_check_memo")
     readonly_fields = (
         "service_name_snapshot",
@@ -177,6 +188,11 @@ class ReceiptAdmin(admin.ModelAdmin):
         "ai_check_amount",
         "ai_check_currency",
         "ai_check_period_match",
+        "admin_review_status",
+        "admin_reviewed_by",
+        "admin_reviewed_at",
+        "admin_review_note",
+        "admin_filename_overridden",
         "file_size",
         "content_type",
         "upload_source",

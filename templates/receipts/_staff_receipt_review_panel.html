@@ -1,0 +1,90 @@
+<div data-receipt-review-content data-processing="{% if receipt.ai_is_queued or receipt.is_ai_processing %}true{% else %}false{% endif %}">
+    <div class="section-header">
+        <div>
+            <h2>確認・ファイル名修正</h2>
+            <p class="muted">AI未確認の領収書だけAI検査できます。処理済み項目は再検査せず、管理者が下の項目を補正します。</p>
+        </div>
+        <div class="ai-check-status">
+            <span class="badge {{ receipt.ai_filename_badge_class }}">AI: {{ receipt.get_ai_filename_status_display }}</span>
+            <span class="badge {{ receipt.manual_review_badge_class }}">{{ receipt.manual_review_label }}</span>
+        </div>
+    </div>
+
+    {% if receipt.ai_filename_status == 'not_processed' and receipt.file_available %}
+        <form method="post" action="{% url 'staff_start_receipt_ai_processing' receipt.pk %}" data-single-receipt-ai-form>
+            {% csrf_token %}
+            <button type="submit" class="button primary">AIでファイル名を修正・検査</button>
+            <span class="muted small" data-single-receipt-ai-message>この領収書だけを処理します。</span>
+        </form>
+    {% elif receipt.ai_is_queued or receipt.is_ai_processing %}
+        <div class="message notice processing-text">AIで情報を抽出中です。完了後、この画面へ自動反映します。</div>
+    {% else %}
+        <p class="muted small">AI処理済みです。次回ボタン操作でも再検査しません。ファイル差し替え時だけ未確認へ戻ります。</p>
+    {% endif %}
+
+    <div class="receipt-ai-details">
+        <dl class="detail-list">
+            <div><dt>現在の表示ファイル名</dt><dd><strong>{{ receipt.display_filename|default:"-" }}</strong>{% if receipt.admin_filename_overridden %}<span class="badge neutral">管理者修正</span>{% endif %}</dd></div>
+            <div><dt>元ファイル名</dt><dd>{{ receipt.original_filename|default:"-" }}</dd></div>
+            <div><dt>AI抽出払先</dt><dd>{{ receipt.ai_extracted_payee|default:"-" }}</dd></div>
+            <div><dt>カード下4桁</dt><dd>{{ receipt.ai_extracted_card_last4|default:"-" }}</dd></div>
+            <div><dt>AI判定月</dt><dd>{{ receipt.ai_receipt_month|default:"-" }}</dd></div>
+        </dl>
+        {% if receipt.ai_service_payee_check_memo %}<div class="message notice small">{{ receipt.ai_service_payee_check_memo|linebreaksbr }}</div>{% endif %}
+        {% if receipt.ai_filename_admin_memo %}<div class="message notice small">{{ receipt.ai_filename_admin_memo|linebreaksbr }}</div>{% endif %}
+        {% if receipt.ai_period_check_memo %}<div class="message notice small">{{ receipt.ai_period_check_memo|linebreaksbr }}</div>{% endif %}
+    </div>
+
+    {% if not receipt.ai_is_queued and not receipt.is_ai_processing %}
+        <form method="post" class="form-grid receipt-review-form">
+            {% csrf_token %}
+            {{ review_form.non_field_errors }}
+            <div class="form-row">
+                {{ review_form.generated_filename.errors }}
+                {{ review_form.generated_filename.label_tag }}
+                {{ review_form.generated_filename }}
+                {% if review_form.generated_filename.help_text %}<span class="helptext">{{ review_form.generated_filename.help_text }}</span>{% endif %}
+            </div>
+            <fieldset class="review-checklist-fieldset">
+                <legend>確認チェック</legend>
+                <p class="muted small">領収書本体を確認できた項目だけチェックしてください。すべてチェックすると確認済みにできます。</p>
+                <div class="review-checklist-grid">
+                    {% for field in review_form %}
+                        {% if field.name|slice:':9' == 'ai_check_' %}
+                            <label class="review-check-item">{{ field }} <span>{{ field.label }}</span>{{ field.errors }}</label>
+                        {% endif %}
+                    {% endfor %}
+                </div>
+            </fieldset>
+            <div class="form-row">
+                {{ review_form.admin_review_note.errors }}
+                {{ review_form.admin_review_note.label_tag }}
+                {{ review_form.admin_review_note }}
+            </div>
+            {% if receipt.admin_reviewed %}
+                <div class="message success">{{ receipt.admin_reviewer_label }} が {{ receipt.admin_reviewed_at|date:"Y-m-d H:i" }} に確認済みです。</div>
+            {% endif %}
+            <div class="actions">
+                <button type="submit" name="review_action" value="save" class="button">確認内容を保存</button>
+                <button type="submit" name="review_action" value="confirm" class="button primary">すべて確認済みにする</button>
+            </div>
+        </form>
+    {% endif %}
+
+    <div class="subsection review-danger-actions">
+        <h3>問題がある場合</h3>
+        <p class="muted small">誤った領収書の場合は再提出を指示します。対象ファイルと提出項目は削除され、ユーザーへ再アップロード依頼が表示されます。</p>
+        <div class="actions">
+            <form method="post" action="{% url 'staff_request_receipt_resubmission' receipt.pk %}" onsubmit="return confirm('この領収書に再提出を指示しますか？対象ファイルと履歴は提出項目から削除されます。');">
+                {% csrf_token %}
+                <input type="hidden" name="next" value="{% url 'staff_user_month_status' receipt.submission.user.pk %}?month={{ receipt.submission.period_month|date:'Y-m' }}">
+                <button type="submit" class="button danger-outline">再提出を指示</button>
+            </form>
+            <form method="post" action="{% url 'staff_delete_receipt' receipt.pk %}" onsubmit="return confirm('この領収書ファイルと履歴を削除しますか？');">
+                {% csrf_token %}
+                <input type="hidden" name="next" value="{% url 'staff_user_month_status' receipt.submission.user.pk %}?month={{ receipt.submission.period_month|date:'Y-m' }}">
+                <button type="submit" class="button danger-outline">領収書を削除</button>
+            </form>
+        </div>
+    </div>
+</div>

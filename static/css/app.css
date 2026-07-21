@@ -808,3 +808,96 @@ body.tutorial-open { overflow-x: hidden; }
     .receipt-file-picker-button { width: 100%; min-width: 0; }
     .compact-summary-card { width: 100%; }
 }
+
+/* v1.5.0: drag-and-drop uploads */
+.file-dropzone {
+    position: relative;
+    border: 2px dashed #aebbd0;
+    border-radius: 14px;
+    background: #f8faff;
+    padding: 0.9rem;
+    transition: border-color 0.15s ease, background 0.15s ease, box-shadow 0.15s ease;
+}
+.file-dropzone.is-dragover {
+    border-color: var(--primary);
+    background: #eef4ff;
+    box-shadow: 0 0 0 4px rgba(33, 84, 216, 0.12);
+}
+.file-dropzone.has-files { border-color: #76b88a; background: #f2fbf5; }
+.file-dropzone > input[type="file"] {
+    position: absolute !important;
+    width: 1px !important;
+    height: 1px !important;
+    padding: 0 !important;
+    margin: -1px !important;
+    overflow: hidden !important;
+    clip: rect(0, 0, 0, 0) !important;
+    white-space: nowrap !important;
+    border: 0 !important;
+}
+.file-dropzone-trigger {
+    width: 100%;
+    min-height: 118px;
+    border: 0;
+    background: transparent;
+    color: var(--text);
+    cursor: pointer;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 0.2rem;
+    text-align: center;
+    font: inherit;
+}
+.file-dropzone-trigger:focus-visible { outline: 3px solid rgba(33, 84, 216, 0.35); outline-offset: 3px; border-radius: 10px; }
+.file-dropzone-trigger:disabled { cursor: not-allowed; opacity: 0.55; }
+.file-dropzone-icon { font-size: 1.8rem; line-height: 1; color: var(--primary); }
+.file-dropzone-files { margin-top: 0.45rem; text-align: center; overflow-wrap: anywhere; }
+.file-dropzone.compact { padding: 0.55rem; }
+.file-dropzone.compact .file-dropzone-trigger { min-height: 72px; font-size: 0.86rem; }
+.file-dropzone.compact .file-dropzone-icon { font-size: 1.2rem; }
+.inline-dropzone { min-width: 190px; max-width: 260px; }
+.statement-dropzone { max-width: 760px; }
+
+/* v1.5.0: administrator receipt verification */
+.receipt-review-layout {
+    display: grid;
+    grid-template-columns: minmax(0, 1.15fr) minmax(360px, 0.85fr);
+    gap: 1.2rem;
+    align-items: start;
+}
+.receipt-preview-card,
+.receipt-review-card { min-width: 0; }
+.receipt-preview-frame {
+    display: block;
+    width: 100%;
+    min-height: 680px;
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    background: #fff;
+}
+.receipt-review-card { position: sticky; top: 86px; max-height: calc(100vh - 110px); overflow: auto; }
+.receipt-ai-details { margin: 1rem 0; }
+.detail-list { margin: 0; display: grid; gap: 0.55rem; }
+.detail-list > div { display: grid; grid-template-columns: minmax(130px, 0.42fr) minmax(0, 1fr); gap: 0.65rem; border-bottom: 1px solid var(--border); padding-bottom: 0.45rem; }
+.detail-list dt { color: var(--muted); font-size: 0.85rem; font-weight: 700; }
+.detail-list dd { margin: 0; overflow-wrap: anywhere; }
+.review-checklist-fieldset { border: 1px solid var(--border); border-radius: 12px; padding: 1rem; margin: 0 0 1rem; }
+.review-checklist-fieldset legend { font-weight: 800; padding: 0 0.35rem; }
+.review-checklist-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0.55rem; }
+.review-check-item { display: flex; align-items: flex-start; gap: 0.45rem; padding: 0.55rem; border: 1px solid var(--border); border-radius: 10px; margin: 0; background: #fff; }
+.review-check-item input { margin-top: 0.25rem; }
+.review-danger-actions { border-top: 1px solid var(--border); padding-top: 1rem; }
+
+@media (max-width: 980px) {
+    .receipt-review-layout { grid-template-columns: 1fr; }
+    .receipt-review-card { position: static; max-height: none; }
+    .receipt-preview-frame { min-height: 520px; }
+}
+
+@media (max-width: 620px) {
+    .review-checklist-grid { grid-template-columns: 1fr; }
+    .detail-list > div { grid-template-columns: 1fr; gap: 0.15rem; }
+    .receipt-preview-frame { min-height: 420px; }
+}

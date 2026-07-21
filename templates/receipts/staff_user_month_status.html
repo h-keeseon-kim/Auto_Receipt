@@ -52,8 +52,16 @@
         </div>
         <div class="form-row">
             {{ staff_upload_form.files.errors }}
-            {{ staff_upload_form.files.label_tag }}
-            {{ staff_upload_form.files }}
+            <label>領収書ファイル</label>
+            <div class="file-dropzone" data-file-dropzone>
+                {{ staff_upload_form.files }}
+                <button type="button" class="file-dropzone-trigger" data-file-dropzone-trigger>
+                    <span class="file-dropzone-icon" aria-hidden="true">＋</span>
+                    <strong>代理アップロードする領収書を選択</strong>
+                    <span>または1件以上のファイルをここへドラッグ＆ドロップ</span>
+                </button>
+                <div class="file-dropzone-files muted small" data-file-dropzone-files>ファイル未選択</div>
+            </div>
             {% if staff_upload_form.files.help_text %}<span class="helptext">{{ staff_upload_form.files.help_text }}</span>{% endif %}
         </div>
         <div class="actions">
@@ -67,7 +75,7 @@
     <div class="section-header">
         <div>
             <h2>アップロード済み領収書</h2>
-            <p class="muted">ユーザー本人と管理者代理のアップロードをまとめて確認できます。</p>
+            <p class="muted">ユーザー本人と管理者代理のアップロードをまとめて確認できます。「確認」から領収書本体、AIチェック、表示ファイル名まで確定できます。</p>
         </div>
     </div>
     {% if submission %}

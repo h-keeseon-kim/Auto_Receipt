@@ -33,6 +33,7 @@
             {% if receipt.ai_service_payee_check_memo %}<div class="danger small">{{ receipt.ai_service_payee_check_memo|truncatechars:120 }}</div>{% endif %}
             {% if receipt.ai_filename_admin_memo %}<div class="{% if receipt.ai_is_queued or receipt.is_ai_processing %}muted{% else %}danger{% endif %} small">{{ receipt.ai_filename_admin_memo|truncatechars:120 }}</div>{% endif %}
             {% if receipt.ai_period_check_memo %}<div class="muted small">{{ receipt.ai_period_check_memo|truncatechars:120 }}</div>{% endif %}
+            {% if receipt.admin_reviewed %}<div class="success small">管理者確認: {{ receipt.admin_reviewer_label }} / {{ receipt.admin_reviewed_at|date:"Y-m-d H:i" }}</div>{% endif %}
         </td>
         <td>
             <span class="badge {% if receipt.file_available %}submitted{% else %}neutral{% endif %}">{{ receipt.file_status_label }}</span>
@@ -42,6 +43,7 @@
         <td>{{ receipt.uploaded_at|date:"Y-m-d H:i" }}</td>
         <td>
             <div class="table-actions receipt-table-actions">
+                <a class="button small primary" href="{% url 'staff_receipt_review' receipt.pk %}">確認</a>
                 <a class="button small" href="{% url 'staff_submission_detail' receipt.submission.pk %}">詳細</a>
                 {% if receipt.file_available %}
                     <a class="button small" href="{% url 'download_receipt' receipt.pk %}">DL</a>
