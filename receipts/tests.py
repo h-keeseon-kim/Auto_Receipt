@@ -1398,6 +1398,7 @@ class StaffServiceAssignmentTests(TestCase):
         self.assertEqual(response.status_code, 302)
         self.assertIn("month=2026-06", response["Location"])
         self.assertIn(f"service={service.pk}", response["Location"])
+        self.assertIn("uploaded=2", response["Location"])
         submission = Submission.objects.get(user=self.user, period_month=date(2026, 6, 1))
         receipts = list(submission.receipts.order_by("original_filename"))
         self.assertEqual([receipt.original_filename for receipt in receipts], ["admin-a.pdf", "admin-b.pdf"])
@@ -1418,6 +1419,25 @@ class StaffServiceAssignmentTests(TestCase):
         self.assertContains(user_page, "admin-a.pdf")
         self.assertContains(user_page, "admin-b.pdf")
         self.assertContains(user_page, "管理者代理アップロード")
+
+    def test_staff_proxy_upload_page_switches_directly_between_users(self):
+        self.client.login(username="admin", password="admin-password-123")
+
+        response = self.client.get(
+            reverse("staff_user_month_status", args=[self.other_user.pk])
+            + "?month=2026-06&uploaded=1#staff-receipt-upload"
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "代理アップロード対象")
+        self.assertContains(response, "選択したユーザーへ")
+        self.assertContains(response, "次のユーザー")
+        self.assertContains(response, "1件の代理アップロードが完了しました")
+        expected_url = (
+            reverse("staff_user_month_status", args=[self.user.pk])
+            + "?month=2026-06#staff-receipt-upload"
+        )
+        self.assertContains(response, expected_url)
 
     def test_staff_proxy_upload_to_submitted_month_returns_it_to_draft(self):
         service = RegisteredService.objects.create(
@@ -3280,7 +3300,7 @@ class FinalWorkflowAcceptanceTests(TestCase):
         self.assertEqual(response.status_code, 404)
 
     def test_version_file_is_present_without_web_display_requirement(self):
-        self.assertEqual(Path("VERSION").read_text(encoding="utf-8").strip(), "1.5.0")
+        self.assertEqual(Path("VERSION").read_text(encoding="utf-8").strip(), "1.5.1")
 
 
 @override_settings(PASSWORD_HASHERS=FAST_PASSWORD_HASHERS)
@@ -3348,6 +3368,14 @@ class DragDropAndStaffReceiptReviewTests(TestCase):
         statement_page = self.client.get(reverse("staff_card_statements") + "?month=2026-07")
         self.assertContains(statement_page, "ご利用代金明細書を選択")
         self.assertContains(statement_page, "data-file-dropzone")
+
+        dropzone_script = Path("static/js/file_dropzone.js").read_text(encoding="utf-8")
+        self.assertIn("ここでファイルを離してください", dropzone_script)
+        self.assertIn("ドロップで受け付けました", dropzone_script)
+        self.assertIn("filedropzone:uploading", dropzone_script)
+        dropzone_css = Path("static/css/app.css").read_text(encoding="utf-8")
+        self.assertIn(".file-dropzone-drag-prompt", dropzone_css)
+        self.assertIn(".file-dropzone-selection-summary", dropzone_css)
 
     def test_staff_review_page_previews_and_allows_manual_confirmation(self):
         self.client.login(username=self.admin.username, password="admin-password-123")

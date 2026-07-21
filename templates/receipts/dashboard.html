@@ -181,6 +181,7 @@
     const memoInput = form.querySelector("textarea[name='memo']");
     const filePanel = form.querySelector("[data-receipt-file-picker-panel]");
     const fileInput = form.querySelector("input[type='file'][name='files']");
+    const dropzone = form.querySelector("[data-file-dropzone]");
     const pickerButton = form.querySelector("[data-receipt-file-picker-button]");
     const pickerLabel = form.querySelector("[data-receipt-file-picker-label]");
     const status = form.querySelector("[data-receipt-upload-status]");
@@ -233,7 +234,13 @@
         fileInput.addEventListener("change", function () {
             const count = fileInput.files ? fileInput.files.length : 0;
             if (!count) return;
-            if (status) status.textContent = `${count}件の領収書をアップロード中です...`;
+            const uploadingMessage = `${count}件の領収書をアップロード中です…`;
+            if (status) status.textContent = uploadingMessage;
+            if (dropzone && typeof CustomEvent === "function") {
+                dropzone.dispatchEvent(new CustomEvent("filedropzone:uploading", {
+                    detail: {message: uploadingMessage},
+                }));
+            }
             pickerButton.disabled = true;
             form.submit();
         });

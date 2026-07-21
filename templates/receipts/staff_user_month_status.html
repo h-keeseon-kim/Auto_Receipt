@@ -30,9 +30,43 @@
     <div class="section-header">
         <div>
             <h2>管理者代理アップロード</h2>
-            <p class="muted">ユーザー本人がアップロードできない場合に、対象サービスを選択して領収書を代理登録します。登録後はユーザー画面にも反映され、AI確認は通常どおり管理者が提出履歴から実行します。</p>
+            <p class="muted">ユーザー本人がアップロードできない場合に、対象サービスを選択して領収書を代理登録します。登録後はユーザー画面にも反映され、下の「確認」から領収書本体・AI検査・ファイル名修正まで行えます。</p>
         </div>
     </div>
+
+    <div class="proxy-upload-switcher" data-proxy-upload-switcher>
+        <div class="proxy-upload-switcher-current">
+            <span class="label">代理アップロード対象</span>
+            <strong>{{ managed_user.username }}</strong>
+            <span class="muted small">{{ proxy_user_position }} / {{ proxy_user_total }}</span>
+        </div>
+        <div class="proxy-upload-switcher-controls">
+            {% if previous_proxy_user %}
+                <a class="button small" href="{% url 'staff_user_month_status' previous_proxy_user.pk %}?month={{ selected_month|date:'Y-m' }}#staff-receipt-upload">← 前のユーザー</a>
+            {% endif %}
+            <label class="sr-only" for="proxy-upload-user-select">代理アップロード対象ユーザー</label>
+            <select id="proxy-upload-user-select" data-proxy-upload-user-select>
+                {% for account in proxy_users %}
+                    <option value="{% url 'staff_user_month_status' account.pk %}?month={{ selected_month|date:'Y-m' }}#staff-receipt-upload" {% if account.pk == managed_user.pk %}selected{% endif %}>{{ account.username }}</option>
+                {% endfor %}
+            </select>
+            <button type="button" class="button" data-proxy-upload-user-go>選択したユーザーへ</button>
+            {% if next_proxy_user %}
+                <a class="button small primary" href="{% url 'staff_user_month_status' next_proxy_user.pk %}?month={{ selected_month|date:'Y-m' }}#staff-receipt-upload">次のユーザー →</a>
+            {% endif %}
+        </div>
+    </div>
+
+    {% if proxy_upload_completed_count %}
+        <div class="proxy-upload-complete" role="status" aria-live="polite">
+            <span class="proxy-upload-complete-icon" aria-hidden="true">✓</span>
+            <div>
+                <strong>{{ proxy_upload_completed_count }}件の代理アップロードが完了しました。</strong>
+                <p>続けて別のユーザーへ登録する場合は、上のユーザー選択または「次のユーザー」を使用してください。</p>
+            </div>
+        </div>
+    {% endif %}
+
     <form method="post" enctype="multipart/form-data" class="form-grid staff-receipt-upload-form" data-staff-receipt-upload-form>
         {% csrf_token %}
         <input type="hidden" name="action" value="staff_add_receipts">
@@ -149,6 +183,24 @@
 
     if (serviceSelect) serviceSelect.addEventListener("change", refreshMemoField);
     refreshMemoField();
+
+    const userSwitcher = document.querySelector("[data-proxy-upload-switcher]");
+    if (userSwitcher) {
+        const userSelect = userSwitcher.querySelector("[data-proxy-upload-user-select]");
+        const goButton = userSwitcher.querySelector("[data-proxy-upload-user-go]");
+        const goToSelectedUser = function () {
+            if (userSelect && userSelect.value) window.location.assign(userSelect.value);
+        };
+        if (goButton) goButton.addEventListener("click", goToSelectedUser);
+        if (userSelect) {
+            userSelect.addEventListener("keydown", function (event) {
+                if (event.key === "Enter") {
+                    event.preventDefault();
+                    goToSelectedUser();
+                }
+            });
+        }
+    }
 })();
 </script>
 {% endblock %}

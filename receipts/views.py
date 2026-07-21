@@ -1471,8 +1471,24 @@ def staff_user_month_status(request, user_id: int):
                 )
                 return redirect(
                     f"{reverse('staff_user_month_status', args=[managed_user.pk])}"
-                    f"?month={month_query(selected_month)}&service={selected_value}#staff-receipt-upload"
+                    f"?month={month_query(selected_month)}&service={selected_value}&uploaded={count}#staff-receipt-upload"
                 )
+
+    proxy_users = list(managed_users_queryset())
+    proxy_user_index = next(
+        (index for index, account in enumerate(proxy_users) if account.pk == managed_user.pk),
+        0,
+    )
+    previous_proxy_user = proxy_users[proxy_user_index - 1] if proxy_user_index > 0 else None
+    next_proxy_user = (
+        proxy_users[proxy_user_index + 1]
+        if proxy_user_index + 1 < len(proxy_users)
+        else None
+    )
+    try:
+        proxy_upload_completed_count = max(int(request.GET.get("uploaded", "0")), 0)
+    except (TypeError, ValueError):
+        proxy_upload_completed_count = 0
 
     monthly_summary = build_user_month_summary(managed_user, selected_month)
     available_services = RegisteredService.objects.uploadable_for(managed_user, selected_month).select_related("catalog_service")
@@ -1500,6 +1516,12 @@ def staff_user_month_status(request, user_id: int):
             "global_statement_count": global_statement_count,
             "staff_upload_form": staff_upload_form,
             "selected_upload_choice": selected_upload_choice,
+            "proxy_users": proxy_users,
+            "proxy_user_position": proxy_user_index + 1,
+            "proxy_user_total": len(proxy_users),
+            "previous_proxy_user": previous_proxy_user,
+            "next_proxy_user": next_proxy_user,
+            "proxy_upload_completed_count": proxy_upload_completed_count,
         },
     )
 
