@@ -1,0 +1,257 @@
+{% extends "base.html" %}
+{% block title %}領収書アップロード - ReceiptHub{% endblock %}
+{% block content %}
+<div class="page-title" data-tutorial-target="upload-page">
+    <div>
+        <h1>領収書アップロード</h1>
+        <p class="muted">提出月の前月分にあたる領収書をアップロードし、内容を確認してから提出します。</p>
+    </div>
+    <form method="get" class="month-form" data-tutorial-target="upload-month-form">
+        {{ month_form.month.label_tag }}
+        {{ month_form.month }}
+        <button class="button" type="submit">表示</button>
+    </form>
+</div>
+
+<section class="status-grid">
+    <div class="card">
+        <span class="label">提出月</span>
+        <strong>{{ selected_month|date:"Y年m月" }}</strong>
+    </div>
+    <div class="card">
+        <span class="label">対象領収書月</span>
+        <strong>{{ target_receipt_month|date:"Y年m月" }}</strong>
+        <span class="muted small">提出月の前月</span>
+    </div>
+    <div class="card">
+        <span class="label">ステータス</span>
+        <strong class="badge {{ submission.status }}">{{ submission.get_status_display }}</strong>
+    </div>
+    <div class="card">
+        <span class="label">領収書数</span>
+        <strong>{{ submission.receipt_count }}</strong>
+    </div>
+    <div class="card">
+        <span class="label">提出対象の確認</span>
+        <strong>{{ monthly_summary.progress_label }}</strong>
+        {% if not monthly_summary.is_complete %}<span class="badge draft">未確認あり</span>{% else %}<span class="badge submitted">確認済み</span>{% endif %}
+    </div>
+    <div class="card">
+        <span class="label">ファイル保存期限</span>
+        <strong>最大{{ retention_months }}ヶ月</strong>
+    </div>
+</section>
+
+{% if monthly_summary.metered_rows %}
+<section class="card section api-usage-section" data-tutorial-target="api-usage-section">
+    <div class="section-header">
+        <div>
+            <h2>従量課金 / API利用確認</h2>
+            <p class="muted">対象領収書月に領収書が発生しなかったAPIサービスは「利用なし」を選択してください。利用があった場合は通常どおり領収書をアップロードします。</p>
+        </div>
+    </div>
+    <div class="table-wrap">
+        <table>
+            <thead><tr><th>サービス</th><th>対象領収書月ステータス</th><th>操作</th></tr></thead>
+            <tbody>
+                {% for row in monthly_summary.metered_rows %}
+                    <tr>
+                        <td><strong>{{ row.service.display_name }}</strong></td>
+                        <td><span class="badge {{ row.badge_class }}">{{ row.status_label }}</span></td>
+                        <td>
+                            {% if submission.is_submitted %}
+                                <span class="muted">提出済み</span>
+                            {% elif row.has_receipt %}
+                                <span class="muted">領収書登録済み</span>
+                            {% elif row.no_usage_declared %}
+                                <form method="post" class="inline-form">
+                                    {% csrf_token %}
+                                    <input type="hidden" name="action" value="clear_no_usage">
+                                    <input type="hidden" name="service_id" value="{{ row.service.pk }}">
+                                    <button type="submit" class="button small">利用なしを取り消す</button>
+                                </form>
+                            {% else %}
+                                <form method="post" class="inline-form" onsubmit="return confirm('対象領収書月はAPI利用がなく、領収書が発生していないことを記録しますか？');">
+                                    {% csrf_token %}
+                                    <input type="hidden" name="action" value="declare_no_usage">
+                                    <input type="hidden" name="service_id" value="{{ row.service.pk }}">
+                                    <button type="submit" class="button small">対象領収書月は利用なし</button>
+                                </form>
+                            {% endif %}
+                        </td>
+                    </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</section>
+{% endif %}
+
+{% if open_resubmission_requests %}
+    <section class="card section notice resubmission-request-box">
+        <h2>再提出依頼があります</h2>
+        <p>管理者確認により、以下の領収書は提出項目から削除されています。正しいファイルを再度アップロードして、提出してください。</p>
+        <div class="table-wrap">
+            <table>
+                <thead><tr><th>対象サービス</th><th>元ファイル</th><th>依頼日時</th><th>内容</th></tr></thead>
+                <tbody>
+                    {% for request_item in open_resubmission_requests %}
+                        <tr>
+                            <td>
+                                <strong>{{ request_item.service_display_name_snapshot }}</strong>
+                                {% if request_item.receipt_memo_snapshot %}<div class="muted small">{{ request_item.receipt_memo_snapshot|linebreaksbr }}</div>{% endif %}
+                            </td>
+                            <td>{{ request_item.display_filename|default:request_item.original_filename|default:"-" }}</td>
+                            <td>{{ request_item.created_at|date:"Y-m-d H:i" }}</td>
+                            <td>{{ request_item.message }}</td>
+                        </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+    </section>
+{% endif %}
+
+{% if submission.is_submitted %}
+    <section class="card section notice">
+        <h2>提出済みです</h2>
+        <p>ファイル修正は可能です。登録サービスまたは「その他」に領収書を追加すると、この提出月は自動的に下書きへ戻るため、内容を確認して再度提出してください。</p>
+        <a class="button primary" href="{{ submission.get_absolute_url }}">提出内容を見る</a>
+    </section>
+{% endif %}
+
+<section class="card section" data-tutorial-target="receipt-add-form">
+    <div class="section-header receipt-add-header">
+        <div>
+            <h2>領収書を追加</h2>
+            <p class="muted">対象領収書月（{{ target_receipt_month|date:"Y年m月" }}）のサービスを選び、「＋ 領収書を追加」からファイルを選択します。同じサービスへ複数の領収書を追加でき、一度に複数ファイルも選択できます。</p>
+        </div>
+    </div>
+
+    <form method="post" enctype="multipart/form-data" class="form-grid receipt-batch-upload-form" data-receipt-batch-upload-form>
+        {% csrf_token %}
+        <input type="hidden" name="action" value="add_receipts">
+        {{ upload_form.non_field_errors }}
+        <div class="form-row">
+            {{ upload_form.service.errors }}
+            {{ upload_form.service.label_tag }}
+            {{ upload_form.service }}
+            {% if upload_form.service.help_text %}<span class="helptext">{{ upload_form.service.help_text }}</span>{% endif %}
+        </div>
+        <div class="form-row other-receipt-memo-field" data-other-receipt-memo-field hidden>
+            {{ upload_form.memo.errors }}
+            {{ upload_form.memo.label_tag }}
+            {{ upload_form.memo }}
+            {% if upload_form.memo.help_text %}<span class="helptext">{{ upload_form.memo.help_text }}</span>{% endif %}
+        </div>
+        <div class="form-row receipt-file-picker-panel" data-receipt-file-picker-panel hidden>
+            {{ upload_form.files.errors }}
+            <div class="file-dropzone" data-file-dropzone>
+                {{ upload_form.files }}
+                <button type="button" class="file-dropzone-trigger receipt-file-picker-button" data-file-dropzone-trigger data-receipt-file-picker-button>
+                    <span class="file-dropzone-icon" aria-hidden="true">＋</span>
+                    <strong data-receipt-file-picker-label>領収書を追加</strong>
+                    <span>または領収書をここへドラッグ＆ドロップ</span>
+                </button>
+                <div class="file-dropzone-files muted small" data-file-dropzone-files>ファイル未選択</div>
+            </div>
+            {% if upload_form.files.help_text %}<span class="helptext">{{ upload_form.files.help_text }}</span>{% endif %}
+            <p class="muted small auto-upload-note">ファイル選択後、自動で下の「アップロード済み領収書」に追加されます。</p>
+        </div>
+        <p class="muted small auto-upload-status" data-receipt-upload-status aria-live="polite"></p>
+    </form>
+</section>
+
+<section class="card section" data-tutorial-target="uploaded-receipts-section">
+    <div class="section-header">
+        <h2>アップロード済み領収書</h2>
+        {% if not submission.is_submitted %}
+            <form method="post" onsubmit="return confirm('この内容で提出しますか？提出後に領収書を追加した場合は、提出月が下書きへ戻り再提出が必要になります。');">
+                {% csrf_token %}
+                <input type="hidden" name="action" value="submit">
+                <button type="submit" class="button primary" data-tutorial-target="submit-receipts-button">提出する</button>
+            </form>
+        {% endif %}
+    </div>
+    {% include "receipts/_receipt_table.html" with receipts=receipts submission=submission %}
+</section>
+
+<script>
+(function () {
+    const form = document.querySelector("[data-receipt-batch-upload-form]");
+    if (!form) return;
+
+    const serviceSelect = form.querySelector("select[name='service']");
+    const memoField = form.querySelector("[data-other-receipt-memo-field]");
+    const memoInput = form.querySelector("textarea[name='memo']");
+    const filePanel = form.querySelector("[data-receipt-file-picker-panel]");
+    const fileInput = form.querySelector("input[type='file'][name='files']");
+    const dropzone = form.querySelector("[data-file-dropzone]");
+    const pickerButton = form.querySelector("[data-receipt-file-picker-button]");
+    const pickerLabel = form.querySelector("[data-receipt-file-picker-label]");
+    const status = form.querySelector("[data-receipt-upload-status]");
+
+    function selectedLabel() {
+        if (!serviceSelect || serviceSelect.selectedIndex < 0) return "";
+        return serviceSelect.options[serviceSelect.selectedIndex].text || "";
+    }
+
+    function refreshUploadControls() {
+        const value = serviceSelect ? serviceSelect.value : "";
+        const isOther = value === "other";
+        const hasMemo = Boolean(memoInput && memoInput.value.trim());
+        const ready = Boolean(value) && (!isOther || hasMemo);
+
+        if (memoField) memoField.hidden = !isOther;
+        if (filePanel) filePanel.hidden = !ready;
+        if (pickerButton) pickerButton.disabled = !ready;
+        if (fileInput) fileInput.disabled = !ready;
+        if (pickerLabel) {
+            pickerLabel.textContent = value ? `${selectedLabel()}の領収書を追加` : "領収書を追加";
+        }
+        if (status) {
+            if (!value) {
+                status.textContent = "サービスを選択すると、領収書追加ボタンが表示されます。";
+            } else if (isOther && !hasMemo) {
+                status.textContent = "「その他」の内容メモを入力すると、領収書追加ボタンが表示されます。";
+            } else {
+                status.textContent = "";
+            }
+        }
+    }
+
+    if (serviceSelect) {
+        serviceSelect.addEventListener("change", function () {
+            if (fileInput) fileInput.value = "";
+            if (memoInput && serviceSelect.value !== "other") memoInput.value = "";
+            refreshUploadControls();
+        });
+    }
+
+    if (memoInput) {
+        memoInput.addEventListener("input", function () {
+            if (fileInput && !memoInput.value.trim()) fileInput.value = "";
+            refreshUploadControls();
+        });
+    }
+
+    if (pickerButton && fileInput) {
+        fileInput.addEventListener("change", function () {
+            const count = fileInput.files ? fileInput.files.length : 0;
+            if (!count) return;
+            const uploadingMessage = `${count}件の領収書をアップロード中です…`;
+            if (status) status.textContent = uploadingMessage;
+            if (dropzone && typeof CustomEvent === "function") {
+                dropzone.dispatchEvent(new CustomEvent("filedropzone:uploading", {
+                    detail: {message: uploadingMessage},
+                }));
+            }
+            pickerButton.disabled = true;
+            form.submit();
+        });
+    }
+
+    refreshUploadControls();
+})();
+</script>
+{% endblock %}

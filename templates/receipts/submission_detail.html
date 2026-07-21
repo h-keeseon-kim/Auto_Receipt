@@ -1,0 +1,21 @@
+{% extends "base.html" %}
+{% block title %}提出詳細 - ReceiptHub{% endblock %}
+{% block content %}
+<div class="page-title">
+    <div>
+        <h1>{{ submission.period_month|date:"Y年m月" }} 提出詳細</h1>
+        <p class="muted">提出したサービスと領収書ファイルの状態を確認できます。</p>
+    </div>
+    <a class="button" href="{% url 'history' %}">履歴へ</a>
+</div>
+<section class="status-grid">
+    <div class="card"><span class="label">提出月</span><strong>{{ submission.period_month|date:"Y年m月" }}</strong></div>
+    <div class="card"><span class="label">対象領収書月</span><strong>{{ submission.target_receipt_month|date:"Y年m月" }}</strong></div>
+    <div class="card"><span class="label">ステータス</span><strong class="badge {{ submission.status }}">{{ submission.get_status_display }}</strong></div>
+    <div class="card"><span class="label">提出日時</span><strong>{{ submission.submitted_at|date:"Y-m-d H:i"|default:"-" }}</strong></div>
+    <div class="card"><span class="label">領収書数</span><strong>{{ submission.receipt_count }}</strong></div>
+</section>
+<section class="card section">
+    {% include "receipts/_receipt_table.html" with receipts=submission.receipts.all submission=submission %}
+</section>
+{% endblock %}

@@ -1,0 +1,121 @@
+{% extends "base.html" %}
+{% block title %}利用サービス管理 - ReceiptHub{% endblock %}
+{% block content %}
+<div class="page-title" data-tutorial-target="user-services-page">
+    <div>
+        <h1>利用サービス管理</h1>
+        <p class="muted">サービスマスターに登録済みのサービスは自分で利用登録できます。一覧にない新規サービスだけ、例外申請を行ってください。</p>
+    </div>
+</div>
+
+<section class="status-grid">
+    <div class="card"><span class="label">利用中サービス</span><strong>{{ active_services|length }}</strong></div>
+    <div class="card"><span class="label">停止済みサービス</span><strong>{{ stopped_services|length }}</strong></div>
+    <div class="card"><span class="label">利用登録できるサービス</span><strong>{{ available_catalog_count }}</strong></div>
+    <div class="card"><span class="label">確認待ちの例外申請</span><strong>{{ pending_exception_count }}</strong></div>
+</section>
+
+<section class="card section" data-tutorial-target="active-services-section">
+    <div class="section-header">
+        <div>
+            <h2>利用中サービス</h2>
+            <p class="muted">領収書アップロード時に通常表示されるサービスです。</p>
+        </div>
+        <div class="actions">
+            <a class="button primary" href="{% url 'user_service_create' %}" data-tutorial-target="service-registration-button">サービス利用登録</a>
+        </div>
+    </div>
+    <div class="table-wrap">
+        <table>
+            <thead><tr><th>サービス</th><th>種別</th><th>登録元</th><th>メモ</th><th>操作</th></tr></thead>
+            <tbody>
+                {% for service in active_services %}
+                    <tr>
+                        <td><strong>{{ service.display_name }}</strong></td>
+                        <td>{{ service.get_billing_type_display }}</td>
+                        <td><span class="badge {{ service.source_badge_class }}">{{ service.get_registration_source_display }}</span></td>
+                        <td>{{ service.memo|default:"-"|truncatechars:80 }}</td>
+                        <td class="actions">
+                            <a class="button small danger-outline" href="{% url 'user_service_stop' service.pk %}" data-tutorial-target="service-stop-button">利用停止</a>
+                        </td>
+                    </tr>
+                {% empty %}
+                    <tr><td colspan="5" class="muted center">利用中サービスはありません。「サービス利用登録」からサービスマスターに登録済みのサービスを選択してください。</td></tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</section>
+
+<section class="card section" data-tutorial-target="service-exception-section">
+    <div class="section-header">
+        <div>
+            <h2>サービスマスターにない新規サービス</h2>
+            <p class="muted">「サービス利用登録」の一覧に存在しないサービスを新たに使いたい場合だけ、例外申請を提出します。</p>
+        </div>
+        <div class="actions">
+            <a class="button" href="{% url 'service_exception_request_create' %}" data-tutorial-target="service-exception-button">新規サービス例外申請</a>
+        </div>
+    </div>
+    <div class="notice compact-notice">
+        <strong>サービス登録と例外申請は別の手続きです</strong>
+        <p class="muted small">サービスマスターにあるサービスは「サービス利用登録」から即時登録します。サービスマスターにない新規サービスだけ、サービス名・支払い方法・用途を記載して管理者へ申請してください。</p>
+    </div>
+</section>
+
+<section class="card section" data-tutorial-target="service-exception-history-section">
+    <div class="section-header">
+        <div>
+            <h2>例外申請履歴</h2>
+            <p class="muted">サービスマスターに存在しなかった新規サービスについて、確認待ち・承認済み・却下と管理者コメントを確認できます。</p>
+        </div>
+    </div>
+    <div class="table-wrap">
+        <table>
+            <thead><tr><th>サービス</th><th>支払い方法</th><th>用途</th><th>ステータス</th><th>申請日時</th><th>管理者コメント</th></tr></thead>
+            <tbody>
+                {% for request_item in exception_requests %}
+                    <tr>
+                        <td><strong>{{ request_item.service_name }}</strong></td>
+                        <td>{{ request_item.get_billing_type_display }}</td>
+                        <td>{{ request_item.purpose|linebreaksbr }}</td>
+                        <td><span class="badge {{ request_item.badge_class }}">{{ request_item.get_status_display }}</span></td>
+                        <td>{{ request_item.created_at|date:"Y-m-d H:i" }}</td>
+                        <td>{{ request_item.review_note|default:"-"|linebreaksbr }}</td>
+                    </tr>
+                {% empty %}
+                    <tr><td colspan="6" class="muted center">例外申請はありません。</td></tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</section>
+
+<section class="card section" data-tutorial-target="stopped-services-section">
+    <div class="section-header">
+        <div>
+            <h2>停止済みサービス</h2>
+            <p class="muted">停止済みサービスは通常の項目から外れます。最終領収書月までの提出では、領収書アップロード画面の選択肢に残ります。</p>
+        </div>
+    </div>
+    <div class="table-wrap">
+        <table>
+            <thead><tr><th>サービス</th><th>種別</th><th>停止元</th><th>最終領収書月</th><th>停止日時</th><th>メモ</th></tr></thead>
+            <tbody>
+                {% for service in stopped_services %}
+                    <tr>
+                        <td><strong>{{ service.display_name }}</strong></td>
+                        <td>{{ service.get_billing_type_display }}</td>
+                        <td>{% if service.deactivation_source %}<span class="badge {{ service.stop_badge_class }}">{{ service.get_deactivation_source_display }}</span>{% else %}-{% endif %}</td>
+                        <td>{% if service.final_receipt_month %}{{ service.final_receipt_month|date:"Y年m月" }}{% else %}-{% endif %}</td>
+                        <td>{{ service.deactivated_at|date:"Y-m-d H:i"|default:"-" }}</td>
+                        <td>{{ service.stop_note|default:"-"|truncatechars:80 }}</td>
+                    </tr>
+                {% empty %}
+                    <tr><td colspan="6" class="muted center">停止済みサービスはありません。</td></tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</section>
+{% endblock %}

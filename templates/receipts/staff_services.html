@@ -1,0 +1,191 @@
+{% extends "base.html" %}
+{% block title %}利用サービス管理 - ReceiptHub{% endblock %}
+{% block content %}
+<div class="page-title">
+    <div>
+        <h1>利用サービス管理</h1>
+        <p class="muted">サービスマスターとユーザー別サービス状況を、タブで切り替えて管理します。</p>
+    </div>
+</div>
+
+<nav class="management-tabs" aria-label="利用サービス管理の表示切替">
+    <a class="management-tab {% if active_tab == 'catalog' %}active{% endif %}" href="?tab=catalog" {% if active_tab == 'catalog' %}aria-current="page"{% endif %}>サービスマスター</a>
+    <a class="management-tab {% if active_tab == 'users' %}active{% endif %}" href="?tab=users{% if selected_user %}&user={{ selected_user.pk }}{% endif %}" {% if active_tab == 'users' %}aria-current="page"{% endif %}>ユーザー別サービス状況</a>
+</nav>
+
+{% if active_tab == "catalog" %}
+<section class="card section tab-panel" data-tutorial-target="staff-service-catalog-section">
+    <div class="section-header">
+        <div>
+            <h2>サービスマスター</h2>
+            <p class="muted">管理者による登録、または例外申請の承認時に利用するサービスマスターです。</p>
+        </div>
+        <a class="button" href="{% url 'staff_catalog_create' %}">サービスマスター登録</a>
+    </div>
+    <div class="table-wrap table-scroll-wide">
+        <table>
+            <thead><tr><th>サービス</th><th>種別</th><th>カード明細・払先候補</th><th>状態</th><th>利用中ユーザー</th><th>割当合計</th><th>メモ</th><th>操作</th></tr></thead>
+            <tbody>
+                {% for catalog in catalog_page_obj %}
+                    <tr>
+                        <td><strong>{{ catalog.display_name }}</strong></td>
+                        <td>{{ catalog.get_billing_type_display }}</td>
+                        <td>{{ catalog.merchant_aliases|default:"-"|linebreaksbr|truncatechars_html:120 }}</td>
+                        <td>{% if catalog.is_active %}<span class="badge submitted">選択可能</span>{% else %}<span class="badge neutral">停止中</span>{% endif %}</td>
+                        <td>{{ catalog.active_user_count }}</td>
+                        <td>{{ catalog.assigned_count }}</td>
+                        <td>{{ catalog.memo|default:"-"|truncatechars:80 }}</td>
+                        <td class="actions">
+                            <a class="button small" href="{% url 'staff_catalog_update' catalog.pk %}">編集</a>
+                            {% if catalog.is_active %}
+                                <form method="post" action="{% url 'staff_catalog_archive' catalog.pk %}" onsubmit="return confirm('このサービスマスターを新規選択不可にしますか？既存の利用登録は維持されます。');">
+                                    {% csrf_token %}
+                                    <input type="hidden" name="next" value="{{ request.get_full_path }}">
+                                    <button class="button small danger-outline" type="submit">停止</button>
+                                </form>
+                            {% else %}
+                                <form method="post" action="{% url 'staff_catalog_activate' catalog.pk %}">
+                                    {% csrf_token %}
+                                    <input type="hidden" name="next" value="{{ request.get_full_path }}">
+                                    <button class="button small" type="submit">再開</button>
+                                </form>
+                            {% endif %}
+                        </td>
+                    </tr>
+                {% empty %}
+                    <tr><td colspan="8" class="muted center">サービスマスターがまだ登録されていません。</td></tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+    {% if catalog_page_obj.paginator.num_pages > 1 %}
+        <nav class="pagination" aria-label="サービスマスターのページ">
+            {% if catalog_page_obj.has_previous %}
+                <a class="button small" href="?tab=catalog&catalog_page={{ catalog_page_obj.previous_page_number }}">前へ</a>
+            {% endif %}
+            <span class="muted small">{{ catalog_page_obj.number }} / {{ catalog_page_obj.paginator.num_pages }}ページ</span>
+            {% if catalog_page_obj.has_next %}
+                <a class="button small" href="?tab=catalog&catalog_page={{ catalog_page_obj.next_page_number }}">次へ</a>
+            {% endif %}
+        </nav>
+    {% endif %}
+</section>
+{% else %}
+<section class="card section tab-panel" data-tutorial-target="staff-user-service-status-section">
+    <div class="section-header">
+        <div>
+            <h2>ユーザー別サービス状況</h2>
+            <p class="muted">ユーザーを選択して、登録状況、登録サービス一覧、新規登録/停止を確認します。</p>
+        </div>
+        {% if selected_user %}
+            <a class="button primary" href="{% url 'staff_user_services' selected_user.pk %}">このユーザーへサービス登録</a>
+        {% endif %}
+    </div>
+    <form method="get" class="filter-form">
+        <input type="hidden" name="tab" value="users">
+        <label for="staff-service-user">対象ユーザー</label>
+        <select id="staff-service-user" name="user" onchange="this.form.submit()">
+            <option value="">ユーザーを選択</option>
+            {% for account in users %}
+                <option value="{{ account.pk }}" {% if selected_user and account.pk == selected_user.pk %}selected{% endif %}>{{ account.username }}</option>
+            {% endfor %}
+        </select>
+        <button class="button" type="submit">表示</button>
+    </form>
+
+    {% if selected_user %}
+        <div class="subsection">
+            <div class="section-header compact">
+                <div>
+                    <h3>登録状況</h3>
+                    <p class="muted">{{ selected_user.username }} の利用サービス集計です。</p>
+                </div>
+            </div>
+            <section class="status-grid compact-grid">
+                <div class="card"><span class="label">ユーザー</span><strong>{{ selected_user.username }}</strong></div>
+                <div class="card"><span class="label">利用中サービス</span><strong>{{ selected_user.active_service_count }}</strong></div>
+                <div class="card"><span class="label">登録サービス合計</span><strong>{{ selected_user.total_service_count }}</strong></div>
+                <div class="card"><span class="label">ユーザー起点登録</span><strong>{{ selected_user.user_registered_count }}</strong></div>
+                <div class="card"><span class="label">ユーザー停止</span><strong>{{ selected_user.user_stopped_count }}</strong></div>
+            </section>
+        </div>
+
+        <div class="subsection">
+            <div class="section-header compact">
+                <div>
+                    <h3>登録サービス一覧</h3>
+                    <p class="muted">停止中のサービスは通常の利用サービス一覧から外れます。ユーザー停止の場合は最終領収書月を確認できます。</p>
+                </div>
+            </div>
+            <div class="table-wrap scroll-box large table-scroll-wide">
+                <table>
+                    <thead><tr><th>サービス</th><th>種別</th><th>状態</th><th>登録元</th><th>停止元</th><th>最終領収書月</th><th>メモ</th><th>操作</th></tr></thead>
+                    <tbody>
+                        {% for service in services %}
+                            <tr>
+                                <td><strong>{{ service.display_name }}</strong></td>
+                                <td>{{ service.get_billing_type_display }}</td>
+                                <td>{% if service.is_active %}<span class="badge submitted">利用中</span>{% else %}<span class="badge neutral">停止中</span>{% endif %}</td>
+                                <td><span class="badge {{ service.source_badge_class }}">{{ service.get_registration_source_display }}</span></td>
+                                <td>{% if service.deactivation_source %}<span class="badge {{ service.stop_badge_class }}">{{ service.get_deactivation_source_display }}</span>{% else %}-{% endif %}</td>
+                                <td>{% if service.final_receipt_month %}{{ service.final_receipt_month|date:"Y年m月" }}{% else %}-{% endif %}</td>
+                                <td>{{ service.memo|default:service.stop_note|default:"-"|truncatechars:80 }}</td>
+                                <td class="actions">
+                                    <a class="button small" href="{% url 'staff_service_update' service.pk %}">編集</a>
+                                    {% if service.is_active %}
+                                        <form method="post" action="{% url 'staff_service_archive' service.pk %}" onsubmit="return confirm('このサービスを停止しますか？ユーザーの通常選択肢から外れます。');">
+                                            {% csrf_token %}
+                                            <input type="hidden" name="next" value="{{ request.get_full_path }}">
+                                            <button class="button small danger-outline" type="submit">停止</button>
+                                        </form>
+                                    {% else %}
+                                        <form method="post" action="{% url 'staff_service_activate' service.pk %}">
+                                            {% csrf_token %}
+                                            <input type="hidden" name="next" value="{{ request.get_full_path }}">
+                                            <button class="button small" type="submit">再開</button>
+                                        </form>
+                                    {% endif %}
+                                </td>
+                            </tr>
+                        {% empty %}
+                            <tr><td colspan="8" class="muted center">このユーザーの登録サービスはまだありません。</td></tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+        </div>
+
+        <div class="subsection">
+            <div class="section-header compact">
+                <div>
+                    <h3>新規登録/停止</h3>
+                    <p class="muted">例外申請の承認による登録、過去のユーザー登録、またはユーザーによる利用停止を新しい順に表示します。</p>
+                </div>
+            </div>
+            <div class="table-wrap scroll-box medium table-scroll-wide">
+                <table>
+                    <thead><tr><th>サービス</th><th>登録元</th><th>状態</th><th>停止元</th><th>最終領収書月</th><th>メモ</th><th>更新日時</th></tr></thead>
+                    <tbody>
+                        {% for service in user_change_services %}
+                            <tr>
+                                <td><strong>{{ service.display_name }}</strong></td>
+                                <td><span class="badge {{ service.source_badge_class }}">{{ service.get_registration_source_display }}</span></td>
+                                <td>{% if service.is_active %}<span class="badge submitted">利用中</span>{% else %}<span class="badge neutral">停止中</span>{% endif %}</td>
+                                <td>{% if service.deactivation_source %}<span class="badge {{ service.stop_badge_class }}">{{ service.get_deactivation_source_display }}</span>{% else %}-{% endif %}</td>
+                                <td>{% if service.final_receipt_month %}{{ service.final_receipt_month|date:"Y年m月" }}{% else %}-{% endif %}</td>
+                                <td>{{ service.stop_note|default:service.memo|default:"-"|truncatechars:80 }}</td>
+                                <td>{{ service.updated_at|date:"Y-m-d H:i" }}</td>
+                            </tr>
+                        {% empty %}
+                            <tr><td colspan="7" class="muted center">このユーザーの新規登録/停止はまだありません。</td></tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    {% else %}
+        <p class="muted center empty-state">対象ユーザーを選択してください。</p>
+    {% endif %}
+</section>
+{% endif %}
+{% endblock %}
