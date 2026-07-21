@@ -3336,7 +3336,7 @@ class FinalWorkflowAcceptanceTests(TestCase):
         self.assertEqual(response.status_code, 404)
 
     def test_version_file_is_present_without_web_display_requirement(self):
-        self.assertEqual(Path("VERSION").read_text(encoding="utf-8").strip(), "1.5.2")
+        self.assertEqual(Path("VERSION").read_text(encoding="utf-8").strip(), "1.5.3")
 
 
 @override_settings(PASSWORD_HASHERS=FAST_PASSWORD_HASHERS)
@@ -3412,6 +3412,16 @@ class DragDropAndStaffReceiptReviewTests(TestCase):
         dropzone_css = Path("static/css/app.css").read_text(encoding="utf-8")
         self.assertIn(".file-dropzone-drag-prompt", dropzone_css)
         self.assertIn(".file-dropzone-selection-summary", dropzone_css)
+
+    def test_staff_preview_allows_only_same_origin_embedding(self):
+        self.client.login(username=self.admin.username, password="admin-password-123")
+        response = self.client.get(reverse("staff_preview_receipt", args=[self.receipt.pk]))
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response["X-Frame-Options"], "SAMEORIGIN")
+        self.assertEqual(response["Content-Security-Policy"], "frame-ancestors 'self'")
+        self.assertEqual(response["Cache-Control"], "private, no-store")
+        self.assertEqual(response["Content-Type"], "application/pdf")
+        self.assertIn("inline", response["Content-Disposition"])
 
     def test_staff_review_page_previews_and_allows_manual_confirmation(self):
         self.client.login(username=self.admin.username, password="admin-password-123")

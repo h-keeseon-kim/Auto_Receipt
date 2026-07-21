@@ -25,6 +25,7 @@ from django.template.loader import render_to_string
 from django.urls import reverse, reverse_lazy
 from django.utils import timezone
 from django.utils.text import slugify
+from django.views.decorators.clickjacking import xframe_options_sameorigin
 from django.views.decorators.http import require_POST
 
 from .ai_processing import claim_pending_receipts_for_ai_processing, reset_ai_processing_state, start_background_ai_processing
@@ -1246,6 +1247,7 @@ def staff_receipt_ai_status(request, pk: int):
 
 
 @staff_member_required
+@xframe_options_sameorigin
 def staff_preview_receipt(request, pk: int):
     receipt = get_object_or_404(staff_receipt_queryset(), pk=pk)
     if not receipt.file_available:
@@ -1265,6 +1267,8 @@ def staff_preview_receipt(request, pk: int):
         content_type=content_type,
     )
     response["X-Content-Type-Options"] = "nosniff"
+    response["Content-Security-Policy"] = "frame-ancestors 'self'"
+    response["Cache-Control"] = "private, no-store"
     return response
 
 

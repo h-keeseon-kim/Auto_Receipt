@@ -1071,3 +1071,8 @@ body.tutorial-open { overflow-x: hidden; }
     .proxy-upload-switcher-controls { justify-content: flex-start; }
     .proxy-upload-switcher-controls select { width: 100%; min-width: 0; }
 }
+
+.receipt-preview-actions {
+    margin-top: 0.75rem;
+    justify-content: flex-end;
+}

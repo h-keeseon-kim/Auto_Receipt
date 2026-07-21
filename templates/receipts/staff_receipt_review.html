@@ -32,6 +32,10 @@
         </div>
         {% if receipt.file_available %}
             <iframe class="receipt-preview-frame" src="{% url 'staff_preview_receipt' receipt.pk %}" title="{{ receipt.display_filename }} のプレビュー"></iframe>
+            <div class="actions receipt-preview-actions">
+                <a class="button" href="{% url 'staff_preview_receipt' receipt.pk %}" target="_blank" rel="noopener">新しいタブで表示</a>
+                <a class="button" href="{% url 'download_receipt' receipt.pk %}">ダウンロード</a>
+            </div>
         {% else %}
             <div class="empty-state muted center">領収書ファイルは保存されていません。</div>
         {% endif %}
