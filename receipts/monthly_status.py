@@ -90,6 +90,25 @@ class UserMonthSummary:
         return tuple(row for row in self.rows if not row.is_metered)
 
     @property
+    def required_service_count(self) -> int:
+        """領収書の提出が必須となるサービス数。
+
+        現在の運用では、従量課金 / API以外のサービスを必須提出として扱う。
+        """
+
+        return len(self.non_metered_rows)
+
+    @property
+    def usage_based_service_count(self) -> int:
+        """利用があった月だけ領収書を提出するサービス数。
+
+        従量課金 / APIは、領収書の提出または「この月は利用なし」の申告で
+        その月の対応が完了する。
+        """
+
+        return len(self.metered_rows)
+
+    @property
     def missing_required(self) -> tuple[ServiceMonthStatus, ...]:
         return tuple(row for row in self.rows if row.status_code == "missing")
 

@@ -1234,8 +1234,8 @@ class ReceiptFlowTests(TestCase):
         self.assertEqual(submission.status, SubmissionStatus.DRAFT)
         self.assertEqual(submission.receipts.count(), 1)
 
-    def test_user_history_uses_receipt_month_and_service_progress_columns(self):
-        RegisteredService.objects.create(
+    def test_user_history_splits_required_and_usage_based_services_and_hides_file_count(self):
+        subscription = RegisteredService.objects.create(
             user=self.user,
             name="Slack",
             billing_type=BillingType.SUBSCRIPTION,
@@ -1243,11 +1243,18 @@ class ReceiptFlowTests(TestCase):
         submission = Submission.objects.create(user=self.user, period_month=date(2026, 7, 1))
         Receipt.objects.create(
             submission=submission,
-            service=self.service,
-            service_name_snapshot=self.service.name,
-            billing_type_snapshot=self.service.billing_type,
+            service=subscription,
+            service_name_snapshot=subscription.name,
+            billing_type_snapshot=subscription.billing_type,
             file=SimpleUploadedFile("receipt.pdf", b"%PDF-1.4 receipt", content_type="application/pdf"),
             original_filename="receipt.pdf",
+        )
+        MonthlyServiceDeclaration.objects.create(
+            user=self.user,
+            service=self.service,
+            period_month=date(2026, 7, 1),
+            no_usage=True,
+            declared_by=self.user,
         )
         self.client.login(username="alice", password="password123")
 
@@ -1256,10 +1263,23 @@ class ReceiptFlowTests(TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertContains(response, "領収書発行月")
         self.assertContains(response, "サービス登録数")
-        self.assertContains(response, "未提出・未確認サービス数")
-        self.assertContains(response, "未提出領収書あり")
+        self.assertContains(response, "必須提出（サブスク等）")
+        self.assertContains(response, "利用時提出（API等）")
+        self.assertContains(response, "対応済みサービス数")
+        self.assertContains(response, "未対応サービス数")
+        self.assertContains(response, "必須提出にはサブスク・一回払い・支払い種別「その他」の登録サービス")
+        self.assertContains(response, "同じサービスへ複数の領収書を追加しても、1サービスとして数えます")
+        self.assertNotContains(response, "領収書数")
+        self.assertNotContains(response, "確認済みサービス数")
         self.assertNotContains(response, "提出日時")
         self.assertNotContains(response, "最終提出日時")
+
+        row = response.context["history_rows"][0]
+        self.assertEqual(row["required_service_count"], 1)
+        self.assertEqual(row["usage_based_service_count"], 1)
+        self.assertEqual(row["total_service_count"], 2)
+        self.assertEqual(row["resolved_service_count"], 2)
+        self.assertEqual(row["remaining_service_count"], 0)
 
     def test_ai_payload_extracts_recipient_name_as_independent_review_item(self):
         result = build_result_from_ai_payload(
@@ -4024,7 +4044,7 @@ class FinalWorkflowAcceptanceTests(TestCase):
         self.assertEqual(response.status_code, 404)
 
     def test_version_file_is_present_without_web_display_requirement(self):
-        self.assertEqual(Path("VERSION").read_text(encoding="utf-8").strip(), "1.7.1")
+        self.assertEqual(Path("VERSION").read_text(encoding="utf-8").strip(), "1.7.2")
 
 
 @override_settings(PASSWORD_HASHERS=FAST_PASSWORD_HASHERS)

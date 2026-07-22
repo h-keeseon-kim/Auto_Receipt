@@ -2105,10 +2105,11 @@ def history(request):
                 "submission": submission,
                 "receipt_month": submission.target_receipt_month,
                 "status_label": submission.get_status_display(),
-                "service_count": summary.total_services,
+                "required_service_count": summary.required_service_count,
+                "usage_based_service_count": summary.usage_based_service_count,
+                "total_service_count": summary.total_services,
                 "resolved_service_count": summary.resolved_count,
                 "remaining_service_count": remaining_service_count,
-                "receipt_count": submission.receipt_count,
             }
         )
     return render(request, "receipts/history.html", {"history_rows": rows})

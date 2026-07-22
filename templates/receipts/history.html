@@ -8,6 +8,11 @@
     </div>
 </div>
 <section class="card section" data-tutorial-target="history-table">
+    <p class="muted small history-progress-help">
+        必須提出にはサブスク・一回払い・支払い種別「その他」の登録サービス、利用時提出には従量課金 / APIが含まれます。
+        対応済みサービス数は、領収書を1件以上提出したサービスと、従量課金 / APIで「この月は利用なし」を申告したサービスの合計です。
+        同じサービスへ複数の領収書を追加しても、1サービスとして数えます。
+    </p>
     <div class="table-wrap">
         <table>
             <thead>
@@ -15,9 +20,8 @@
                     <th>領収書発行月</th>
                     <th>ステータス</th>
                     <th>サービス登録数</th>
-                    <th>確認済みサービス数</th>
-                    <th>未提出・未確認サービス数</th>
-                    <th>領収書数</th>
+                    <th>対応済みサービス数</th>
+                    <th>未対応サービス数</th>
                     <th>操作</th>
                 </tr>
             </thead>
@@ -26,8 +30,22 @@
                     <tr>
                         <td><strong>{{ row.receipt_month|date:"Y年m月" }}</strong></td>
                         <td><span class="badge {{ row.submission.status }}">{{ row.status_label }}</span></td>
-                        <td>{{ row.service_count }}</td>
-                        <td>{{ row.resolved_service_count }}</td>
+                        <td>
+                            <div class="service-count-breakdown" aria-label="サービス登録数の内訳">
+                                <span class="service-count-line">
+                                    <span class="service-count-label">必須提出（サブスク等）</span>
+                                    <strong class="service-count-value">{{ row.required_service_count }}</strong>
+                                </span>
+                                <span class="service-count-line">
+                                    <span class="service-count-label">利用時提出（API等）</span>
+                                    <strong class="service-count-value">{{ row.usage_based_service_count }}</strong>
+                                </span>
+                            </div>
+                        </td>
+                        <td>
+                            <strong>{{ row.resolved_service_count }}</strong>
+                            <span class="muted small">/ {{ row.total_service_count }}</span>
+                        </td>
                         <td>
                             {% if row.remaining_service_count %}
                                 <span class="badge draft">{{ row.remaining_service_count }}</span>
@@ -35,11 +53,10 @@
                                 <span class="badge submitted">0</span>
                             {% endif %}
                         </td>
-                        <td>{{ row.receipt_count }}</td>
                         <td><a class="button small" href="{{ row.submission.get_absolute_url }}">詳細</a></td>
                     </tr>
                 {% empty %}
-                    <tr><td colspan="7" class="muted center">提出履歴はまだありません。</td></tr>
+                    <tr><td colspan="6" class="muted center">提出履歴はまだありません。</td></tr>
                 {% endfor %}
             </tbody>
         </table>
