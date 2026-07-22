@@ -10,7 +10,12 @@ from django.db import close_old_connections, transaction
 from django.db.models import QuerySet
 from django.utils import timezone
 
-from .ai_filename import filename_user_part_from_user, generate_ai_receipt_filename, target_card_last4
+from .ai_filename import (
+    filename_user_part_from_user,
+    generate_ai_receipt_filename,
+    recipient_reference_context_from_user,
+    target_card_last4,
+)
 from .models import (
     Receipt,
     ReceiptAdminReviewStatus,
@@ -26,6 +31,8 @@ logger = logging.getLogger(__name__)
 AI_CHECK_FIELDS = [
     "ai_check_card_last4",
     "ai_check_payee",
+    "ai_check_recipient_name",
+    "ai_recipient_name_check_memo",
     "ai_check_service_payee_related",
     "ai_service_payee_check_memo",
     "ai_check_date",
@@ -40,6 +47,7 @@ AI_RESET_FIELDS = [
     "ai_filename_admin_memo",
     "ai_filename_checked_at",
     "ai_extracted_payee",
+    "ai_extracted_recipient_name",
     "ai_extracted_card_last4",
     "ai_receipt_month",
     "ai_period_check_status",
@@ -148,6 +156,7 @@ def reset_ai_processing_state(receipt: Receipt, *, save: bool = False, clear_ext
     receipt.ai_filename_admin_memo = ""
     receipt.ai_filename_checked_at = None
     receipt.ai_extracted_payee = ""
+    receipt.ai_extracted_recipient_name = ""
     receipt.ai_extracted_card_last4 = ""
     receipt.ai_receipt_month = ""
     receipt.ai_period_check_status = ReceiptPeriodCheckStatus.NOT_CHECKED
@@ -159,6 +168,8 @@ def reset_ai_processing_state(receipt: Receipt, *, save: bool = False, clear_ext
     receipt.admin_filename_overridden = False
     receipt.ai_check_card_last4 = False
     receipt.ai_check_payee = False
+    receipt.ai_check_recipient_name = False
+    receipt.ai_recipient_name_check_memo = ""
     receipt.ai_check_service_payee_related = False
     receipt.ai_service_payee_check_memo = ""
     receipt.ai_check_date = False
@@ -184,6 +195,8 @@ def apply_ai_checklist_to_receipt(receipt: Receipt, result) -> list[str]:
     if result is None:
         receipt.ai_check_card_last4 = False
         receipt.ai_check_payee = False
+        receipt.ai_check_recipient_name = False
+        receipt.ai_recipient_name_check_memo = ""
         receipt.ai_check_service_payee_related = False
         receipt.ai_service_payee_check_memo = ""
         receipt.ai_check_date = False
@@ -215,8 +228,26 @@ def apply_ai_checklist_to_receipt(receipt: Receipt, result) -> list[str]:
             else "登録サービス名と領収書上の払先の関連性をAIで確認できませんでした。"
         )
 
+    recipient_name = (getattr(result, "recipient_name", "") or "").strip()
+    recipient_name_matches_user = getattr(result, "recipient_name_matches_user", None)
+    recipient_reason = (getattr(result, "recipient_name_relation_reason", "") or "").strip()
+    if recipient_name_matches_user is False and not recipient_reason:
+        recipient_reason = "領収書の利用者名（宛名）が対象ユーザーと異なる可能性があります。"
+    elif recipient_name_matches_user is None:
+        recipient_reason = recipient_reason or (
+            "領収書に利用者名（宛名）がない、または対象ユーザーとの対応をAIで確認できませんでした。"
+        )
+    elif recipient_name_matches_user is True and not recipient_reason:
+        recipient_reason = (
+            f"領収書の利用者名（宛名）「{recipient_name}」が対象ユーザーと対応すると確認しました。"
+            if recipient_name
+            else "領収書の利用者名（宛名）が対象ユーザーと対応すると確認しました。"
+        )
+
     receipt.ai_check_card_last4 = card_matches is True
     receipt.ai_check_payee = bool(getattr(result, "payee", "")) or bool(getattr(result, "payee_confirmed", False))
+    receipt.ai_check_recipient_name = recipient_name_matches_user is True
+    receipt.ai_recipient_name_check_memo = recipient_reason[:1000]
     receipt.ai_check_service_payee_related = service_payee_related is True
     receipt.ai_service_payee_check_memo = relation_reason[:1000]
     receipt.ai_check_date = bool(getattr(result, "payment_date", None)) or bool(getattr(result, "date_confirmed", False))
@@ -317,6 +348,7 @@ def apply_ai_filename_to_receipt(receipt: Receipt):
         content_type=receipt.content_type,
         service_display_name=receipt.service_display_name_snapshot,
         user_filename_part=filename_user_part_from_user(receipt.submission.user),
+        expected_recipient_context=recipient_reference_context_from_user(receipt.submission.user),
         service_match_hints=(
             receipt.service.catalog_service.merchant_aliases
             if receipt.service_id and receipt.service.catalog_service_id and receipt.service.catalog_service
@@ -331,6 +363,7 @@ def apply_ai_filename_to_receipt(receipt: Receipt):
     receipt.ai_filename_admin_memo = result.admin_memo
     receipt.ai_filename_checked_at = timezone.now()
     receipt.ai_extracted_payee = result.payee[:160] if result.payee else ""
+    receipt.ai_extracted_recipient_name = result.recipient_name[:160] if result.recipient_name else ""
     receipt.ai_extracted_card_last4 = result.card_last4[-4:] if result.card_last4 else ""
 
     update_fields = [
@@ -339,6 +372,7 @@ def apply_ai_filename_to_receipt(receipt: Receipt):
         "ai_filename_admin_memo",
         "ai_filename_checked_at",
         "ai_extracted_payee",
+        "ai_extracted_recipient_name",
         "ai_extracted_card_last4",
         *apply_ai_checklist_to_receipt(receipt, result),
         *apply_period_check_to_receipt(receipt, result),
@@ -415,12 +449,15 @@ def claim_pending_receipts_for_ai_processing(queryset: QuerySet, *, limit: int |
             ai_filename_admin_memo=PROCESSING_MEMO,
             ai_filename_checked_at=None,
             ai_extracted_payee="",
+            ai_extracted_recipient_name="",
             ai_extracted_card_last4="",
             ai_receipt_month="",
             ai_period_check_status=ReceiptPeriodCheckStatus.NOT_CHECKED,
             ai_period_check_memo="",
             ai_check_card_last4=False,
             ai_check_payee=False,
+            ai_check_recipient_name=False,
+            ai_recipient_name_check_memo="",
             ai_check_service_payee_related=False,
             ai_service_payee_check_memo="",
             ai_check_date=False,

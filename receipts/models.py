@@ -89,7 +89,7 @@ class BillingType(models.TextChoices):
 
 
 class SubmissionStatus(models.TextChoices):
-    DRAFT = "draft", "下書き"
+    DRAFT = "draft", "未提出領収書あり"
     SUBMITTED = "submitted", "提出済み"
 
 
@@ -154,6 +154,12 @@ class StatementMatchStatus(models.TextChoices):
     AMBIGUOUS = "ambiguous", "曖昧"
     UNMATCHED = "unmatched", "未一致"
     IGNORED = "ignored", "対象外"
+
+
+class StatementCandidateStrength(models.TextChoices):
+    STRONG = "strong", "強い候補"
+    AMOUNT_ONLY = "amount_only", "金額候補"
+    POSSIBLE = "possible", "参考候補"
 
 
 class ServiceRegistrationSource(models.TextChoices):
@@ -555,14 +561,14 @@ class Submission(models.Model):
         summary = build_user_month_summary(self.user, self.period_month)
         has_extra_receipt = self.receipts.available_files().filter(is_extra=True).exists()
         if not summary.rows and not has_extra_receipt:
-            raise ValidationError("対象領収書月に提出対象となる利用サービスがありません。利用サービスを確認してください。")
+            raise ValidationError("選択した領収書発行月に提出対象となる利用サービスがありません。利用サービスを確認してください。")
         if summary.rows and not summary.is_complete:
             unresolved = [row.service.display_name for row in (*summary.missing_required, *summary.api_pending)]
             preview = "、".join(unresolved[:5])
             if len(unresolved) > 5:
                 preview += f" ほか{len(unresolved) - 5}件"
             raise ValidationError(
-                f"未確認のサービスがあります（{preview}）。領収書をアップロードするか、従量課金 / APIは『対象領収書月は利用なし』を選択してください。"
+                f"未提出・未確認のサービスがあります（{preview}）。領収書をアップロードするか、従量課金 / APIは『この月は利用なし』を選択してください。"
             )
         self.status = SubmissionStatus.SUBMITTED
         self.submitted_at = timezone.now()
@@ -703,6 +709,7 @@ class Receipt(models.Model):
     ai_filename_admin_memo = models.TextField("AIファイル名管理者メモ", blank=True)
     ai_filename_checked_at = models.DateTimeField("AIファイル名確認日時", null=True, blank=True)
     ai_extracted_payee = models.CharField("AI抽出払先", max_length=160, blank=True)
+    ai_extracted_recipient_name = models.CharField("AI抽出利用者名（宛名）", max_length=160, blank=True)
     ai_extracted_card_last4 = models.CharField("AI抽出カード下4桁", max_length=4, blank=True)
     ai_receipt_month = models.CharField("AI判定領収書月", max_length=7, blank=True)
     ai_period_check_status = models.CharField(
@@ -714,6 +721,8 @@ class Receipt(models.Model):
     ai_period_check_memo = models.TextField("AI対象領収書月確認メモ", blank=True)
     ai_check_card_last4 = models.BooleanField("AI確認: カード末尾", default=False)
     ai_check_payee = models.BooleanField("AI確認: 払先", default=False)
+    ai_check_recipient_name = models.BooleanField("AI確認: 利用者名（宛名）", default=False)
+    ai_recipient_name_check_memo = models.TextField("AI利用者名（宛名）確認メモ", blank=True)
     ai_check_service_payee_related = models.BooleanField("AI確認: サービス名と払先の関連性", default=False)
     ai_service_payee_check_memo = models.TextField("AIサービス名・払先確認メモ", blank=True)
     ai_check_date = models.BooleanField("AI確認: 日付", default=False)
@@ -796,7 +805,7 @@ class Receipt(models.Model):
             if self.submission_id and self.service.user_id != self.submission.user_id:
                 raise ValidationError("自分の利用サービスだけを選択できます。")
             if self.submission_id and not self.service.is_uploadable_for(self.submission.period_month):
-                raise ValidationError("この提出月の対象領収書月では選択できないサービスです。利用停止済みの場合は、最終領収書月までしか選択できません。")
+                raise ValidationError("選択した領収書発行月では利用できないサービスです。利用停止済みの場合は、最終領収書月までしか選択できません。")
 
     def save(self, *args, **kwargs):
         self.memo = (self.memo or "").strip()
@@ -885,6 +894,7 @@ class Receipt(models.Model):
         return [
             ("カード末尾7210", self.ai_check_card_last4),
             ("払先", self.ai_check_payee),
+            ("利用者名（宛名）", self.ai_check_recipient_name),
             (relation_label, self.ai_check_service_payee_related),
             ("日付", self.ai_check_date),
             ("金額", self.ai_check_amount),
@@ -970,6 +980,8 @@ class Receipt(models.Model):
     def purge_file(self, reason: str = "expired") -> bool:
         if not self.file_available:
             return False
+        # ファイルが存在しない領収書を、明細照合候補として残さない。
+        self.statement_match_candidates.all().delete()
         storage = self.file.storage
         name = self.file.name
         if name and storage.exists(name):
@@ -1307,6 +1319,88 @@ class CardStatementItem(models.Model):
 
     def __str__(self) -> str:
         return f"{self.statement} / {self.line_reference or self.sequence} / {self.merchant_name}"
+
+
+class CardStatementMatchCandidate(models.Model):
+    """カード明細行と提出済み領収書の照合候補。"""
+
+    item = models.ForeignKey(
+        CardStatementItem,
+        on_delete=models.CASCADE,
+        related_name="match_candidates",
+        verbose_name="明細行",
+    )
+    receipt = models.ForeignKey(
+        Receipt,
+        on_delete=models.CASCADE,
+        related_name="statement_match_candidates",
+        verbose_name="候補領収書",
+    )
+    rank = models.PositiveSmallIntegerField("候補順位")
+    score = models.IntegerField("照合スコア", default=0)
+    confidence = models.FloatField("候補信頼度", default=0)
+    strength = models.CharField(
+        "候補種別",
+        max_length=20,
+        choices=StatementCandidateStrength.choices,
+        default=StatementCandidateStrength.POSSIBLE,
+    )
+    amount_match = models.BooleanField("金額一致", default=False)
+    amount_match_basis = models.CharField("金額一致基準", max_length=20, blank=True)
+    currency_match = models.BooleanField("通貨一致", default=False)
+    merchant_match = models.BooleanField("ご利用先・払先関連", default=False)
+    service_match = models.BooleanField("サービス関連", default=False)
+    date_match = models.BooleanField("日付一致・近接", default=False)
+    rationale = models.TextField("候補理由", blank=True)
+    created_at = models.DateTimeField("作成日時", auto_now_add=True)
+
+    class Meta:
+        ordering = ["item", "rank", "-score", "receipt"]
+        constraints = [
+            models.UniqueConstraint(fields=["item", "receipt"], name="unique_statement_item_receipt_candidate"),
+            models.UniqueConstraint(fields=["item", "rank"], name="unique_statement_item_candidate_rank"),
+        ]
+        indexes = [
+            models.Index(fields=["item", "rank"]),
+            models.Index(fields=["receipt", "score"]),
+        ]
+        verbose_name = "カード明細照合候補"
+        verbose_name_plural = "カード明細照合候補"
+
+    @property
+    def evidence_labels(self) -> list[str]:
+        labels: list[str] = []
+        if self.amount_match:
+            if self.amount_match_basis == "original":
+                labels.append("外貨金額一致")
+            elif self.amount_match_basis == "jpy":
+                labels.append("円金額一致")
+            else:
+                labels.append("金額近似")
+        if self.currency_match:
+            labels.append("通貨一致")
+        if self.merchant_match:
+            labels.append("ご利用先・払先関連")
+        if self.service_match:
+            labels.append("サービス関連")
+        if self.date_match:
+            labels.append("日付一致・近接")
+        return labels
+
+    @property
+    def confidence_percent(self) -> int:
+        return max(0, min(100, round(float(self.confidence or 0) * 100)))
+
+    @property
+    def badge_class(self) -> str:
+        if self.strength == StatementCandidateStrength.STRONG:
+            return "submitted"
+        if self.strength == StatementCandidateStrength.AMOUNT_ONLY:
+            return "draft"
+        return "neutral"
+
+    def __str__(self) -> str:
+        return f"{self.item} / 候補{self.rank}: {self.receipt.display_filename}"
 
 
 DEFAULT_INITIAL_SUBJECT = "{app_name}: {receipt_month}分の領収書アップロードをお願いします"

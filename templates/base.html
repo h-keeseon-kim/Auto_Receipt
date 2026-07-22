@@ -58,7 +58,7 @@
     </main>
 
     {% if user.is_authenticated and tutorial_available %}
-        <div class="tutorial-backdrop" data-tutorial-root data-auto-start="{% if tutorial_auto_start %}true{% else %}false{% endif %}" data-complete-url="{{ tutorial_complete_url }}" data-user-services-url="{% url 'user_services' %}" data-upload-url="{% url 'dashboard' %}" data-history-url="{% url 'history' %}" data-staff-statements-url="{% url 'staff_card_statements' %}" data-staff-services-url="{% url 'staff_services' %}?tab=catalog" data-staff-exception-requests-url="{% url 'staff_exception_requests' %}" data-staff-user-create-url="{% url 'staff_user_create' %}" hidden>
+        <div class="tutorial-backdrop" data-tutorial-root data-auto-start="{% if tutorial_auto_start %}true{% else %}false{% endif %}" data-complete-url="{{ tutorial_complete_url }}" data-user-services-url="{% url 'user_services' %}" data-user-service-create-url="{% url 'user_service_create' %}" data-upload-url="{% url 'dashboard' %}" data-history-url="{% url 'history' %}" data-staff-statements-url="{% url 'staff_card_statements' %}" data-staff-services-url="{% url 'staff_services' %}?tab=catalog" data-staff-exception-requests-url="{% url 'staff_exception_requests' %}" data-staff-user-create-url="{% url 'staff_user_create' %}" hidden>
             <form hidden>{% csrf_token %}</form>
             <section class="tutorial-card" role="dialog" aria-modal="true" aria-labelledby="tutorial-title" aria-describedby="tutorial-body" tabindex="-1">
                 <button type="button" class="tutorial-close" data-tutorial-close aria-label="チュートリアルを閉じる">×</button>

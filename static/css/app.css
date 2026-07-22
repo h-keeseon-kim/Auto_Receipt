@@ -134,6 +134,7 @@ ul.errorlist { color: var(--danger); margin: 0.2rem 0 0.6rem; padding-left: 1.2r
 .message { padding: 0.8rem 1rem; border-radius: 12px; border: 1px solid var(--border); background: #fff; margin-bottom: 0.5rem; }
 .message.success { background: var(--success-bg); color: var(--success); border-color: #b7e6c4; }
 .message.error { background: #fff1f0; color: var(--danger); border-color: #ffd0cc; }
+.message.warning { background: #fff8df; color: #7a5600; border-color: #f3d98b; }
 .staff-notification {
     display: flex;
     align-items: center;
@@ -1070,4 +1071,67 @@ body.tutorial-open { overflow-x: hidden; }
     .proxy-upload-switcher { align-items: stretch; flex-direction: column; }
     .proxy-upload-switcher-controls { justify-content: flex-start; }
     .proxy-upload-switcher-controls select { width: 100%; min-width: 0; }
+}
+
+/* v1.6.0: ご利用代金明細の複数候補照合 */
+.statement-receipt-cell {
+    min-width: 280px;
+}
+
+.statement-candidates {
+    margin-top: 0.55rem;
+    border-top: 1px solid var(--border, #d8e0ec);
+    padding-top: 0.45rem;
+}
+
+.statement-candidates > summary {
+    cursor: pointer;
+    font-weight: 700;
+    color: var(--primary, #2458d6);
+    white-space: nowrap;
+}
+
+.statement-candidate-list {
+    display: grid;
+    gap: 0.55rem;
+    margin-top: 0.55rem;
+    min-width: 360px;
+}
+
+.statement-candidate-card {
+    border: 1px solid var(--border, #d8e0ec);
+    border-radius: 10px;
+    background: #fff;
+    padding: 0.65rem;
+}
+
+.statement-candidate-card.selected {
+    border-color: #2f63da;
+    box-shadow: 0 0 0 2px rgba(47, 99, 218, 0.12);
+}
+
+.statement-candidate-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.5rem;
+    margin-bottom: 0.25rem;
+}
+
+.statement-candidate-evidence {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.3rem;
+    margin: 0.4rem 0;
+}
+
+.statement-candidate-evidence span {
+    display: inline-flex;
+    border-radius: 999px;
+    padding: 0.12rem 0.45rem;
+    background: #eef3fb;
+    color: #30425f;
+    font-size: 0.75rem;
+    font-weight: 700;
+    white-space: nowrap;
 }

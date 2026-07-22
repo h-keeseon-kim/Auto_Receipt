@@ -1,7 +1,7 @@
 (function () {
     "use strict";
 
-    const STATE_KEY = "receipthub:tutorial-state:v3";
+    const STATE_KEY = "receipthub:tutorial-state:v4";
     const STATE_MAX_AGE_MS = 1000 * 60 * 60 * 2;
 
     const USER_STEPS = [
@@ -20,10 +20,10 @@
             placement: "left",
         },
         {
-            pageName: "user_services",
+            pageName: "user_service_create",
             selector: "[data-tutorial-target='service-exception-button']",
             title: "一覧にない新規サービスだけ例外申請します",
-            body: "サービス利用登録の一覧に存在しないサービスを使いたい場合だけ、サービス名、支払い方法、用途を記載して例外申請します。管理者の承認後にサービスマスターと利用サービスへ追加されます。",
+            body: "サービス利用登録の一覧に必要なサービスがない場合は、この青い案内枠から例外申請へ進みます。サービス名、支払い方法、用途を記載し、管理者の承認後に利用サービスへ追加されます。",
             placement: "left",
         },
         {
@@ -60,15 +60,15 @@
         {
             pageName: "dashboard",
             selector: "[data-tutorial-target='upload-month-form']",
-            title: "提出月を選びます",
-            body: "提出月を選びます。提出月の前月が対象領収書月です。例えば7月を選ぶと、6月分の領収書を提出します。月を変更して「表示」を押すと、その提出画面に切り替わります。",
+            title: "領収書発行月を選びます",
+            body: "何月に発行された領収書を提出するか選びます。例えば6月分の領収書を出す場合は「2026年06月」を選び、「表示」を押します。",
             placement: "left",
         },
         {
             pageName: "dashboard",
             selector: "[data-tutorial-target='receipt-add-form']",
             title: "サービスを選んで領収書を追加します",
-            body: "画面に表示された対象領収書月を確認し、登録済みサービスまたは「その他」を選びます。「＋ 領収書を追加」からファイルを選択でき、同じサービスへ複数件を追加できます。",
+            body: "選択した領収書発行月を確認し、登録済みサービスまたは「その他」を選びます。「＋ 領収書を追加」からファイルを選択でき、同じサービスへ複数件を追加できます。",
             placement: "above",
             scrollBlock: "center",
         },
@@ -76,7 +76,7 @@
             pageName: "dashboard",
             selector: "[data-tutorial-target='uploaded-receipts-section']",
             title: "アップロード済み領収書を確認して提出します",
-            body: "アップロードした領収書はここに追加されます。対象領収書月分が揃ったら「提出する」を押します。提出後も、間違えたファイルは修正できます。",
+            body: "アップロードした領収書はここに追加されます。領収書が揃ったら「提出する」を押します。未提出サービスが残っている場合は黄色の注意書きで案内されます。提出後も、間違えたファイルは修正できます。",
             placement: "above",
             scrollBlock: "nearest",
         },
@@ -84,14 +84,14 @@
             pageName: "history",
             selector: "[data-tutorial-target='history-page']",
             title: "提出履歴ページです。",
-            body: "ここでは、提出済み・下書きの月別状況を確認できます。",
+            body: "ここでは、領収書発行月ごとの提出済み・未提出状況を確認できます。",
             placement: "below",
         },
         {
             pageName: "history",
             selector: "[data-tutorial-target='history-table']",
             title: "月ごとの提出状況を確認します",
-            body: "この一覧から、対象月のステータス、領収書数、提出日時を確認できます。詳細ボタンを押すと、その月の提出内容を確認できます。",
+            body: "この一覧から、領収書発行月、サービス登録数、確認済み件数、未提出・未確認件数を確認できます。詳細ボタンを押すと、その月の内容を確認できます。",
             placement: "above",
         },
         {
@@ -266,6 +266,7 @@
         const steps = role === "staff" ? STAFF_STEPS : USER_STEPS;
         const pageUrls = {
             user_services: root.dataset.userServicesUrl,
+            user_service_create: root.dataset.userServiceCreateUrl,
             dashboard: root.dataset.uploadUrl,
             history: root.dataset.historyUrl,
             staff_card_statements: root.dataset.staffStatementsUrl,

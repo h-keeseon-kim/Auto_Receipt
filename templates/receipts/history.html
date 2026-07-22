@@ -4,25 +4,42 @@
 <div class="page-title" data-tutorial-target="history-page">
     <div>
         <h1>提出履歴</h1>
-        <p class="muted">提出済み・下書きの月別状況を確認できます。</p>
+        <p class="muted">領収書発行月ごとに、提出済み・未提出の状況を確認できます。</p>
     </div>
 </div>
 <section class="card section" data-tutorial-target="history-table">
     <div class="table-wrap">
         <table>
-            <thead><tr><th>提出月</th><th>対象領収書月</th><th>ステータス</th><th>領収書数</th><th>提出日時</th><th>操作</th></tr></thead>
+            <thead>
+                <tr>
+                    <th>領収書発行月</th>
+                    <th>ステータス</th>
+                    <th>サービス登録数</th>
+                    <th>確認済みサービス数</th>
+                    <th>未提出・未確認サービス数</th>
+                    <th>領収書数</th>
+                    <th>操作</th>
+                </tr>
+            </thead>
             <tbody>
-                {% for submission in submissions %}
+                {% for row in history_rows %}
                     <tr>
-                        <td>{{ submission.period_month|date:"Y年m月" }}</td>
-                        <td>{{ submission.target_receipt_month|date:"Y年m月" }}</td>
-                        <td><span class="badge {{ submission.status }}">{{ submission.get_status_display }}</span></td>
-                        <td>{{ submission.receipt_count }}</td>
-                        <td>{{ submission.submitted_at|date:"Y-m-d H:i"|default:"-" }}</td>
-                        <td><a class="button small" href="{{ submission.get_absolute_url }}">詳細</a></td>
+                        <td><strong>{{ row.receipt_month|date:"Y年m月" }}</strong></td>
+                        <td><span class="badge {{ row.submission.status }}">{{ row.status_label }}</span></td>
+                        <td>{{ row.service_count }}</td>
+                        <td>{{ row.resolved_service_count }}</td>
+                        <td>
+                            {% if row.remaining_service_count %}
+                                <span class="badge draft">{{ row.remaining_service_count }}</span>
+                            {% else %}
+                                <span class="badge submitted">0</span>
+                            {% endif %}
+                        </td>
+                        <td>{{ row.receipt_count }}</td>
+                        <td><a class="button small" href="{{ row.submission.get_absolute_url }}">詳細</a></td>
                     </tr>
                 {% empty %}
-                    <tr><td colspan="6" class="muted center">提出履歴はまだありません。</td></tr>
+                    <tr><td colspan="7" class="muted center">提出履歴はまだありません。</td></tr>
                 {% endfor %}
             </tbody>
         </table>

@@ -29,7 +29,9 @@
             </div>
             {% if receipt.ai_receipt_month %}<div class="muted small">AI判定領収書月: {{ receipt.ai_receipt_month }}</div>{% endif %}
             {% if receipt.ai_extracted_payee %}<div class="muted small">払先: {{ receipt.ai_extracted_payee }}</div>{% endif %}
+            {% if receipt.ai_extracted_recipient_name %}<div class="muted small">利用者名（宛名）: {{ receipt.ai_extracted_recipient_name }}</div>{% endif %}
             {% if receipt.ai_extracted_card_last4 %}<div class="muted small">カード下4桁: {{ receipt.ai_extracted_card_last4 }}</div>{% endif %}
+            {% if receipt.ai_recipient_name_check_memo %}<div class="danger small">{{ receipt.ai_recipient_name_check_memo|truncatechars:120 }}</div>{% endif %}
             {% if receipt.ai_service_payee_check_memo %}<div class="danger small">{{ receipt.ai_service_payee_check_memo|truncatechars:120 }}</div>{% endif %}
             {% if receipt.ai_filename_admin_memo %}<div class="{% if receipt.ai_is_queued or receipt.is_ai_processing %}muted{% else %}danger{% endif %} small">{{ receipt.ai_filename_admin_memo|truncatechars:120 }}</div>{% endif %}
             {% if receipt.ai_period_check_memo %}<div class="muted small">{{ receipt.ai_period_check_memo|truncatechars:120 }}</div>{% endif %}

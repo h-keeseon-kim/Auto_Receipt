@@ -8,7 +8,7 @@
                 <th>金額</th>
                 <th>発行日/支払日</th>
                 <th>ファイル</th>
-                <th>保存期限</th>
+                {% if user.is_staff %}<th>保存期限</th>{% endif %}
                 <th>操作</th>
             </tr>
         </thead>
@@ -49,7 +49,9 @@
                                 </div>
                                 {% if receipt.ai_receipt_month %}<div class="muted small">AI判定領収書月: {{ receipt.ai_receipt_month }}</div>{% endif %}
                                 {% if receipt.ai_extracted_payee %}<div class="muted small">払先: {{ receipt.ai_extracted_payee }}</div>{% endif %}
+                                {% if receipt.ai_extracted_recipient_name %}<div class="muted small">利用者名（宛名）: {{ receipt.ai_extracted_recipient_name }}</div>{% endif %}
                                 {% if receipt.ai_extracted_card_last4 %}<div class="muted small">カード下4桁: {{ receipt.ai_extracted_card_last4 }}</div>{% endif %}
+                                {% if receipt.ai_recipient_name_check_memo %}<div class="danger small">{{ receipt.ai_recipient_name_check_memo|linebreaksbr }}</div>{% endif %}
                                 {% if receipt.ai_service_payee_check_memo %}<div class="danger small">{{ receipt.ai_service_payee_check_memo|linebreaksbr }}</div>{% endif %}
                                 {% if receipt.ai_filename_admin_memo %}<div class="danger small">{{ receipt.ai_filename_admin_memo|linebreaksbr }}</div>{% endif %}
                                 {% if receipt.ai_period_check_memo %}<div class="muted small">{{ receipt.ai_period_check_memo|linebreaksbr }}</div>{% endif %}
@@ -60,10 +62,12 @@
                             </div>
                         {% endif %}
                     </td>
-                    <td>
-                        {% if receipt.expires_at %}{{ receipt.expires_at|date:"Y-m-d H:i" }}{% else %}-{% endif %}
-                        {% if receipt.file_deleted_at %}<div class="danger small">削除: {{ receipt.file_deleted_at|date:"Y-m-d H:i" }}</div>{% endif %}
-                    </td>
+                    {% if user.is_staff %}
+                        <td>
+                            {% if receipt.expires_at %}{{ receipt.expires_at|date:"Y-m-d H:i" }}{% else %}-{% endif %}
+                            {% if receipt.file_deleted_at %}<div class="danger small">削除: {{ receipt.file_deleted_at|date:"Y-m-d H:i" }}</div>{% endif %}
+                        </td>
+                    {% endif %}
                     <td class="actions receipt-actions">
                         {% if receipt.file_available %}
                             <a class="button small" href="{% url 'download_receipt' receipt.pk %}">DL</a>
@@ -108,7 +112,7 @@
                     </td>
                 </tr>
             {% empty %}
-                <tr><td colspan="7" class="muted center">領収書はまだアップロードされていません。</td></tr>
+                <tr><td colspan="{% if user.is_staff %}7{% else %}6{% endif %}" class="muted center">領収書はまだアップロードされていません。</td></tr>
             {% endfor %}
         </tbody>
     </table>

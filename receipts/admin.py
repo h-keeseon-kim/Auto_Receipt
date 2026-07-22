@@ -3,6 +3,7 @@ from django.contrib import admin
 from .models import (
     CardStatement,
     CardStatementItem,
+    CardStatementMatchCandidate,
     EmailDeliveryLog,
     EmailReminderSchedule,
     MonthlyServiceDeclaration,
@@ -28,12 +29,15 @@ class ReceiptInline(admin.TabularInline):
         "ai_filename_admin_memo",
         "ai_filename_checked_at",
         "ai_extracted_payee",
+        "ai_extracted_recipient_name",
         "ai_extracted_card_last4",
         "ai_receipt_month",
         "ai_period_check_status",
         "ai_period_check_memo",
         "ai_check_card_last4",
         "ai_check_payee",
+        "ai_check_recipient_name",
+        "ai_recipient_name_check_memo",
         "ai_check_service_payee_related",
         "ai_service_payee_check_memo",
         "ai_check_date",
@@ -70,6 +74,8 @@ class ReceiptInline(admin.TabularInline):
         "ai_period_check_memo",
         "ai_check_card_last4",
         "ai_check_payee",
+        "ai_check_recipient_name",
+        "ai_recipient_name_check_memo",
         "ai_check_service_payee_related",
         "ai_service_payee_check_memo",
         "ai_check_date",
@@ -160,13 +166,14 @@ class ReceiptAdmin(admin.ModelAdmin):
         "expires_at",
         "ai_filename_status",
         "ai_period_check_status",
+        "ai_check_recipient_name",
         "ai_check_service_payee_related",
         "ai_check_period_match",
         "admin_review_status",
         "file_status",
     )
-    list_filter = ("is_extra", "upload_source", "admin_review_status", "billing_type_snapshot", "currency", "ai_filename_status", "ai_period_check_status", "ai_check_service_payee_related", "ai_check_period_match", "submission__period_month", "file_deleted_at")
-    search_fields = ("service_name_snapshot", "memo", "submission__user__username", "uploaded_by__username", "uploaded_by__email", "original_filename", "generated_filename", "ai_extracted_payee", "ai_filename_admin_memo", "ai_period_check_memo", "ai_service_payee_check_memo")
+    list_filter = ("is_extra", "upload_source", "admin_review_status", "billing_type_snapshot", "currency", "ai_filename_status", "ai_period_check_status", "ai_check_recipient_name", "ai_check_service_payee_related", "ai_check_period_match", "submission__period_month", "file_deleted_at")
+    search_fields = ("service_name_snapshot", "memo", "submission__user__username", "uploaded_by__username", "uploaded_by__email", "original_filename", "generated_filename", "ai_extracted_payee", "ai_extracted_recipient_name", "ai_filename_admin_memo", "ai_period_check_memo", "ai_recipient_name_check_memo", "ai_service_payee_check_memo")
     readonly_fields = (
         "service_name_snapshot",
         "billing_type_snapshot",
@@ -176,12 +183,15 @@ class ReceiptAdmin(admin.ModelAdmin):
         "ai_filename_admin_memo",
         "ai_filename_checked_at",
         "ai_extracted_payee",
+        "ai_extracted_recipient_name",
         "ai_extracted_card_last4",
         "ai_receipt_month",
         "ai_period_check_status",
         "ai_period_check_memo",
         "ai_check_card_last4",
         "ai_check_payee",
+        "ai_check_recipient_name",
+        "ai_recipient_name_check_memo",
         "ai_check_service_payee_related",
         "ai_service_payee_check_memo",
         "ai_check_date",
@@ -320,3 +330,50 @@ class CardStatementItemAdmin(admin.ModelAdmin):
     )
     list_filter = ("match_status", "receipt_required", "statement__period_month")
     search_fields = ("merchant_name", "line_reference", "matched_user__username", "matched_service__name", "match_memo")
+
+
+@admin.register(CardStatementMatchCandidate)
+class CardStatementMatchCandidateAdmin(admin.ModelAdmin):
+    list_display = (
+        "item",
+        "rank",
+        "receipt",
+        "strength",
+        "score",
+        "confidence",
+        "amount_match",
+        "merchant_match",
+        "service_match",
+        "date_match",
+    )
+    list_filter = ("strength", "amount_match", "currency_match", "merchant_match", "service_match", "date_match")
+    search_fields = (
+        "item__merchant_name",
+        "item__line_reference",
+        "receipt__original_filename",
+        "receipt__generated_filename",
+        "receipt__submission__user__username",
+        "rationale",
+    )
+    readonly_fields = (
+        "item",
+        "receipt",
+        "rank",
+        "score",
+        "confidence",
+        "strength",
+        "amount_match",
+        "amount_match_basis",
+        "currency_match",
+        "merchant_match",
+        "service_match",
+        "date_match",
+        "rationale",
+        "created_at",
+    )
+
+    def has_add_permission(self, request):
+        return False
+
+    def has_change_permission(self, request, obj=None):
+        return False

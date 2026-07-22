@@ -119,6 +119,12 @@ def current_month():
     return today.replace(day=1)
 
 
+def current_receipt_month():
+    """ユーザー画面で最初に表示する領収書発行月。"""
+
+    return receipt_month_for_submission(current_month())
+
+
 class MonthSelectForm(forms.Form):
     month = MonthField(label="提出月", initial=current_month)
 
@@ -126,6 +132,14 @@ class MonthSelectForm(forms.Form):
         super().__init__(*args, **kwargs)
         if month_label:
             self.fields["month"].label = month_label
+        apply_design_classes(self)
+
+
+class ReceiptMonthSelectForm(forms.Form):
+    receipt_month = MonthField(label="領収書発行月", initial=current_receipt_month)
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
         apply_design_classes(self)
 
 
@@ -620,7 +634,7 @@ class ReceiptBatchUploadForm(forms.Form):
             raise forms.ValidationError("サービスを選択してください。") from exc
         service = RegisteredService.objects.filter(pk=service_id, user=self.user).first()
         if service is None or not service.is_uploadable_for(self.period_month):
-            raise forms.ValidationError("この提出月の対象領収書月で利用できるサービスを選択してください。")
+            raise forms.ValidationError("選択した領収書発行月で利用できるサービスを選択してください。")
         self.is_extra = False
         self.selected_service = service
         return value
@@ -650,8 +664,8 @@ class ReceiptUploadForm(forms.ModelForm):
             "file": "領収書ファイルアップロード",
         }
         help_texts = {
-            "service": "登録済みサービスから選択します。利用停止済みサービスは、最終領収書月に対応する提出月まで選択できます。",
-            "file": "PDF / PNG / JPG / JPEG / WEBP。最大10MB。ファイル本体は最大3ヶ月保存されます。",
+            "service": "登録済みサービスから選択します。利用停止済みサービスは、設定された最終領収書月まで選択できます。",
+            "file": "PDF / PNG / JPG / JPEG / WEBP。最大10MB。",
         }
 
     def __init__(self, *args, user=None, period_month=None, **kwargs):
@@ -707,7 +721,7 @@ class ExtraReceiptUploadForm(forms.ModelForm):
             "file": "領収書ファイルアップロード",
         }
         help_texts = {
-            "file": "PDF / PNG / JPG / JPEG / WEBP。最大10MB。ファイル本体は最大3ヶ月保存されます。",
+            "file": "PDF / PNG / JPG / JPEG / WEBP。最大10MB。",
         }
 
     def __init__(self, *args, **kwargs):
@@ -753,7 +767,7 @@ class ReceiptFileReplaceForm(forms.Form):
             validate_upload_size,
         ],
         widget=forms.ClearableFileInput(attrs={"accept": ".pdf,.png,.jpg,.jpeg,.webp"}),
-        help_text="PDF / PNG / JPG / JPEG / WEBP。最大10MB。修正後のファイルも最大3ヶ月保存されます。",
+        help_text="PDF / PNG / JPG / JPEG / WEBP。最大10MB。",
     )
 
     def __init__(self, *args, **kwargs):
@@ -772,6 +786,7 @@ class StaffReceiptReviewForm(forms.Form):
     )
     ai_check_card_last4 = forms.BooleanField(label="カード末尾7210", required=False)
     ai_check_payee = forms.BooleanField(label="払先", required=False)
+    ai_check_recipient_name = forms.BooleanField(label="利用者名（宛名）", required=False)
     ai_check_service_payee_related = forms.BooleanField(label="サービス / 払先関連", required=False)
     ai_check_date = forms.BooleanField(label="日付", required=False)
     ai_check_amount = forms.BooleanField(label="金額", required=False)
@@ -787,6 +802,7 @@ class StaffReceiptReviewForm(forms.Form):
     CHECK_FIELDS = (
         "ai_check_card_last4",
         "ai_check_payee",
+        "ai_check_recipient_name",
         "ai_check_service_payee_related",
         "ai_check_date",
         "ai_check_amount",

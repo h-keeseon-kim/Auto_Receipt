@@ -33,6 +33,7 @@ from .ai_filename import target_card_last4
 from .emailing import send_test_email
 from .forms import (
     MonthSelectForm,
+    ReceiptMonthSelectForm,
     CardStatementUploadForm,
     ReceiptBatchUploadForm,
     ReceiptFileReplaceForm,
@@ -59,6 +60,7 @@ from .models import (
     BillingType,
     CardStatement,
     CardStatementItem,
+    CardStatementMatchCandidate,
     CardStatementStatus,
     MonthlyServiceDeclaration,
     Receipt,
@@ -84,6 +86,7 @@ from .models import (
     receipt_expiry_from,
     receipt_month_for_submission,
     receipt_month_for_statement,
+    submission_month_for_receipt,
 )
 from .monthly_status import build_user_month_summary
 from .statement_processing import (
@@ -105,6 +108,38 @@ def parse_month_from_request(request, *, month_label=None):
         return form.cleaned_data["month"], form
     initial_month = current_month()
     return initial_month, MonthSelectForm(initial={"month": initial_month}, month_label=month_label)
+
+
+def parse_receipt_month_from_request(request):
+    """ユーザー画面では領収書発行月を直接選ばせる。
+
+    v1.6.0以前の ``?month=YYYY-MM`` は内部の提出サイクル月として扱い、
+    既存リンクやブックマークとの互換性を維持する。
+    """
+
+    if "receipt_month" in request.GET:
+        form = ReceiptMonthSelectForm(request.GET)
+        if form.is_valid():
+            receipt_month = form.cleaned_data["receipt_month"]
+            return receipt_month, submission_month_for_receipt(receipt_month), form
+
+    if "month" in request.GET:
+        legacy_form = MonthSelectForm({"month": request.GET.get("month")})
+        if legacy_form.is_valid():
+            submission_month = legacy_form.cleaned_data["month"]
+            receipt_month = receipt_month_for_submission(submission_month)
+            return (
+                receipt_month,
+                submission_month,
+                ReceiptMonthSelectForm(initial={"receipt_month": receipt_month}),
+            )
+
+    receipt_month = receipt_month_for_submission(current_month())
+    return (
+        receipt_month,
+        submission_month_for_receipt(receipt_month),
+        ReceiptMonthSelectForm(initial={"receipt_month": receipt_month}),
+    )
 
 
 def month_query(value) -> str:
@@ -288,7 +323,7 @@ def dashboard(request):
     if request.user.is_staff:
         return redirect("history")
 
-    selected_month, month_form = parse_month_from_request(request)
+    selected_receipt_month, selected_month, month_form = parse_receipt_month_from_request(request)
     submission, _ = Submission.objects.get_or_create(user=request.user, period_month=selected_month)
     uploadable_services = RegisteredService.objects.uploadable_for(request.user, selected_month).select_related("catalog_service")
     open_resubmission_requests = ReceiptResubmissionRequest.objects.filter(
@@ -309,7 +344,7 @@ def dashboard(request):
 
         if action in {"declare_no_usage", "clear_no_usage"}:
             if submission.is_submitted:
-                messages.error(request, "提出済みの月はAPI利用状況を変更できません。再提出が必要な場合は管理者へ連絡してください。")
+                messages.error(request, "提出済みの内容はAPI利用状況を変更できません。再提出が必要な場合は管理者へ連絡してください。")
                 return redirect(submission.get_absolute_url())
             service = get_object_or_404(
                 RegisteredService,
@@ -318,10 +353,10 @@ def dashboard(request):
                 billing_type=BillingType.METERED,
             )
             if not service.is_uploadable_for(selected_month):
-                messages.error(request, "このサービスは対象領収書月の提出対象ではありません。")
+                messages.error(request, "このサービスは選択した領収書発行月の対象ではありません。")
             elif action == "declare_no_usage":
                 if Receipt.objects.filter(submission=submission, service=service).exists():
-                    messages.error(request, f"{service.display_name} には領収書が登録済みのため『対象領収書月は利用なし』にできません。")
+                    messages.error(request, f"{service.display_name} には領収書が登録済みのため『この月は利用なし』にできません。")
                 else:
                     MonthlyServiceDeclaration.objects.update_or_create(
                         user=request.user,
@@ -331,7 +366,7 @@ def dashboard(request):
                     )
                     messages.success(
                         request,
-                        f"{service.display_name} を対象領収書月 {receipt_month_for_submission(selected_month):%Y年%m月} は利用なしとして記録しました。",
+                        f"{service.display_name} を {selected_receipt_month:%Y年%m月} は利用なしとして記録しました。",
                     )
             else:
                 deleted, _ = MonthlyServiceDeclaration.objects.filter(
@@ -340,8 +375,10 @@ def dashboard(request):
                     period_month=selected_month,
                 ).delete()
                 if deleted:
-                    messages.success(request, f"{service.display_name} の『対象領収書月は利用なし』を取り消しました。")
-            return redirect(f"{reverse('dashboard')}?month={month_query(selected_month)}")
+                    messages.success(request, f"{service.display_name} の『この月は利用なし』を取り消しました。")
+            return redirect(
+                f"{reverse('dashboard')}?receipt_month={month_query(selected_receipt_month)}"
+            )
 
         if action in {"add_receipts", "add_receipt", "add_extra_receipt"}:
             # v1.3系の画面を開いたままデプロイされた場合も、旧単一ファイルPOSTを受け付ける。
@@ -374,7 +411,10 @@ def dashboard(request):
                     if resolved_count:
                         messages.success(request, f"{selected_label} の再提出依頼を対応済みにしました。")
                     if was_submitted:
-                        messages.info(request, "領収書を追加したため、この提出月を下書きに戻しました。内容を確認して再度提出してください。")
+                        messages.info(
+                            request,
+                            "領収書を追加したため、状態を『未提出領収書あり』に戻しました。内容を確認して再度提出してください。",
+                        )
                     if upload_form.is_extra:
                         messages.success(
                             request,
@@ -387,15 +427,33 @@ def dashboard(request):
                         )
                     selected_value = ReceiptBatchUploadForm.OTHER_VALUE if upload_form.is_extra else str(upload_form.selected_service.pk)
                     return redirect(
-                        f"{reverse('dashboard')}?month={month_query(selected_month)}&service={selected_value}"
+                        f"{reverse('dashboard')}?receipt_month={month_query(selected_receipt_month)}&service={selected_value}"
                     )
 
         elif action == "submit":
+            monthly_summary = build_user_month_summary(request.user, selected_month)
+            if monthly_summary.rows and not monthly_summary.is_complete:
+                unresolved = [
+                    row.service.display_name
+                    for row in (*monthly_summary.missing_required, *monthly_summary.api_pending)
+                ]
+                preview = "、".join(unresolved[:5])
+                if len(unresolved) > 5:
+                    preview += f" ほか{len(unresolved) - 5}件"
+                messages.warning(
+                    request,
+                    "今回アップロードした領収書は受け付け済みです。"
+                    f"まだ領収書の提出またはAPI利用確認が済んでいないサービスがあります（{preview}）。"
+                    "ほかの領収書も忘れずに追加してください。",
+                )
+                return redirect(
+                    f"{reverse('dashboard')}?receipt_month={month_query(selected_receipt_month)}"
+                )
             try:
                 submission.submit()
                 messages.success(
                     request,
-                    f"{selected_month:%Y年%m月}提出（対象領収書月: {receipt_month_for_submission(selected_month):%Y年%m月}）を完了しました。",
+                    f"{selected_receipt_month:%Y年%m月}発行分の領収書提出を完了しました。",
                 )
                 return redirect(submission.get_absolute_url())
             except ValidationError as exc:
@@ -419,10 +477,10 @@ def dashboard(request):
             "monthly_summary": monthly_summary,
             "open_resubmission_requests": open_resubmission_requests,
             "selected_month": selected_month,
-            "target_receipt_month": receipt_month_for_submission(selected_month),
+            "selected_receipt_month": selected_receipt_month,
+            "target_receipt_month": selected_receipt_month,
             "selected_upload_choice": selected_upload_choice,
-            "retention_months": settings.RECEIPT_RETENTION_MONTHS,
-        },
+                    },
     )
 
 
@@ -484,6 +542,7 @@ def user_service_create(request):
             "form": form,
             "submit_label": "利用サービスへ登録する",
             "back_url": reverse("user_services"),
+            "exception_request_url": reverse("service_exception_request_create"),
             "available_catalog_count": form.fields["catalog_service"].queryset.count(),
         },
     )
@@ -519,8 +578,7 @@ def service_exception_request_create(request):
             "title": "新規サービス例外申請",
             "form": form,
             "submit_label": "例外申請を提出する",
-            "back_url": reverse("user_services"),
-            "service_registration_url": reverse("user_service_create"),
+            "back_url": reverse("user_service_create"),
         },
     )
 
@@ -982,7 +1040,10 @@ def replace_receipt_file(request, pk: int):
     fallback_url = (
         receipt.submission.get_absolute_url()
         if receipt.submission.is_submitted
-        else f"{reverse('dashboard')}?month={month_query(receipt.submission.period_month)}"
+        else (
+            f"{reverse('dashboard')}?receipt_month="
+            f"{month_query(receipt.submission.target_receipt_month)}"
+        )
     )
     form = ReceiptFileReplaceForm(request.POST, request.FILES)
     if not form.is_valid():
@@ -1049,7 +1110,10 @@ def delete_receipt(request, pk: int):
     service_name = receipt.service_display_name_snapshot
     receipt.delete()
     messages.success(request, f"{service_name} の領収書を削除しました。")
-    return redirect(f"{reverse('dashboard')}?month={month_query(selected_month)}")
+    return redirect(
+        f"{reverse('dashboard')}?receipt_month="
+        f"{month_query(receipt_month_for_submission(selected_month))}"
+    )
 
 
 @staff_member_required
@@ -1345,6 +1409,7 @@ def staff_ai_summary_for_month(selected_month) -> dict:
     manual_review_filter = (
         Q(ai_check_card_last4=False)
         | Q(ai_check_payee=False)
+        | Q(ai_check_recipient_name=False)
         | Q(ai_check_service_payee_related=False)
         | Q(ai_check_date=False)
         | Q(ai_check_amount=False)
@@ -1361,6 +1426,7 @@ def staff_ai_summary_for_month(selected_month) -> dict:
         "ai_review_count": receipts.filter(ai_filename_status__in=[ReceiptFilenameStatus.NEEDS_REVIEW, ReceiptFilenameStatus.FAILED]).count(),
         "period_mismatch_count": receipts.filter(ai_period_check_status=ReceiptPeriodCheckStatus.MISMATCHED).count(),
         "manual_review_count": available.filter(ai_filename_checked_at__isnull=False).filter(manual_review_filter).count(),
+        "recipient_name_review_count": available.filter(ai_filename_checked_at__isnull=False, ai_check_recipient_name=False).count(),
         "service_payee_review_count": available.filter(ai_filename_checked_at__isnull=False, ai_check_service_payee_related=False).count(),
     }
 
@@ -1477,7 +1543,7 @@ def staff_user_month_status(request, user_id: int):
                 if was_submitted:
                     messages.warning(
                         request,
-                        "提出済みの提出月へ領収書を追加したため、下書きに戻しました。ユーザーに内容確認と再提出を依頼してください。",
+                        "提出済みの月へ領収書を追加したため、「未提出領収書あり」に戻しました。ユーザーに内容確認と再提出を依頼してください。",
                     )
                 selected_value = (
                     ReceiptBatchUploadForm.OTHER_VALUE
@@ -1553,22 +1619,26 @@ def global_statement_services(statement_month):
 
 
 def global_statement_queryset(period_month):
+    candidate_queryset = CardStatementMatchCandidate.objects.select_related(
+        "receipt__submission__user",
+        "receipt__service__catalog_service",
+    ).order_by("rank", "-score", "receipt_id")
+    item_queryset = (
+        CardStatementItem.objects.select_related(
+            "matched_user",
+            "matched_catalog_service",
+            "matched_service__user",
+            "matched_service__catalog_service",
+            "matched_receipt__submission__user",
+            "matched_receipt__service__catalog_service",
+        )
+        .prefetch_related(Prefetch("match_candidates", queryset=candidate_queryset))
+        .order_by("sequence", "pk")
+    )
     return (
         CardStatement.objects.filter(period_month=period_month)
         .select_related("uploaded_by")
-        .prefetch_related(
-            Prefetch(
-                "items",
-                queryset=CardStatementItem.objects.select_related(
-                    "matched_user",
-                    "matched_catalog_service",
-                    "matched_service__user",
-                    "matched_service__catalog_service",
-                    "matched_receipt__submission__user",
-                    "matched_receipt__service__catalog_service",
-                ).order_by("sequence", "pk"),
-            )
-        )
+        .prefetch_related(Prefetch("items", queryset=item_queryset))
         .order_by("-uploaded_at", "-pk")
     )
 
@@ -1722,6 +1792,10 @@ def staff_update_statement_item(request, pk: int):
         pk=pk,
     )
     action = request.POST.get("item_action") or "match"
+    redirect_url = (
+        f"{reverse('staff_card_statements')}?month={month_query(item.statement.period_month)}"
+        f"#statement-{item.statement_id}"
+    )
     if action == "ignore":
         item.matched_user = None
         item.matched_catalog_service = None
@@ -1731,13 +1805,49 @@ def staff_update_statement_item(request, pk: int):
         item.receipt_required = False
         item.match_confidence = 1.0
         item.match_memo = "管理者確認により領収書管理対象外としました。"
+    elif action == "receipt":
+        receipt_id = request.POST.get("receipt_id")
+        candidate = get_object_or_404(
+            CardStatementMatchCandidate.objects.select_related(
+                "receipt__submission__user",
+                "receipt__service__catalog_service",
+            ),
+            item=item,
+            receipt_id=receipt_id,
+        )
+        receipt = candidate.receipt
+        if not receipt.file_available or receipt.submission.period_month != item.statement.period_month:
+            messages.error(request, "この候補領収書は現在の明細月では利用できません。最新の領収書と再照合してください。")
+            return redirect(redirect_url)
+        conflict = (
+            CardStatementItem.objects.filter(
+                statement=item.statement,
+                matched_receipt=receipt,
+            )
+            .exclude(pk=item.pk)
+            .first()
+        )
+        if conflict:
+            messages.error(
+                request,
+                f"この領収書は明細 {conflict.line_reference or conflict.sequence} ですでに使用されています。",
+            )
+            return redirect(redirect_url)
+        item.matched_receipt = receipt
+        item.matched_user = receipt.submission.user
+        item.matched_service = receipt.service
+        item.matched_catalog_service = receipt.service.catalog_service if receipt.service_id else item.matched_catalog_service
+        item.match_status = StatementMatchStatus.MATCHED
+        item.receipt_required = True
+        item.match_confidence = 1.0
+        item.match_memo = (
+            f"管理者が照合候補「{receipt.display_filename}」を確認し、この明細行の領収書として確定しました。"
+        )
     else:
         service_id = request.POST.get("service_id")
         if not service_id:
             messages.error(request, "対応するユーザー / サービスを選択してください。")
-            return redirect(
-                f"{reverse('staff_card_statements')}?month={month_query(item.statement.period_month)}#statement-{item.statement_id}"
-            )
+            return redirect(redirect_url)
         service = get_object_or_404(
             RegisteredService.objects.select_related("user", "catalog_service"),
             pk=service_id,
@@ -1766,9 +1876,8 @@ def staff_update_statement_item(request, pk: int):
     )
     reconcile_card_statement_items(item.statement_id, preserve_manual=True)
     messages.success(request, f"明細 {item.line_reference or item.pk} の対応を更新しました。")
-    return redirect(
-        f"{reverse('staff_card_statements')}?month={month_query(item.statement.period_month)}#statement-{item.statement_id}"
-    )
+    return redirect(redirect_url)
+
 
 
 def staff_history(request):
@@ -1812,7 +1921,7 @@ def staff_history(request):
         elif submission.status == SubmissionStatus.SUBMITTED:
             status = "提出済み"
         else:
-            status = "下書き"
+            status = SubmissionStatus.DRAFT.label
         receipt_count = len(submission_receipts)
         available_file_count = sum(1 for receipt in submission_receipts if receipt.file_available)
         purged_file_count = sum(1 for receipt in submission_receipts if receipt.file_deleted_at)
@@ -1849,7 +1958,7 @@ def staff_history(request):
         "total_users": len(users),
         "active_users": sum(1 for user in users if getattr(user.profile, "account_status", None) == UserAccountStatus.ACTIVE),
         "submitted": sum(1 for row in rows if row["status"] == "提出済み"),
-        "draft": sum(1 for row in rows if row["status"] == "下書き"),
+        "draft": sum(1 for row in rows if row["status"] == SubmissionStatus.DRAFT.label),
         "not_started": sum(1 for row in rows if row["status"] == "未着手"),
         "incomplete_users": sum(1 for row in rows if not row["monthly_summary"].is_complete),
         "missing_service_count": sum(row["monthly_summary"].missing_required_count for row in rows),
@@ -1866,6 +1975,7 @@ def staff_history(request):
         "ai_review_count": ai_stats["ai_review_count"],
         "period_mismatch_count": ai_stats["period_mismatch_count"],
         "manual_review_count": ai_stats["manual_review_count"],
+        "recipient_name_review_count": ai_stats["recipient_name_review_count"],
         "service_payee_review_count": ai_stats["service_payee_review_count"],
         "open_resubmission_request_count": open_resubmission_requests.count(),
     }
@@ -1888,12 +1998,27 @@ def staff_history(request):
 def history(request):
     if request.user.is_staff:
         return staff_history(request)
-    submissions = (
+    submissions = list(
         Submission.objects.filter(user=request.user)
         .prefetch_related("receipts")
         .order_by("-period_month", "-created_at")
     )
-    return render(request, "receipts/history.html", {"submissions": submissions})
+    rows = []
+    for submission in submissions:
+        summary = build_user_month_summary(request.user, submission.period_month)
+        remaining_service_count = summary.missing_required_count + summary.api_pending_count
+        rows.append(
+            {
+                "submission": submission,
+                "receipt_month": submission.target_receipt_month,
+                "status_label": submission.get_status_display(),
+                "service_count": summary.total_services,
+                "resolved_service_count": summary.resolved_count,
+                "remaining_service_count": remaining_service_count,
+                "receipt_count": submission.receipt_count,
+            }
+        )
+    return render(request, "receipts/history.html", {"history_rows": rows})
 
 
 @login_required
@@ -2176,12 +2301,15 @@ def receipt_manifest_csv(submissions) -> str:
         "ai_filename_status",
         "ai_filename_admin_memo",
         "ai_extracted_payee",
+        "ai_extracted_recipient_name",
         "ai_extracted_card_last4",
         "ai_receipt_month",
         "ai_period_check_status",
         "ai_period_check_memo",
         "ai_check_card_last4",
         "ai_check_payee",
+        "ai_check_recipient_name",
+        "ai_recipient_name_check_memo",
         "ai_check_service_payee_related",
         "ai_service_payee_check_memo",
         "ai_check_date",
@@ -2220,12 +2348,15 @@ def receipt_manifest_csv(submissions) -> str:
                 receipt.get_ai_filename_status_display(),
                 receipt.ai_filename_admin_memo,
                 receipt.ai_extracted_payee,
+                receipt.ai_extracted_recipient_name,
                 receipt.ai_extracted_card_last4,
                 receipt.ai_receipt_month,
                 receipt.get_ai_period_check_status_display(),
                 receipt.ai_period_check_memo,
                 "yes" if receipt.ai_check_card_last4 else "no",
                 "yes" if receipt.ai_check_payee else "no",
+                "yes" if receipt.ai_check_recipient_name else "no",
+                receipt.ai_recipient_name_check_memo,
                 "yes" if receipt.ai_check_service_payee_related else "no",
                 receipt.ai_service_payee_check_memo,
                 "yes" if receipt.ai_check_date else "no",

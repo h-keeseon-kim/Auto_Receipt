@@ -48,7 +48,7 @@
     {% elif statement.items.all %}
         <div class="table-wrap scroll-box xlarge table-scroll-wide">
             <table class="statement-items-table global-statement-table">
-                <thead><tr><th>明細No.</th><th>利用日</th><th>ご利用先</th><th>金額</th><th>照合ユーザー</th><th>対応サービス</th><th>AI一致</th><th>領収書状況</th><th>確認メモ</th><th>管理者確認</th></tr></thead>
+                <thead><tr><th>明細No.</th><th>利用日</th><th>ご利用先</th><th>金額</th><th>照合ユーザー</th><th>対応サービス</th><th>照合判定</th><th>領収書状況</th><th>確認メモ</th><th>管理者確認</th></tr></thead>
                 <tbody>
                     {% for item in statement.items.all %}
                         <tr class="{{ item.row_class }}">
@@ -62,10 +62,46 @@
                             <td>{{ item.matched_user_label }}</td>
                             <td>{{ item.matched_service_label }}</td>
                             <td><span class="badge {% if item.match_status == 'matched' %}submitted{% elif item.match_status == 'ignored' %}neutral{% else %}draft{% endif %}">{{ item.get_match_status_display }}</span></td>
-                            <td>
+                            <td class="statement-receipt-cell">
                                 <span class="badge {% if item.matched_receipt and item.matched_receipt.file_available %}submitted{% elif not item.receipt_required %}neutral{% else %}draft{% endif %}">{{ item.receipt_status_label }}</span>
                                 {% if item.matched_receipt and item.matched_receipt.file_available %}
                                     <div class="small"><a href="{% url 'download_receipt' item.matched_receipt.pk %}">{{ item.matched_receipt.display_filename }}</a></div>
+                                {% endif %}
+                                {% if item.match_candidates.all %}
+                                    <details class="statement-candidates">
+                                        <summary>照合候補 {{ item.match_candidates.all|length }}件</summary>
+                                        <div class="statement-candidate-list">
+                                            {% for candidate in item.match_candidates.all %}
+                                                <article class="statement-candidate-card {% if item.matched_receipt_id == candidate.receipt_id %}selected{% endif %}">
+                                                    <div class="statement-candidate-header">
+                                                        <strong>候補{{ candidate.rank }}：{{ candidate.receipt.submission.user.username }}</strong>
+                                                        <span class="badge {{ candidate.badge_class }}">{{ candidate.get_strength_display }} {{ candidate.confidence_percent }}%</span>
+                                                    </div>
+                                                    <div class="small"><a href="{% url 'download_receipt' candidate.receipt.pk %}">{{ candidate.receipt.display_filename }}</a></div>
+                                                    <div class="muted small">
+                                                        {{ candidate.receipt.service_display_name_snapshot }} / 
+                                                        {% if candidate.receipt.amount is not None %}{{ candidate.receipt.amount|floatformat:-2 }} {{ candidate.receipt.currency }}{% else %}金額未抽出{% endif %} / 
+                                                        {{ candidate.receipt.issued_on|date:"Y-m-d"|default:"日付未抽出" }}
+                                                    </div>
+                                                    {% if candidate.evidence_labels %}
+                                                        <div class="statement-candidate-evidence">
+                                                            {% for label in candidate.evidence_labels %}<span>{{ label }}</span>{% endfor %}
+                                                        </div>
+                                                    {% endif %}
+                                                    {% if candidate.rationale %}<p class="muted small">{{ candidate.rationale }}</p>{% endif %}
+                                                    {% if item.matched_receipt_id == candidate.receipt_id %}
+                                                        <span class="badge submitted">現在の照合先</span>
+                                                    {% else %}
+                                                        <form method="post" action="{% url 'staff_update_statement_item' item.pk %}">
+                                                            {% csrf_token %}
+                                                            <input type="hidden" name="receipt_id" value="{{ candidate.receipt_id }}">
+                                                            <button type="submit" name="item_action" value="receipt" class="button small">この領収書で確定</button>
+                                                        </form>
+                                                    {% endif %}
+                                                </article>
+                                            {% endfor %}
+                                        </div>
+                                    </details>
                                 {% endif %}
                             </td>
                             <td>{{ item.match_memo|default:"-" }}</td>
@@ -92,7 +128,7 @@
                 </tbody>
             </table>
         </div>
-        <p class="muted small statement-highlight-legend"><span class="legend-swatch missing"></span> 黄色は領収書が必要なのに全ユーザーの提出領収書から見つからない行、<span class="legend-swatch review"></span> 薄橙色はユーザーまたはサービスの対応が曖昧で手動確認が必要な行です。</p>
+        <p class="muted small statement-highlight-legend"><span class="legend-swatch missing"></span> 黄色は提出済み領収書を確定できていない行、<span class="legend-swatch review"></span> 薄橙色は金額一致などで領収書の提出は確認できたものの、ご利用先・サービスとの対応を手動確認する行です。</p>
     {% else %}
         <p class="muted center">解析結果はありません。</p>
     {% endif %}

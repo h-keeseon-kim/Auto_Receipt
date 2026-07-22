@@ -20,7 +20,7 @@
     <div class="card"><span class="label">対象月</span><strong>{{ selected_month|date:"Y年m月" }}</strong></div>
     <div class="card"><span class="label">対象ユーザー</span><strong>{{ stats.total_users }}</strong></div>
     <div class="card"><span class="label">提出済み</span><strong>{{ stats.submitted }}</strong></div>
-    <div class="card"><span class="label">下書き</span><strong>{{ stats.draft }}</strong></div>
+    <div class="card"><span class="label">未提出領収書あり</span><strong>{{ stats.draft }}</strong></div>
     <div class="card"><span class="label">未着手</span><strong>{{ stats.not_started }}</strong></div>
     <div class="card"><span class="label">利用中サービス</span><strong>{{ stats.active_service_count }}</strong></div>
     <div class="card"><span class="label">ユーザー起点登録</span><strong>{{ stats.user_registered_count }}</strong></div>
@@ -45,7 +45,7 @@
                         <td>{{ row.active_service_count }}</td>
                         <td>{% if row.user_registered_count %}<span class="badge draft">{{ row.user_registered_count }}</span>{% else %}0{% endif %}</td>
                         <td>{% if row.user_stopped_count %}<span class="badge draft">{{ row.user_stopped_count }}</span>{% else %}0{% endif %}</td>
-                        <td><span class="badge {% if row.status == '提出済み' %}submitted{% elif row.status == '下書き' %}draft{% else %}neutral{% endif %}">{{ row.status }}</span></td>
+                        <td><span class="badge {% if row.status == '提出済み' %}submitted{% elif row.status == '未提出領収書あり' %}draft{% else %}neutral{% endif %}">{{ row.status }}</span></td>
                         <td>{{ row.receipt_count }}</td>
                         <td>{{ row.available_file_count }}</td>
                         <td>{{ row.purged_file_count }}</td>

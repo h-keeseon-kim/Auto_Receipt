@@ -27,6 +27,7 @@
     <div class="card"><span class="label">AI抽出中</span><strong data-ai-summary="ai_processing_count">{{ stats.ai_processing_count }}</strong></div>
     <div class="card"><span class="label">AI要確認</span><strong data-ai-summary="ai_review_count">{{ stats.ai_review_count }}</strong></div>
     <div class="card"><span class="label">手動確認対象</span><strong data-ai-summary="manual_review_count">{{ stats.manual_review_count }}</strong></div>
+    <div class="card"><span class="label">利用者名（宛名）要確認</span><strong data-ai-summary="recipient_name_review_count">{{ stats.recipient_name_review_count }}</strong></div>
     <div class="card"><span class="label">サービス/メモ関連要確認</span><strong data-ai-summary="service_payee_review_count">{{ stats.service_payee_review_count }}</strong></div>
     <div class="card"><span class="label">対象領収書月不一致</span><strong data-ai-summary="period_mismatch_count">{{ stats.period_mismatch_count }}</strong></div>
     <div class="card"><span class="label">再提出待ち</span><strong>{{ stats.open_resubmission_request_count }}</strong></div>
@@ -51,7 +52,7 @@
                     <tr class="{% if row.needs_attention %}attention-row{% endif %}">
                         <td><strong>{{ row.user.username }}</strong><div class="muted small">{{ row.user.email|default:"-" }}</div></td>
                         <td><span class="badge {% if row.user.profile.account_status == 'active' %}submitted{% else %}neutral{% endif %}">{{ row.user.profile.get_account_status_display }}</span></td>
-                        <td><span class="badge {% if row.status == '提出済み' %}submitted{% elif row.status == '下書き' %}draft{% else %}neutral{% endif %}">{{ row.status }}</span></td>
+                        <td><span class="badge {% if row.status == '提出済み' %}submitted{% elif row.status == '未提出領収書あり' %}draft{% else %}neutral{% endif %}">{{ row.status }}</span></td>
                         <td><strong>{{ row.monthly_summary.progress_label }}</strong> / {{ row.monthly_summary.total_services }}件</td>
                         <td>{% if row.monthly_summary.missing_required_count %}<span class="badge draft">{{ row.monthly_summary.missing_required_count }}</span>{% else %}<span class="badge submitted">0</span>{% endif %}</td>
                         <td>{% if row.monthly_summary.api_pending_count %}<span class="badge draft">{{ row.monthly_summary.api_pending_count }}</span>{% else %}<span class="badge submitted">0</span>{% endif %}</td>

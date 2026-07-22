@@ -44,7 +44,7 @@ class ServiceMonthStatus:
     def status_label(self) -> str:
         return {
             "uploaded": "領収書あり",
-            "no_usage": "対象領収書月は利用なし",
+            "no_usage": "この月は利用なし",
             "api_pending": "API利用確認待ち",
             "missing": "領収書未提出",
         }[self.status_code]

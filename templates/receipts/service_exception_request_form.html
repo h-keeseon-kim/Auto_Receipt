@@ -5,18 +5,15 @@
     <h1>{{ title }}</h1>
     <p class="muted">サービスマスターに登録されていない新規サービスを利用したい場合だけ、サービス名・支払い方法・用途を記載して申請してください。</p>
     <div class="notice section compact-notice">
-        <strong>最初にサービス利用登録を確認してください</strong>
-        <p class="muted small">サービスマスターに登録済みのサービスは例外申請の対象ではありません。先に「サービス利用登録」の一覧を確認してください。</p>
-        <div class="actions">
-            <a href="{{ service_registration_url }}" class="button small">サービス利用登録を確認</a>
-        </div>
+        <strong>サービス利用登録の一覧にない場合だけ申請します</strong>
+        <p class="muted small">登録済みサービスに戻る場合は、下の「サービス利用登録へ戻る」を押してください。</p>
     </div>
     <form method="post" class="stack">
         {% csrf_token %}
         {{ form.as_p }}
         <div class="actions">
             <button type="submit" class="button primary">{{ submit_label|default:"申請する" }}</button>
-            <a href="{{ back_url }}" class="button">戻る</a>
+            <a href="{{ back_url }}" class="button">サービス利用登録へ戻る</a>
         </div>
     </form>
 </section>

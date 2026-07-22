@@ -121,7 +121,7 @@ def month_label(value: date) -> str:
 
 
 def upload_url_for_month(target_month: date) -> str:
-    return build_app_url(f"{reverse('dashboard')}?month={target_month:%Y-%m}")
+    return build_app_url(f"{reverse('dashboard')}?receipt_month={receipt_month_for_submission(target_month):%Y-%m}")
 
 
 def service_list_text(rows) -> str:

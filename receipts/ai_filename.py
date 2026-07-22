@@ -30,6 +30,9 @@ class ReceiptFilenameResult:
     currency: str = ""
     card_last4: str = ""
     card_last4_matches_target: bool | None = None
+    recipient_name: str = ""
+    recipient_name_matches_user: bool | None = None
+    recipient_name_relation_reason: str = ""
     payee_confirmed: bool = False
     date_confirmed: bool = False
     amount_confirmed: bool = False
@@ -58,6 +61,7 @@ def generate_ai_receipt_filename(
     content_type: str,
     service_display_name: str,
     user_filename_part: str = "",
+    expected_recipient_context: str = "",
     service_match_hints: str = "",
     receipt_memo: str = "",
     is_extra: bool = False,
@@ -110,6 +114,7 @@ def generate_ai_receipt_filename(
                         content_type=content_type,
                         service_display_name=service_display_name,
                         user_filename_part=user_filename_part,
+                        expected_recipient_context=expected_recipient_context,
                         service_match_hints=service_match_hints,
                         receipt_memo=receipt_memo,
                         is_extra=is_extra,
@@ -140,6 +145,7 @@ def build_openai_content(
     content_type: str,
     service_display_name: str,
     user_filename_part: str = "",
+    expected_recipient_context: str = "",
     service_match_hints: str = "",
     receipt_memo: str = "",
     is_extra: bool = False,
@@ -190,6 +196,7 @@ def build_openai_content(
             "text": (
                 context_lines
                 + f"ファイル名に使うユーザー名部分: {sanitize_filename_part(user_filename_part, fallback='user')}\n"
+                + f"領収書の利用者名・宛名との照合に使う対象ユーザー情報: {expected_recipient_context or '氏名情報なし'}\n"
                 + f"元ファイル名: {original_filename}\n"
                 + "必ず次の順番で確認してください。\n"
                 + f"1. 領収書内の支払カードまたは支払方法に表示されるカード末尾4桁が {target} で終わるか確認する。"
@@ -197,12 +204,19 @@ def build_openai_content(
                 + "2. 領収書内の実際の払先・販売者・請求元・merchant/payee を確認する。"
                 + "画面上のサービス名やユーザー入力メモより、領収書に表示された請求元を優先する。"
                 + "例えば ChatGPT（サブスク）の払先は OpenAI、Claude（サブスク）の払先は Anthropic のように判断する。\n"
-                + relation_instruction
-                + "4. 支払日または領収書日付、合計金額、通貨を確認する。\n"
-                + filename_instruction
-                + "6. ファイル名はアプリ側で YYMMDD_ユーザー名_filename_label_金額_通貨 の形式に整形する。\n"
-                + f"7. can_create_filename は、カード末尾が {target} と確認でき、払先・filename_label・日付・金額・通貨を高い確度で読め、"
+                + "3. 領収書の Billed to、Bill to、Customer、Account holder、宛名、利用者名、ご使用者氏名、購入者名など、"
+                + "支払先ではなく利用者側の名前を確認する。対象ユーザー情報と明確に対応する場合は "
+                + "recipient_name_matches_user を true、明確に別人・別利用者の場合は false、"
+                + "宛名がない・略称だけ・判断材料不足の場合は null にする。"
+                + "メールアドレスのローカル部（例: keeseon.kim）と Keeseon Kim のような表記揺れは関連ありとしてよい。"
+                + "会社名や部署名だけで個人との対応を断定できない場合は null にする。\n"
+                + relation_instruction.replace("3. ", "4. ", 1)
+                + "5. 支払日または領収書日付、合計金額、通貨を確認する。\n"
+                + filename_instruction.replace("5. ", "6. ", 1)
+                + "7. ファイル名はアプリ側で YYMMDD_ユーザー名_filename_label_金額_通貨 の形式に整形する。\n"
+                + f"8. can_create_filename は、カード末尾が {target} と確認でき、払先・filename_label・日付・金額・通貨を高い確度で読め、"
                 + f"さらに{relation_name}が関連すると確認できる場合だけ true にする。"
+                + "利用者名・宛名の一致はファイル名作成可否には含めず、独立した管理者確認項目として返す。"
                 + "作成が難しい場合は false にし、reason に管理者が確認すべき理由を日本語で短く書く。"
             ),
         },
@@ -237,6 +251,9 @@ def receipt_filename_schema() -> dict[str, Any]:
                 "card_last4": {"type": ["string", "null"], "description": "領収書に表示された支払カード末尾4桁。読めない場合は null。"},
                 "card_last4_matches_target": {"type": ["boolean", "null"], "description": "カード末尾が指定された末尾4桁と一致するか。読めない場合は null。"},
                 "payee": {"type": ["string", "null"], "description": "実際の払先・販売者・請求元。登録サービス名ではなく領収書上の相手先。"},
+                "recipient_name": {"type": ["string", "null"], "description": "領収書の利用者名、宛名、ご使用者氏名、購入者名、Billed to、Customer、Account holder。払先名ではない。"},
+                "recipient_name_matches_user": {"type": ["boolean", "null"], "description": "領収書の利用者名・宛名が対象ユーザー情報と明確に対応するか。曖昧・記載なしの場合は null。"},
+                "recipient_name_relation_reason": {"type": "string", "description": "利用者名・宛名と対象ユーザーの対応について、管理者が確認すべき根拠または不足情報。"},
                 "filename_label": {"type": ["string", "null"], "description": "ファイル名に使う短い名称。通常は払先企業名。その他領収書では領収書内容を優先しつつ必須メモを補助情報にした企業名または企業名+短い取引種別。"},
                 "service_payee_related": {"type": ["boolean", "null"], "description": "通常領収書では登録サービスと払先、その他領収書では必須メモと領収書内容が合理的に関連しているか。曖昧・確認不可の場合は null。"},
                 "service_payee_relation_reason": {"type": "string", "description": "関連性について管理者が確認すべき理由や根拠。"},
@@ -251,6 +268,9 @@ def receipt_filename_schema() -> dict[str, Any]:
                 "card_last4",
                 "card_last4_matches_target",
                 "payee",
+                "recipient_name",
+                "recipient_name_matches_user",
+                "recipient_name_relation_reason",
                 "filename_label",
                 "service_payee_related",
                 "service_payee_relation_reason",
@@ -310,6 +330,13 @@ def build_result_from_payload(
     if service_payee_related is not None:
         service_payee_related = bool(service_payee_related)
     service_relation_reason = str(payload.get("service_payee_relation_reason") or "").strip()
+
+    recipient_name = normalize_recipient_name(payload.get("recipient_name") or "")
+    recipient_match_supplied = "recipient_name_matches_user" in payload
+    recipient_name_matches_user = payload.get("recipient_name_matches_user")
+    if recipient_name_matches_user is not None:
+        recipient_name_matches_user = bool(recipient_name_matches_user)
+    recipient_name_relation_reason = str(payload.get("recipient_name_relation_reason") or "").strip()
 
     payee = normalize_payee(payload.get("payee") or "")
     filename_label = normalize_filename_label(payload.get("filename_label") or payee)
@@ -376,6 +403,11 @@ def build_result_from_payload(
         currency=currency,
         card_last4=card_last4,
         card_last4_matches_target=card_matches,
+        recipient_name=recipient_name,
+        recipient_name_matches_user=(
+            recipient_name_matches_user if recipient_match_supplied else None
+        ),
+        recipient_name_relation_reason=recipient_name_relation_reason,
         payee_confirmed=bool(payee),
         date_confirmed=payment_date is not None,
         amount_confirmed=amount is not None,
@@ -451,6 +483,29 @@ def filename_user_part_from_user(user: Any) -> str:
     return sanitize_filename_part(local_part, fallback="user")
 
 
+def recipient_reference_context_from_user(user: Any) -> str:
+    """AIが利用者名・宛名を確認するための最小限の照合情報を作る。"""
+
+    values: list[str] = []
+    full_name = " ".join(
+        part.strip()
+        for part in (getattr(user, "first_name", ""), getattr(user, "last_name", ""))
+        if part and part.strip()
+    ).strip()
+    if full_name:
+        values.append(f"登録氏名={full_name}")
+
+    email = str(getattr(user, "email", "") or getattr(user, "username", "") or "").strip()
+    if email:
+        values.append(f"アカウント={email}")
+        local_part = email.split("@", 1)[0]
+        readable_local_part = re.sub(r"[._\-]+", " ", local_part).strip()
+        if readable_local_part:
+            values.append(f"氏名候補={readable_local_part}")
+
+    return " / ".join(dict.fromkeys(values))[:500]
+
+
 def normalize_confidence(value: Any) -> float:
     if isinstance(value, str):
         lowered = value.strip().lower()
@@ -474,6 +529,18 @@ def normalize_payee(value: str) -> str:
     value = unicodedata.normalize("NFKC", value or "").strip()
     value = re.sub(r"\s+", " ", value)
     value = re.sub(r"^(merchant|payee|seller|vendor|billed by|paid to)\s*[:：]\s*", "", value, flags=re.I)
+    return value[:160]
+
+
+def normalize_recipient_name(value: str) -> str:
+    value = unicodedata.normalize("NFKC", value or "").strip()
+    value = re.sub(r"\s+", " ", value)
+    value = re.sub(
+        r"^(billed\s+to|bill\s+to|customer|account\s+holder|recipient|宛名|利用者名|ご使用者氏名|購入者名)\s*[:：]\s*",
+        "",
+        value,
+        flags=re.I,
+    )
     return value[:160]
 
 
