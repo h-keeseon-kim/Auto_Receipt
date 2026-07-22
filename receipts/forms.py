@@ -877,12 +877,24 @@ class StaffReceiptReviewForm(forms.Form):
         receipt.admin_review_note = (self.cleaned_data.get("admin_review_note") or "").strip()
         receipt.ai_filename_checked_at = receipt.ai_filename_checked_at or timezone.now()
 
+        if confirm and receipt.ai_resubmission_recommended and not receipt.admin_review_note:
+            receipt.admin_review_note = "AI再提出候補を領収書本体で確認し、再提出不要と判断しました。"
+
         if confirm:
             receipt.admin_review_status = ReceiptAdminReviewStatus.CONFIRMED
             receipt.admin_reviewed_by = reviewed_by
             receipt.admin_reviewed_at = timezone.now()
             receipt.ai_filename_status = ReceiptFilenameStatus.GENERATED
             receipt.ai_period_check_status = ReceiptPeriodCheckStatus.MATCHED
+            if receipt.ai_resubmission_recommended:
+                decision_note = (
+                    f"管理者 {reviewed_by.get_username()} が領収書本体を確認し、再提出不要と判断しました。"
+                )
+                existing_recommendation = (receipt.ai_resubmission_recommendation_memo or "").strip()
+                if decision_note not in existing_recommendation:
+                    receipt.ai_resubmission_recommendation_memo = "\n".join(
+                        part for part in (existing_recommendation, decision_note) if part
+                    )[:2000]
             target_receipt_month = receipt_month_for_submission(receipt.submission.period_month)
             receipt.ai_period_check_memo = (
                 f"管理者 {reviewed_by.get_username()} が、提出月 {receipt.submission.period_month:%Y-%m} の "
@@ -908,6 +920,8 @@ class StaffReceiptReviewForm(forms.Form):
                 "ai_filename_checked_at",
                 "ai_period_check_status",
                 "ai_period_check_memo",
+                "ai_resubmission_recommended",
+                "ai_resubmission_recommendation_memo",
                 "updated_at",
             ]
         )

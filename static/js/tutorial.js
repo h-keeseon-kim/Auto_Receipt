@@ -121,7 +121,7 @@
             pageName: "history",
             selector: "[data-tutorial-target='staff-receipt-table']",
             title: "アップロード済み領収書を確認します",
-            body: "領収書ごとに、AI確認チェック、管理者用メモ、ダウンロード、削除、再提出指示を確認できます。",
+            body: "領収書ごとにAI確認結果を確認します。問題候補がある場合は領収書本体を開き、再提出不要または再提出依頼を管理者が判断します。",
             placement: "above",
         },
         {

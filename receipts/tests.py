@@ -230,7 +230,7 @@ class ReceiptFlowTests(TestCase):
         mocked_generate.assert_called_once()
 
     @mock.patch("receipts.ai_processing.generate_ai_receipt_filename")
-    def test_ai_rejects_receipt_from_submission_month_instead_of_previous_month(self, mocked_generate):
+    def test_ai_flags_receipt_from_wrong_month_and_waits_for_admin_decision(self, mocked_generate):
         mocked_generate.return_value = ReceiptFilenameResult(
             status=ReceiptFilenameStatus.GENERATED,
             suggested_filename="260701_alice_OpenAI_220_USD.pdf",
@@ -252,14 +252,53 @@ class ReceiptFlowTests(TestCase):
 
         call_command("process_pending_receipts", "--limit", "10")
 
-        self.assertFalse(Receipt.objects.exists())
-        resubmission = ReceiptResubmissionRequest.objects.get()
-        self.assertIn("対象領収書月", resubmission.message)
-        self.assertIn("2026-06", resubmission.message)
-        self.assertIn("2026-07", resubmission.message)
+        receipt = Receipt.objects.get()
+        self.assertEqual(receipt.ai_period_check_status, ReceiptPeriodCheckStatus.MISMATCHED)
+        self.assertTrue(receipt.ai_resubmission_recommended)
+        self.assertEqual(receipt.ai_filename_status, ReceiptFilenameStatus.NEEDS_REVIEW)
+        self.assertIn("対象領収書月", receipt.ai_resubmission_recommendation_memo)
+        self.assertIn("2026-06", receipt.ai_resubmission_recommendation_memo)
+        self.assertIn("2026-07", receipt.ai_resubmission_recommendation_memo)
+        self.assertFalse(ReceiptResubmissionRequest.objects.exists())
 
     @mock.patch("receipts.ai_processing.generate_ai_receipt_filename")
-    def test_background_ai_period_mismatch_removes_receipt_and_requests_resubmission(self, mocked_generate):
+    def test_ai_recipient_name_mismatch_waits_for_admin_decision(self, mocked_generate):
+        mocked_generate.return_value = ReceiptFilenameResult(
+            status=ReceiptFilenameStatus.GENERATED,
+            suggested_filename="260619_alice_OpenAI_220_USD.pdf",
+            payee="OpenAI",
+            payment_date=date(2026, 6, 19),
+            amount=Decimal("220.00"),
+            currency="USD",
+            card_last4="7210",
+            card_last4_matches_target=True,
+            recipient_name="別の利用者",
+            recipient_name_matches_user=False,
+            recipient_name_relation_reason="対象ユーザーとは別の宛名です。",
+            service_payee_related=True,
+        )
+        self.client.login(username="alice", password="password123")
+        self.client.post(
+            reverse("dashboard") + "?month=2026-07",
+            {
+                "action": "add_receipt",
+                "service": self.service.id,
+                "file": SimpleUploadedFile("recipient.pdf", b"%PDF-1.4 recipient", content_type="application/pdf"),
+            },
+        )
+
+        call_command("process_pending_receipts", "--limit", "10")
+
+        receipt = Receipt.objects.get()
+        self.assertTrue(receipt.ai_resubmission_recommended)
+        self.assertFalse(receipt.ai_check_recipient_name)
+        self.assertIn("利用者名（宛名）", receipt.ai_resubmission_recommendation_memo)
+        self.assertIn("別の利用者", receipt.ai_resubmission_recommendation_memo)
+        self.assertTrue(receipt.file_available)
+        self.assertFalse(ReceiptResubmissionRequest.objects.exists())
+
+    @mock.patch("receipts.ai_processing.generate_ai_receipt_filename")
+    def test_background_ai_period_mismatch_keeps_receipt_until_staff_requests_resubmission(self, mocked_generate):
         mocked_generate.return_value = ReceiptFilenameResult(
             status=ReceiptFilenameStatus.GENERATED,
             suggested_filename="260531_alice_OpenAI_220_USD.pdf",
@@ -287,17 +326,27 @@ class ReceiptFlowTests(TestCase):
         self.assertContains(response, "AIによるファイル名修正・検査は、管理者が実行")
 
         call_command("process_pending_receipts", "--limit", "10")
-        self.assertFalse(Receipt.objects.exists())
-        request_item = ReceiptResubmissionRequest.objects.get()
-        self.assertEqual(request_item.status, ResubmissionRequestStatus.OPEN)
-        self.assertIn("対象月", request_item.message)
-        self.assertIn("2026-05", request_item.message)
+        receipt = Receipt.objects.get()
+        self.assertTrue(receipt.ai_resubmission_recommended)
+        self.assertEqual(receipt.ai_period_check_status, ReceiptPeriodCheckStatus.MISMATCHED)
+        self.assertFalse(ReceiptResubmissionRequest.objects.exists())
         submission = Submission.objects.get(user=self.user, period_month=date(2026, 7, 1))
         self.assertEqual(submission.status, SubmissionStatus.DRAFT)
 
         user_response = self.client.get(reverse("dashboard") + "?month=2026-07")
-        self.assertContains(user_response, "再提出依頼")
-        self.assertContains(user_response, "正しい領収書を再度アップロード")
+        self.assertNotContains(user_response, "再提出依頼があります")
+
+        admin = User.objects.create_superuser(username="admin", email="admin@example.com", password="admin-password-123")
+        self.client.logout()
+        self.client.login(username=admin.username, password="admin-password-123")
+        response = self.client.post(
+            reverse("staff_request_receipt_resubmission", args=[receipt.pk]),
+            {"reason": "領収書発行月が対象月と異なります。"},
+        )
+        self.assertEqual(response.status_code, 302)
+        self.assertFalse(Receipt.objects.filter(pk=receipt.pk).exists())
+        request_item = ReceiptResubmissionRequest.objects.get()
+        self.assertIn("領収書発行月が対象月と異なります。", request_item.message)
 
     @mock.patch("receipts.ai_processing.generate_ai_receipt_filename")
     def test_ai_filename_review_memo_is_visible_to_staff_only(self, mocked_generate):
@@ -388,8 +437,11 @@ class ReceiptFlowTests(TestCase):
         staff_response = self.client.get(reverse("history") + "?month=2026-07")
         self.assertContains(staff_response, "manual-review-row")
         self.assertContains(staff_response, "サービス/メモ関連要確認")
-        self.assertContains(staff_response, "再提出指示")
+        self.assertContains(staff_response, "確認")
+        self.assertNotContains(staff_response, ">再提出を依頼<")
         self.assertContains(staff_response, "Anthropic")
+        review_response = self.client.get(reverse("staff_receipt_review", args=[receipt.pk]))
+        self.assertContains(review_response, "再提出を依頼")
 
         response = self.client.post(
             reverse("staff_request_receipt_resubmission", args=[receipt.pk]),
@@ -487,7 +539,7 @@ class ReceiptFlowTests(TestCase):
         mocked_generate.assert_called_once()
 
     @mock.patch("receipts.ai_processing.generate_ai_receipt_filename")
-    def test_user_replace_receipt_file_is_removed_if_background_detects_different_month(self, mocked_generate):
+    def test_user_replace_receipt_file_is_flagged_if_background_detects_different_month(self, mocked_generate):
         mocked_generate.return_value = ReceiptFilenameResult(
             status=ReceiptFilenameStatus.GENERATED,
             suggested_filename="260531_alice_OpenAI_220_USD.pdf",
@@ -534,11 +586,13 @@ class ReceiptFlowTests(TestCase):
             self.assertEqual(fp.read(), b"%PDF-1.4 may")
 
         call_command("process_pending_receipts", "--limit", "10")
-        self.assertFalse(Receipt.objects.filter(pk=receipt.pk).exists())
-        request_item = ReceiptResubmissionRequest.objects.get(original_receipt_id=receipt.pk)
-        self.assertIn("対象月", request_item.message)
+        receipt.refresh_from_db()
+        self.assertTrue(receipt.ai_resubmission_recommended)
+        self.assertEqual(receipt.ai_period_check_status, ReceiptPeriodCheckStatus.MISMATCHED)
+        self.assertIn("再提出候補", receipt.ai_resubmission_recommendation_memo)
+        self.assertFalse(ReceiptResubmissionRequest.objects.exists())
         submission.refresh_from_db()
-        self.assertEqual(submission.status, SubmissionStatus.DRAFT)
+        self.assertEqual(submission.status, SubmissionStatus.SUBMITTED)
 
     def test_submission_submit_allows_persisted_period_mismatch_for_staff_follow_up(self):
         submission = Submission.objects.create(user=self.user, period_month=date(2026, 6, 1))
@@ -629,8 +683,10 @@ class ReceiptFlowTests(TestCase):
 
         self.assertContains(response, "manual-review-row")
         self.assertContains(response, "サービス/払先関連")
-        self.assertContains(response, "再提出指示")
+        self.assertNotContains(response, ">再提出を依頼<")
         self.assertContains(response, "ChatGPT と Anthropic の関連性を断定できません")
+        review_response = self.client.get(reverse("staff_receipt_review", args=[receipt.pk]))
+        self.assertContains(review_response, "再提出を依頼")
 
     def test_staff_resubmission_request_deletes_receipt_keeps_draft_and_user_can_reupload(self):
         admin = User.objects.create_superuser(username="admin", email="admin@example.com", password="admin-password-123")
@@ -695,6 +751,118 @@ class ReceiptFlowTests(TestCase):
         request_item.refresh_from_db()
         self.assertEqual(request_item.status, ResubmissionRequestStatus.RESOLVED)
         self.assertEqual(Receipt.objects.count(), 1)
+
+    def test_staff_can_delete_single_resubmission_request_and_user_notification(self):
+        admin = User.objects.create_superuser(username="admin", email="admin@example.com", password="admin-password-123")
+        request_item = ReceiptResubmissionRequest.objects.create(
+            user=self.user,
+            period_month=date(2026, 7, 1),
+            service_name_snapshot=self.service.name,
+            billing_type_snapshot=self.service.billing_type,
+            original_filename="wrong.pdf",
+            display_filename="wrong.pdf",
+            message="正しい領収書を再度アップロードしてください。",
+            created_by=admin,
+        )
+
+        self.client.login(username=self.user.username, password="password123")
+        response = self.client.get(reverse("dashboard") + "?month=2026-07")
+        self.assertContains(response, "再提出依頼があります")
+
+        self.client.logout()
+        self.client.login(username=admin.username, password="admin-password-123")
+        response = self.client.post(
+            reverse("staff_delete_resubmission_request", args=[request_item.pk]),
+            {"next": reverse("history") + "?month=2026-07"},
+        )
+        self.assertRedirects(response, reverse("history") + "?month=2026-07")
+        self.assertFalse(ReceiptResubmissionRequest.objects.exists())
+
+        self.client.logout()
+        self.client.login(username=self.user.username, password="password123")
+        response = self.client.get(reverse("dashboard") + "?month=2026-07")
+        self.assertNotContains(response, "再提出依頼があります")
+
+    def test_staff_can_delete_all_resubmission_requests_across_months(self):
+        admin = User.objects.create_superuser(username="admin", email="admin@example.com", password="admin-password-123")
+        ReceiptResubmissionRequest.objects.create(
+            user=self.user,
+            period_month=date(2026, 7, 1),
+            service_name_snapshot=self.service.name,
+            billing_type_snapshot=self.service.billing_type,
+            message="7月分",
+            created_by=admin,
+        )
+        ReceiptResubmissionRequest.objects.create(
+            user=self.user,
+            period_month=date(2026, 8, 1),
+            service_name_snapshot=self.service.name,
+            billing_type_snapshot=self.service.billing_type,
+            message="8月分",
+            status=ResubmissionRequestStatus.RESOLVED,
+            created_by=admin,
+            resolved_by=self.user,
+            resolved_at=timezone.now(),
+        )
+
+        self.client.login(username=admin.username, password="admin-password-123")
+        response = self.client.post(
+            reverse("staff_delete_resubmission_requests"),
+            {
+                "scope": "all",
+                "confirm_all": "delete_all",
+                "next": reverse("history") + "?month=2026-07",
+            },
+        )
+        self.assertRedirects(response, reverse("history") + "?month=2026-07")
+        self.assertFalse(ReceiptResubmissionRequest.objects.exists())
+
+    def test_staff_can_delete_resubmission_requests_for_selected_month_only(self):
+        admin = User.objects.create_superuser(username="admin", email="admin@example.com", password="admin-password-123")
+        ReceiptResubmissionRequest.objects.create(
+            user=self.user,
+            period_month=date(2026, 7, 1),
+            service_name_snapshot=self.service.name,
+            billing_type_snapshot=self.service.billing_type,
+            message="7月分",
+            created_by=admin,
+        )
+        august_request = ReceiptResubmissionRequest.objects.create(
+            user=self.user,
+            period_month=date(2026, 8, 1),
+            service_name_snapshot=self.service.name,
+            billing_type_snapshot=self.service.billing_type,
+            message="8月分",
+            created_by=admin,
+        )
+
+        self.client.login(username=admin.username, password="admin-password-123")
+        response = self.client.post(
+            reverse("staff_delete_resubmission_requests"),
+            {
+                "scope": "month",
+                "month": "2026-07",
+                "next": reverse("history") + "?month=2026-07",
+            },
+        )
+        self.assertRedirects(response, reverse("history") + "?month=2026-07")
+        self.assertFalse(ReceiptResubmissionRequest.objects.filter(period_month=date(2026, 7, 1)).exists())
+        self.assertTrue(ReceiptResubmissionRequest.objects.filter(pk=august_request.pk).exists())
+
+    def test_bulk_resubmission_delete_requires_explicit_confirmation(self):
+        admin = User.objects.create_superuser(username="admin", email="admin@example.com", password="admin-password-123")
+        ReceiptResubmissionRequest.objects.create(
+            user=self.user,
+            period_month=date(2026, 7, 1),
+            service_name_snapshot=self.service.name,
+            billing_type_snapshot=self.service.billing_type,
+            message="確認用",
+            created_by=admin,
+        )
+        self.client.login(username=admin.username, password="admin-password-123")
+        response = self.client.post(reverse("staff_delete_resubmission_requests"), {"scope": "all"})
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(ReceiptResubmissionRequest.objects.count(), 1)
 
     def test_user_can_upload_and_submit(self):
         self.client.login(username="alice", password="password123")
@@ -950,7 +1118,7 @@ class ReceiptFlowTests(TestCase):
         self.assertIn("領収書ファイル内の明確な記載を常に最優先", prompt)
 
     @mock.patch("receipts.ai_processing.generate_ai_receipt_filename")
-    def test_clear_extra_memo_receipt_mismatch_removes_item_and_keeps_resubmission_context(self, mocked_generate):
+    def test_clear_extra_memo_receipt_mismatch_waits_for_staff_and_keeps_context(self, mocked_generate):
         submission = Submission.objects.create(user=self.user, period_month=date(2026, 6, 1))
         receipt = Receipt.objects.create(
             submission=submission,
@@ -979,11 +1147,19 @@ class ReceiptFlowTests(TestCase):
 
         call_command("process_pending_receipts", "--limit", "10")
 
-        self.assertFalse(Receipt.objects.filter(pk=receipt.pk).exists())
+        receipt.refresh_from_db()
+        self.assertTrue(receipt.ai_resubmission_recommended)
+        self.assertIn("入力メモと領収書の内容が一致していません", receipt.ai_resubmission_recommendation_memo)
+        self.assertFalse(ReceiptResubmissionRequest.objects.exists())
+
+        admin = User.objects.create_superuser(username="admin", email="admin@example.com", password="admin-password-123")
+        self.client.login(username=admin.username, password="admin-password-123")
+        self.client.post(reverse("staff_request_receipt_resubmission", args=[receipt.pk]))
         request_item = ReceiptResubmissionRequest.objects.get()
         self.assertTrue(request_item.is_extra)
         self.assertEqual(request_item.receipt_memo_snapshot, "OpenAIからの返金領収書")
         self.assertIn("入力メモと領収書の内容が一致していません", request_item.message)
+        self.assertNotIn("領収書は削除せず保持しています", request_item.message)
 
     def test_purge_expired_receipts_deletes_file_but_keeps_metadata(self):
         submission = Submission.objects.create(user=self.user, period_month=date(2026, 6, 1))
@@ -3848,7 +4024,7 @@ class FinalWorkflowAcceptanceTests(TestCase):
         self.assertEqual(response.status_code, 404)
 
     def test_version_file_is_present_without_web_display_requirement(self):
-        self.assertEqual(Path("VERSION").read_text(encoding="utf-8").strip(), "1.7.0")
+        self.assertEqual(Path("VERSION").read_text(encoding="utf-8").strip(), "1.7.1")
 
 
 @override_settings(PASSWORD_HASHERS=FAST_PASSWORD_HASHERS)
@@ -3926,6 +4102,11 @@ class DragDropAndStaffReceiptReviewTests(TestCase):
         self.assertIn(".file-dropzone-selection-summary", dropzone_css)
 
     def test_staff_review_page_previews_and_allows_manual_confirmation(self):
+        self.receipt.ai_resubmission_recommended = True
+        self.receipt.ai_resubmission_recommendation_memo = "AIはカード番号の不一致候補を検出しました。"
+        self.receipt.save(
+            update_fields=["ai_resubmission_recommended", "ai_resubmission_recommendation_memo"]
+        )
         self.client.login(username=self.admin.username, password="admin-password-123")
         response = self.client.get(reverse("staff_receipt_review", args=[self.receipt.pk]))
         self.assertEqual(response.status_code, 200)
@@ -3933,7 +4114,7 @@ class DragDropAndStaffReceiptReviewTests(TestCase):
         self.assertContains(response, reverse("staff_preview_receipt", args=[self.receipt.pk]))
         self.assertContains(response, "別タブで開く")
         self.assertContains(response, "表示・ダウンロード用ファイル名")
-        self.assertContains(response, "すべて確認済みにする")
+        self.assertContains(response, "再提出不要として確認済みにする")
 
         payload = {
             "generated_filename": "260701_review-user_OpenAI_220_USD.pdf",
@@ -3957,7 +4138,50 @@ class DragDropAndStaffReceiptReviewTests(TestCase):
         self.assertTrue(self.receipt.admin_filename_overridden)
         self.assertEqual(self.receipt.generated_filename, "260701_review-user_OpenAI_220_USD.pdf")
         self.assertTrue(self.receipt.ai_all_checks_passed)
+        self.assertTrue(self.receipt.ai_resubmission_recommended)
+        self.assertFalse(ReceiptResubmissionRequest.objects.exists())
+        self.assertIn("再提出不要と判断", self.receipt.ai_resubmission_recommendation_memo)
         self.assertFalse(self.receipt.needs_manual_review)
+
+    def test_staff_can_confirm_ai_recommendation_without_requesting_resubmission(self):
+        self.receipt.ai_filename_status = ReceiptFilenameStatus.NEEDS_REVIEW
+        self.receipt.ai_filename_checked_at = timezone.now()
+        self.receipt.ai_resubmission_recommended = True
+        self.receipt.ai_resubmission_recommendation_memo = (
+            "AIは再提出候補と判定しました。カード末尾を確認してください。"
+        )
+        self.receipt.save(
+            update_fields=[
+                "ai_filename_status",
+                "ai_filename_checked_at",
+                "ai_resubmission_recommended",
+                "ai_resubmission_recommendation_memo",
+            ]
+        )
+        self.client.login(username=self.admin.username, password="admin-password-123")
+        payload = {
+            "generated_filename": "260701_review-user_OpenAI_220_USD.pdf",
+            "ai_check_card_last4": "on",
+            "ai_check_payee": "on",
+            "ai_check_recipient_name": "on",
+            "ai_check_service_payee_related": "on",
+            "ai_check_date": "on",
+            "ai_check_amount": "on",
+            "ai_check_currency": "on",
+            "ai_check_period_match": "on",
+            "admin_review_note": "",
+            "review_action": "confirm",
+        }
+        response = self.client.post(reverse("staff_receipt_review", args=[self.receipt.pk]), payload)
+        self.assertRedirects(response, reverse("staff_receipt_review", args=[self.receipt.pk]))
+        self.receipt.refresh_from_db()
+        self.assertTrue(Receipt.objects.filter(pk=self.receipt.pk).exists())
+        self.assertFalse(ReceiptResubmissionRequest.objects.exists())
+        self.assertEqual(self.receipt.admin_review_status, ReceiptAdminReviewStatus.CONFIRMED)
+        self.assertTrue(self.receipt.ai_resubmission_recommended)
+        self.assertIn("再提出不要", self.receipt.admin_review_note)
+        self.assertIn("再提出不要と判断", self.receipt.ai_resubmission_recommendation_memo)
+        self.assertFalse(self.receipt.needs_resubmission_decision)
 
     def test_staff_receipt_preview_allows_same_origin_iframe(self):
         self.client.login(username=self.admin.username, password="admin-password-123")

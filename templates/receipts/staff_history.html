@@ -30,6 +30,7 @@
     <div class="card"><span class="label">利用者名（宛名）要確認</span><strong data-ai-summary="recipient_name_review_count">{{ stats.recipient_name_review_count }}</strong></div>
     <div class="card"><span class="label">サービス/メモ関連要確認</span><strong data-ai-summary="service_payee_review_count">{{ stats.service_payee_review_count }}</strong></div>
     <div class="card"><span class="label">対象領収書月不一致</span><strong data-ai-summary="period_mismatch_count">{{ stats.period_mismatch_count }}</strong></div>
+    <div class="card"><span class="label">再提出判断待ち</span><strong data-ai-summary="resubmission_decision_count" class="{% if stats.resubmission_decision_count %}danger{% endif %}">{{ stats.resubmission_decision_count }}</strong></div>
     <div class="card"><span class="label">再提出待ち</span><strong>{{ stats.open_resubmission_request_count }}</strong></div>
 </section>
 
@@ -78,41 +79,75 @@
     </div>
 </section>
 
-{% if open_resubmission_requests %}
 <section class="card section">
     <div class="section-header">
         <div>
-            <h2>再提出待ち</h2>
-            <p class="muted">管理者が再提出を指示し、ユーザーの再アップロードを待っている項目です。</p>
+            <h2>再提出依頼管理</h2>
+            <p class="muted">AIは領収書を自動で取り下げません。管理者が領収書を確認し、必要な場合だけ再提出を依頼します。依頼を削除するとユーザー画面の通知も消えます。</p>
         </div>
+        {% if all_resubmission_request_count %}
+            <div class="actions nowrap">
+                {% if month_resubmission_request_count %}
+                    <form method="post" action="{% url 'staff_delete_resubmission_requests' %}" onsubmit="return confirm('表示中の月の再提出依頼をすべて削除しますか？ユーザー画面の通知も削除されます。過去に削除された領収書ファイルは復元されません。');">
+                        {% csrf_token %}
+                        <input type="hidden" name="scope" value="month">
+                        <input type="hidden" name="month" value="{{ selected_month|date:'Y-m' }}">
+                        <input type="hidden" name="next" value="{{ request.get_full_path }}">
+                        <button type="submit" class="button danger-outline">この月の依頼をすべて削除</button>
+                    </form>
+                {% endif %}
+                <form method="post" action="{% url 'staff_delete_resubmission_requests' %}" class="form-grid" onsubmit="return confirm('全期間の再提出依頼をすべて削除しますか？未対応・対応済みを含むすべての依頼とユーザー画面の通知が削除されます。過去に削除された領収書ファイルは復元されません。');">
+                    {% csrf_token %}
+                    <input type="hidden" name="scope" value="all">
+                    <input type="hidden" name="next" value="{{ request.get_full_path }}">
+                    <label class="small"><input type="checkbox" name="confirm_all" value="delete_all" required> 全期間・全状態の依頼を削除することを確認しました</label>
+                    <button type="submit" class="button danger-outline">全期間の依頼をすべて削除</button>
+                </form>
+            </div>
+        {% endif %}
     </div>
-    <div class="table-wrap scroll-box medium horizontal-scroll">
-        <table class="wide-table status-table">
-            <thead><tr><th>ユーザー</th><th>対象サービス</th><th>元ファイル</th><th>依頼日時</th><th>内容</th></tr></thead>
-            <tbody>
-                {% for request_item in open_resubmission_requests %}
-                    <tr>
-                        <td><strong>{{ request_item.user.username }}</strong></td>
-                        <td>
-                            <strong>{{ request_item.service_display_name_snapshot }}</strong>
-                            {% if request_item.receipt_memo_snapshot %}<div class="muted small">{{ request_item.receipt_memo_snapshot|linebreaksbr }}</div>{% endif %}
-                        </td>
-                        <td>{{ request_item.display_filename|default:request_item.original_filename|default:"-" }}</td>
-                        <td>{{ request_item.created_at|date:"Y-m-d H:i" }}</td>
-                        <td>{{ request_item.message }}</td>
-                    </tr>
-                {% endfor %}
-            </tbody>
-        </table>
-    </div>
+
+    {% if month_resubmission_requests %}
+        <div class="table-wrap scroll-box medium horizontal-scroll">
+            <table class="wide-table status-table">
+                <thead><tr><th>ユーザー</th><th>対象サービス</th><th>元ファイル</th><th>ステータス</th><th>依頼日時</th><th>内容</th><th>操作</th></tr></thead>
+                <tbody>
+                    {% for request_item in month_resubmission_requests %}
+                        <tr>
+                            <td><strong>{{ request_item.user.username }}</strong></td>
+                            <td>
+                                <strong>{{ request_item.service_display_name_snapshot }}</strong>
+                                {% if request_item.receipt_memo_snapshot %}<div class="muted small">{{ request_item.receipt_memo_snapshot|linebreaksbr }}</div>{% endif %}
+                            </td>
+                            <td>{{ request_item.display_filename|default:request_item.original_filename|default:"-" }}</td>
+                            <td><span class="badge {% if request_item.is_open %}draft{% else %}submitted{% endif %}">{{ request_item.get_status_display }}</span></td>
+                            <td>
+                                {{ request_item.created_at|date:"Y-m-d H:i" }}
+                                {% if request_item.created_by %}<div class="muted small">依頼者: {{ request_item.created_by.username }}</div>{% endif %}
+                            </td>
+                            <td>{{ request_item.message }}</td>
+                            <td>
+                                <form method="post" action="{% url 'staff_delete_resubmission_request' request_item.pk %}" onsubmit="return confirm('この再提出依頼を削除しますか？ユーザー画面の通知も削除されます。過去に削除された領収書ファイルは復元されません。');">
+                                    {% csrf_token %}
+                                    <input type="hidden" name="next" value="{{ request.get_full_path }}">
+                                    <button type="submit" class="button small danger-outline">依頼を削除</button>
+                                </form>
+                            </td>
+                        </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+    {% else %}
+        <p class="muted">表示中の月に再提出依頼はありません。全期間の保存件数: {{ all_resubmission_request_count }}件</p>
+    {% endif %}
 </section>
-{% endif %}
 
 <section class="card section" data-tutorial-target="staff-receipts-section">
     <div class="section-header">
         <div>
             <h2>アップロード済み領収書</h2>
-            <p class="muted">提出月 {{ selected_month|date:"Y年m月" }}（対象領収書月 {{ target_receipt_month|date:"Y年m月" }}）の領収書を、アップロード日時の新しい順に表示します。AI修正・検査は未確認ファイルだけを処理します。</p>
+            <p class="muted">提出月 {{ selected_month|date:"Y年m月" }}（対象領収書月 {{ target_receipt_month|date:"Y年m月" }}）の領収書を、アップロード日時の新しい順に表示します。AI修正・検査は未確認ファイルだけを処理し、不一致候補があっても自動で再提出依頼は出しません。</p>
         </div>
         <form method="post" action="{% url 'staff_start_ai_processing' %}" class="ai-process-form" data-ai-process-form data-status-url="{% url 'staff_ai_processing_status' %}?month={{ selected_month|date:'Y-m' }}">
             {% csrf_token %}

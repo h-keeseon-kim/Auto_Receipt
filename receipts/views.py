@@ -64,6 +64,7 @@ from .models import (
     CardStatementStatus,
     MonthlyServiceDeclaration,
     Receipt,
+    ReceiptAdminReviewStatus,
     EmailDeliveryLog,
     EmailReminderSchedule,
     EmailDeliveryStatus,
@@ -1163,8 +1164,24 @@ def staff_request_receipt_resubmission(request, pk: int):
         if receipt.is_extra and receipt.memo:
             receipt_context = f"{service_name}（{receipt.memo}）"
         display_filename = receipt.display_filename
+        admin_reason = (request.POST.get("reason") or "").strip()[:1000]
+        if not admin_reason:
+            if receipt.ai_resubmission_recommendation_memo:
+                recommendation = receipt.ai_resubmission_recommendation_memo.strip()
+                # 管理者向けの説明文はユーザーへそのまま転記せず、「理由:」以降だけを利用する。
+                if "理由:" in recommendation:
+                    recommendation = recommendation.split("理由:", 1)[1].strip()
+                # 監査用に追記された管理者判断メモはユーザー向け理由へ混ぜない。
+                recommendation = recommendation.splitlines()[0].strip()
+                admin_reason = recommendation[:1000]
+            elif receipt.ai_unchecked_labels:
+                admin_reason = f"管理者確認で未確認項目が残りました: {receipt.ai_unchecked_summary}"[:1000]
+            else:
+                admin_reason = "管理者が領収書本体を確認し、再提出が必要と判断しました"
+        admin_reason = admin_reason.rstrip("。．. ")
         message = (
             f"管理者確認の結果、{selected_month:%Y年%m月}提出（対象領収書月: {receipt_month_for_submission(selected_month):%Y年%m月}）の {receipt_context} の領収書について再提出が必要になりました。"
+            f"理由: {admin_reason}。"
             "該当ファイルは提出項目から削除済みです。正しい領収書ファイルを再度アップロードして、提出してください。"
         )
         ReceiptResubmissionRequest.objects.create(
@@ -1188,8 +1205,70 @@ def staff_request_receipt_resubmission(request, pk: int):
 
     messages.success(
         request,
-        f"{username} / {service_name} に再提出を指示しました。対象領収書は提出項目から削除され、ユーザーは該当月で再アップロードできます。",
+        f"{username} / {service_name} に再提出を依頼しました。対象領収書は提出項目から削除され、ユーザーは該当月で再アップロードできます。",
     )
+    return redirect_back_or(request, fallback_url)
+
+
+@staff_member_required
+@require_POST
+def staff_delete_resubmission_request(request, pk: int):
+    """再提出依頼レコードとユーザー通知を削除する。
+
+    依頼作成時に削除済みとなった元の領収書ファイルは復元しない。
+    """
+
+    request_item = get_object_or_404(
+        ReceiptResubmissionRequest.objects.select_related("user"),
+        pk=pk,
+    )
+    fallback_url = f"{reverse('history')}?month={month_query(request_item.period_month)}"
+    user_label = request_item.user.get_username()
+    service_label = request_item.service_display_name_snapshot
+    request_item.delete()
+    messages.success(
+        request,
+        f"{user_label} / {service_label} の再提出依頼を削除しました。ユーザー画面の再提出通知も削除されました。",
+    )
+    return redirect_back_or(request, fallback_url)
+
+
+@staff_member_required
+@require_POST
+def staff_delete_resubmission_requests(request):
+    """選択月または全期間の再提出依頼を一括削除する。"""
+
+    fallback_url = reverse("history")
+    scope = (request.POST.get("scope") or "").strip()
+    queryset = ReceiptResubmissionRequest.objects.all()
+
+    if scope == "month":
+        month_form = MonthSelectForm({"month": request.POST.get("month")})
+        if not month_form.is_valid():
+            messages.error(request, "削除対象月を確認できませんでした。")
+            return redirect_back_or(request, fallback_url)
+        selected_month = month_form.cleaned_data["month"]
+        queryset = queryset.filter(period_month=selected_month)
+        fallback_url = f"{reverse('history')}?month={month_query(selected_month)}"
+        scope_label = f"{selected_month:%Y年%m月}の"
+    elif scope == "all":
+        if request.POST.get("confirm_all") != "delete_all":
+            messages.error(request, "全期間の削除確認が不足しています。")
+            return redirect_back_or(request, fallback_url)
+        scope_label = "全期間の"
+    else:
+        messages.error(request, "再提出依頼の削除範囲を確認できませんでした。")
+        return redirect_back_or(request, fallback_url)
+
+    count = queryset.count()
+    queryset.delete()
+    if count:
+        messages.success(
+            request,
+            f"{scope_label}再提出依頼を{count}件削除しました。ユーザー画面の再提出通知も削除されました。",
+        )
+    else:
+        messages.info(request, f"{scope_label}再提出依頼はありませんでした。")
     return redirect_back_or(request, fallback_url)
 
 
@@ -1220,7 +1299,10 @@ def staff_receipt_review(request, pk: int):
             confirm = request.POST.get("review_action") == "confirm"
             form.save(reviewed_by=request.user, confirm=confirm)
             if confirm:
-                messages.success(request, f"{receipt.display_filename} を管理者確認済みにしました。")
+                if receipt.ai_resubmission_recommended:
+                    messages.success(request, f"{receipt.display_filename} を再提出不要として管理者確認済みにしました。")
+                else:
+                    messages.success(request, f"{receipt.display_filename} を管理者確認済みにしました。")
             else:
                 messages.success(request, "確認内容とファイル名を保存しました。未チェック項目があるため、確認待ちのままです。")
             reconcile_card_statement_items_for_submission_month(receipt.submission.period_month)
@@ -1292,7 +1374,11 @@ def staff_receipt_ai_status(request, pk: int):
                 "ok": True,
                 "deleted": True,
                 "redirect_url": redirect_url,
-                "message": "AI確認で明確な不一致が見つかったため、領収書を取り下げて再提出依頼を作成しました。",
+                "message": (
+                    "管理者が再提出を依頼したため、領収書を提出項目から取り下げました。"
+                    if resubmission is not None
+                    else "領収書が削除されたため、一覧へ戻ります。"
+                ),
             }
         )
     html = render_to_string(
@@ -1428,6 +1514,10 @@ def staff_ai_summary_for_month(selected_month) -> dict:
         "manual_review_count": available.filter(ai_filename_checked_at__isnull=False).filter(manual_review_filter).count(),
         "recipient_name_review_count": available.filter(ai_filename_checked_at__isnull=False, ai_check_recipient_name=False).count(),
         "service_payee_review_count": available.filter(ai_filename_checked_at__isnull=False, ai_check_service_payee_related=False).count(),
+        "resubmission_decision_count": available.filter(
+            ai_resubmission_recommended=True,
+            admin_review_status=ReceiptAdminReviewStatus.NOT_REVIEWED,
+        ).count(),
     }
 
 
@@ -1945,15 +2035,15 @@ def staff_history(request):
 
     receipts = staff_month_receipts_queryset(selected_month).order_by("-uploaded_at", "-pk")
     ai_stats = staff_ai_summary_for_month(selected_month)
-    open_resubmission_requests = (
-        ReceiptResubmissionRequest.objects.filter(
-            period_month=selected_month,
-            user_id__in=user_ids,
-            status=ResubmissionRequestStatus.OPEN,
-        )
+    month_resubmission_requests = (
+        ReceiptResubmissionRequest.objects.filter(period_month=selected_month)
         .select_related("user", "created_by")
-        .order_by("user__username", "service_name_snapshot", "created_at")
+        .order_by("status", "user__username", "service_name_snapshot", "created_at")
     )
+    open_resubmission_request_count = month_resubmission_requests.filter(
+        status=ResubmissionRequestStatus.OPEN
+    ).count()
+    all_resubmission_request_count = ReceiptResubmissionRequest.objects.count()
     stats = {
         "total_users": len(users),
         "active_users": sum(1 for user in users if getattr(user.profile, "account_status", None) == UserAccountStatus.ACTIVE),
@@ -1977,7 +2067,8 @@ def staff_history(request):
         "manual_review_count": ai_stats["manual_review_count"],
         "recipient_name_review_count": ai_stats["recipient_name_review_count"],
         "service_payee_review_count": ai_stats["service_payee_review_count"],
-        "open_resubmission_request_count": open_resubmission_requests.count(),
+        "resubmission_decision_count": ai_stats["resubmission_decision_count"],
+        "open_resubmission_request_count": open_resubmission_request_count,
     }
     return render(
         request,
@@ -1989,7 +2080,9 @@ def staff_history(request):
             "selected_month": selected_month,
             "target_receipt_month": receipt_month_for_submission(selected_month),
             "receipts": receipts,
-            "open_resubmission_requests": open_resubmission_requests,
+            "month_resubmission_requests": month_resubmission_requests,
+            "month_resubmission_request_count": month_resubmission_requests.count(),
+            "all_resubmission_request_count": all_resubmission_request_count,
         },
     )
 
@@ -2316,6 +2409,8 @@ def receipt_manifest_csv(submissions) -> str:
         "ai_check_amount",
         "ai_check_currency",
         "ai_check_period_match",
+        "ai_resubmission_recommended",
+        "ai_resubmission_recommendation_memo",
         "admin_review_status",
         "admin_reviewed_by",
         "admin_reviewed_at",
@@ -2363,6 +2458,8 @@ def receipt_manifest_csv(submissions) -> str:
                 "yes" if receipt.ai_check_amount else "no",
                 "yes" if receipt.ai_check_currency else "no",
                 "yes" if receipt.ai_check_period_match else "no",
+                "yes" if receipt.ai_resubmission_recommended else "no",
+                receipt.ai_resubmission_recommendation_memo,
                 receipt.get_admin_review_status_display(),
                 receipt.admin_reviewer_label,
                 receipt.admin_reviewed_at.isoformat() if receipt.admin_reviewed_at else "",

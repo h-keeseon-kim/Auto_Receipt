@@ -729,6 +729,8 @@ class Receipt(models.Model):
     ai_check_amount = models.BooleanField("AI確認: 金額", default=False)
     ai_check_currency = models.BooleanField("AI確認: 通貨", default=False)
     ai_check_period_match = models.BooleanField("AI確認: 対象領収書月一致", default=False)
+    ai_resubmission_recommended = models.BooleanField("AI再提出候補", default=False)
+    ai_resubmission_recommendation_memo = models.TextField("AI再提出候補メモ", blank=True)
     file_size = models.PositiveIntegerField("ファイルサイズ", null=True, blank=True)
     content_type = models.CharField("Content-Type", max_length=120, blank=True)
     upload_source = models.CharField(
@@ -929,6 +931,10 @@ class Receipt(models.Model):
         return self.file_available and self.ai_has_check_result and not self.ai_all_checks_passed
 
     @property
+    def needs_resubmission_decision(self) -> bool:
+        return self.file_available and self.ai_resubmission_recommended and not self.admin_reviewed
+
+    @property
     def needs_manual_review(self) -> bool:
         return self.ai_requires_manual_review and not self.admin_reviewed
 
@@ -952,6 +958,8 @@ class Receipt(models.Model):
             return "管理者確認済み"
         if not self.ai_has_check_result:
             return "チェック待ち"
+        if self.needs_resubmission_decision:
+            return "再提出判断待ち"
         if self.needs_manual_review:
             return "手動確認"
         return "確認OK"
@@ -1058,6 +1066,10 @@ class ReceiptResubmissionRequest(models.Model):
         if self.is_extra:
             return "その他"
         return f"{self.service_name_snapshot}（{self.get_billing_type_snapshot_display()}）"
+
+    @property
+    def target_receipt_month(self):
+        return receipt_month_for_submission(self.period_month)
 
     @property
     def is_open(self) -> bool:

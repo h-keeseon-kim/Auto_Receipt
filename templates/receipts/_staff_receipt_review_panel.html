@@ -35,6 +35,15 @@
         {% if receipt.ai_service_payee_check_memo %}<div class="message notice small">{{ receipt.ai_service_payee_check_memo|linebreaksbr }}</div>{% endif %}
         {% if receipt.ai_filename_admin_memo %}<div class="message notice small">{{ receipt.ai_filename_admin_memo|linebreaksbr }}</div>{% endif %}
         {% if receipt.ai_period_check_memo %}<div class="message notice small">{{ receipt.ai_period_check_memo|linebreaksbr }}</div>{% endif %}
+        {% if receipt.ai_resubmission_recommended and not receipt.admin_reviewed %}
+            <div class="message warning small">
+                <strong>AIは再提出候補として検出しました。</strong><br>
+                {{ receipt.ai_resubmission_recommendation_memo|linebreaksbr }}
+                <br>この判定だけでは再提出依頼は送信されません。領収書本体を確認し、「再提出不要として確認済みにする」または「再提出を依頼」を選んでください。
+            </div>
+        {% elif receipt.ai_resubmission_recommended and receipt.admin_reviewed %}
+            <div class="message success small">AIは再提出候補として検出しましたが、{{ receipt.admin_reviewer_label }} が領収書本体を確認し、再提出不要と判断済みです。</div>
+        {% endif %}
     </div>
 
     {% if not receipt.ai_is_queued and not receipt.is_ai_processing %}
@@ -68,19 +77,23 @@
             {% endif %}
             <div class="actions">
                 <button type="submit" name="review_action" value="save" class="button">確認内容を保存</button>
-                <button type="submit" name="review_action" value="confirm" class="button primary">すべて確認済みにする</button>
+                <button type="submit" name="review_action" value="confirm" class="button primary">{% if receipt.needs_resubmission_decision %}再提出不要として確認済みにする{% else %}すべて確認済みにする{% endif %}</button>
             </div>
         </form>
     {% endif %}
 
     <div class="subsection review-danger-actions">
-        <h3>問題がある場合</h3>
-        <p class="muted small">誤った領収書の場合は再提出を指示します。対象ファイルと提出項目は削除され、ユーザーへ再アップロード依頼が表示されます。</p>
+        <h3>再提出が必要と判断した場合</h3>
+        <p class="muted small">AIの判定だけでは領収書を自動削除しません。管理者が領収書本体を確認し、本当に問題がある場合だけ再提出を依頼してください。対象ファイルと提出項目は削除され、ユーザーへ再アップロード依頼が表示されます。</p>
         <div class="actions">
-            <form method="post" action="{% url 'staff_request_receipt_resubmission' receipt.pk %}" onsubmit="return confirm('この領収書に再提出を指示しますか？対象ファイルと履歴は提出項目から削除されます。');">
+            <form method="post" action="{% url 'staff_request_receipt_resubmission' receipt.pk %}" class="form-grid" onsubmit="return confirm('この領収書に再提出を依頼しますか？対象ファイルと履歴は提出項目から削除されます。');">
                 {% csrf_token %}
                 <input type="hidden" name="next" value="{% url 'staff_user_month_status' receipt.submission.user.pk %}?month={{ receipt.submission.period_month|date:'Y-m' }}">
-                <button type="submit" class="button danger-outline">再提出を指示</button>
+                <div class="form-row">
+                    <label for="resubmission-reason-{{ receipt.pk }}">ユーザーへ伝える理由（任意）</label>
+                    <textarea id="resubmission-reason-{{ receipt.pk }}" name="reason" rows="3" maxlength="1000" placeholder="例: カード番号が異なるため、正しい領収書を再アップロードしてください。"></textarea>
+                </div>
+                <button type="submit" class="button danger-outline">再提出を依頼</button>
             </form>
             <form method="post" action="{% url 'staff_delete_receipt' receipt.pk %}" onsubmit="return confirm('この領収書ファイルと履歴を削除しますか？');">
                 {% csrf_token %}
