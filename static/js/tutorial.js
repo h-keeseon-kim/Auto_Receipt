@@ -1,7 +1,7 @@
 (function () {
     "use strict";
 
-    const STATE_KEY = "receipthub:tutorial-state:v4";
+    const STATE_KEY = "receipthub:tutorial-state:v5";
     const STATE_MAX_AGE_MS = 1000 * 60 * 60 * 2;
 
     const USER_STEPS = [
@@ -16,14 +16,14 @@
             pageName: "user_services",
             selector: "[data-tutorial-target='service-registration-button']",
             title: "登録済みサービスはここから追加します",
-            body: "管理者がサービスマスターに登録したサービスは「サービス利用登録」から選択し、すぐに利用中サービスへ追加できます。管理者承認は必要ありません。",
+            body: "管理者がサービスマスターに登録したサービスは「サービス利用登録」から選び、Pカードを利用するか必ず指定して追加します。管理者承認は必要ありません。",
             placement: "left",
         },
         {
             pageName: "user_service_create",
             selector: "[data-tutorial-target='service-exception-button']",
             title: "一覧にない新規サービスだけ例外申請します",
-            body: "サービス利用登録の一覧に必要なサービスがない場合は、この青い案内枠から例外申請へ進みます。サービス名、支払い方法、用途を記載し、管理者の承認後に利用サービスへ追加されます。",
+            body: "サービス利用登録の一覧に必要なサービスがない場合は、この青い案内枠から例外申請へ進みます。サービス名、支払い方法、Pカード利用有無、用途を記載し、管理者の承認後に利用サービスへ追加されます。",
             placement: "left",
         },
         {
@@ -38,7 +38,7 @@
             pageName: "user_services",
             selector: "[data-tutorial-target='active-services-section']",
             title: "利用中サービスを確認します",
-            body: "領収書アップロード時に選べるサービスは、ここに表示される利用中サービスです。ユーザー登録、管理者登録、例外申請承認のどの方法で追加されたかも確認できます。",
+            body: "利用中サービスごとにPカード利用有無を確認できます。Pカード利用サービスだけが領収書提出・リマインド対象です。支払い方法が変わった場合は「Pカード設定」から後で修正できます。",
             placement: "above",
             scrollBlock: "nearest",
         },
@@ -46,7 +46,7 @@
             pageName: "user_services",
             selector: "[data-tutorial-target='service-stop-button'], [data-tutorial-target='stopped-services-section']",
             title: "使わなくなったサービスを停止します",
-            body: "使わなくなったサービスは「利用停止」から停止します。停止時には、最後にアップロードすべき領収書月を選択します。",
+            body: "使わなくなったサービスは「利用停止」から停止します。Pカード利用サービスでは最後にアップロードすべき領収書月を選び、Pカード未使用サービスでは月の指定は不要です。",
             placement: "above",
             scrollBlock: "nearest",
         },
@@ -68,7 +68,7 @@
             pageName: "dashboard",
             selector: "[data-tutorial-target='receipt-add-form']",
             title: "サービスを選んで領収書を追加します",
-            body: "選択した領収書発行月を確認し、登録済みサービスまたは「その他」を選びます。「＋ 領収書を追加」からファイルを選択でき、同じサービスへ複数件を追加できます。",
+            body: "選択した領収書発行月を確認し、Pカード利用中の登録サービスまたは「その他」を選びます。「＋ 領収書を追加」からファイルを選択でき、同じサービスへ複数件を追加できます。",
             placement: "above",
             scrollBlock: "center",
         },
@@ -91,7 +91,7 @@
             pageName: "history",
             selector: "[data-tutorial-target='history-table']",
             title: "月ごとの提出状況を確認します",
-            body: "この一覧では、登録サービスを「必須提出（サブスク等）」と「利用時提出（API等）」に分けて確認できます。対応済みサービス数と未対応サービス数から、残りの対応状況も把握できます。",
+            body: "この一覧では、Pカード利用サービスを「必須提出（サブスク等）」と「利用時提出（API等）」に分けて確認できます。Pカード未使用サービスは提出不要として別に表示されます。",
             placement: "above",
         },
         {
@@ -149,7 +149,7 @@
             pageName: "staff_services",
             selector: "[data-tutorial-target='staff-services-nav']",
             title: "利用サービス管理を行います",
-            body: "サービスマスターの登録、ユーザー別の登録状況、登録サービス一覧、新規登録/停止の確認を行います。",
+            body: "サービスマスターの登録、ユーザー別の登録状況、Pカード利用有無、登録サービス一覧、新規登録/停止の確認を行います。",
             placement: "below",
         },
         {

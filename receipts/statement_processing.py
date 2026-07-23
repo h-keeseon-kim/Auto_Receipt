@@ -319,7 +319,12 @@ def _evaluate_receipt_candidate(item: CardStatementItem, receipt: Receipt) -> Re
 def _registered_services_for_period(statement_month: date) -> list[RegisteredService]:
     target_receipt_month = receipt_month_for_statement(statement_month)
     return list(
-        RegisteredService.objects.filter(user__is_active=True, user__is_staff=False, user__is_superuser=False)
+        RegisteredService.objects.filter(
+            user__is_active=True,
+            user__is_staff=False,
+            user__is_superuser=False,
+            uses_p_card=True,
+        )
         .filter(Q(is_active=True) | Q(is_active=False, final_receipt_month__gte=target_receipt_month))
         .select_related("user", "catalog_service")
         .order_by("user__username", "name", "billing_type")
@@ -336,6 +341,7 @@ def _available_receipts_for_statement_month(statement_month: date) -> list[Recei
             submission__user__is_staff=False,
             submission__user__is_superuser=False,
         )
+        .filter(Q(is_extra=True) | Q(p_card_usage_snapshot=True))
         .select_related("submission__user", "service", "service__catalog_service")
         .order_by("uploaded_at", "pk")
     )
@@ -744,7 +750,11 @@ def process_card_statement(statement_id: int):
         return None
 
     catalogs = list(
-        ServiceCatalog.objects.filter(registered_services__user__is_staff=False, registered_services__user__is_superuser=False)
+        ServiceCatalog.objects.filter(
+            registered_services__user__is_staff=False,
+            registered_services__user__is_superuser=False,
+            registered_services__uses_p_card=True,
+        )
         .distinct()
         .order_by("name", "billing_type")
     )

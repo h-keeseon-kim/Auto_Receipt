@@ -52,6 +52,7 @@ from .forms import (
     EmailReminderScheduleForm,
     StaffEmailTestForm,
     StyledPasswordChangeForm,
+    UserServicePCardForm,
     UserServiceRegistrationForm,
     UserServiceStopForm,
     current_month,
@@ -160,6 +161,32 @@ def add_validation_errors(form, exc: ValidationError):
 
 def month_label(value) -> str:
     return value.strftime("%Y年%m月")
+
+
+def month_submission_display_status(
+    submission: Submission | None,
+    summary,
+    *,
+    has_available_receipts: bool = False,
+    has_open_resubmission_requests: bool = False,
+) -> tuple[str, str]:
+    """月次画面向けの表示ステータスを返す。
+
+    Pカード提出対象がなく、追加領収書・再提出依頼もない月は、
+    DB上に閲覧時作成された下書きがあっても「提出不要」と表示する。
+    """
+
+    if submission is not None and submission.is_submitted:
+        return "提出済み", "submitted"
+    if (
+        summary.total_services == 0
+        and not has_available_receipts
+        and not has_open_resubmission_requests
+    ):
+        return "提出不要", "neutral"
+    if submission is not None:
+        return submission.get_status_display(), submission.status
+    return "未着手", "neutral"
 
 
 @login_required
@@ -464,6 +491,24 @@ def dashboard(request):
 
     receipts = submission.receipts.select_related("service").all()
     monthly_summary = build_user_month_summary(request.user, selected_month)
+    has_available_receipts = receipts.filter(file_deleted_at__isnull=True).exclude(file="").exists()
+    has_extra_receipts = receipts.filter(
+        is_extra=True,
+        file_deleted_at__isnull=True,
+    ).exclude(file="").exists()
+    has_open_resubmission_requests = open_resubmission_requests.exists()
+    display_status_label, display_status_class = month_submission_display_status(
+        submission,
+        monthly_summary,
+        has_available_receipts=(
+            has_available_receipts if monthly_summary.total_services else has_extra_receipts
+        ),
+        has_open_resubmission_requests=has_open_resubmission_requests,
+    )
+    can_submit = (
+        not submission.is_submitted
+        and (monthly_summary.total_services > 0 or has_extra_receipts)
+    )
     return render(
         request,
         "receipts/dashboard.html",
@@ -481,7 +526,11 @@ def dashboard(request):
             "selected_receipt_month": selected_receipt_month,
             "target_receipt_month": selected_receipt_month,
             "selected_upload_choice": selected_upload_choice,
-                    },
+            "display_status_label": display_status_label,
+            "display_status_class": display_status_class,
+            "has_available_receipts": has_available_receipts,
+            "can_submit": can_submit,
+        },
     )
 
 
@@ -498,6 +547,8 @@ def user_services(request):
         "approved_registered_service",
     ).order_by("-created_at")
     pending_exception_count = exception_requests.filter(status=ServiceExceptionRequestStatus.PENDING).count()
+    active_p_card_count = sum(service.uses_p_card for service in active_services)
+    active_non_p_card_count = len(active_services) - active_p_card_count
     return render(
         request,
         "receipts/user_services.html",
@@ -508,6 +559,8 @@ def user_services(request):
             "available_catalog_count": available_catalog_count,
             "exception_requests": exception_requests,
             "pending_exception_count": pending_exception_count,
+            "active_p_card_count": active_p_card_count,
+            "active_non_p_card_count": active_non_p_card_count,
         },
     )
 
@@ -530,7 +583,7 @@ def user_service_create(request):
             else:
                 messages.success(
                     request,
-                    f"{service.display_name} を利用サービスとして登録しました。管理者画面にもユーザー登録として記録されます。",
+                    f"{service.display_name} を利用サービスとして登録しました。Pカード設定: {service.p_card_usage_label}。管理者画面にもユーザー登録として記録されます。",
                 )
                 return redirect("user_services")
     else:
@@ -567,7 +620,7 @@ def service_exception_request_create(request):
             else:
                 messages.success(
                     request,
-                    f"{request_item.display_name} の例外申請を提出しました。管理者が承認するまで利用サービスには追加されません。",
+                    f"{request_item.display_name} の例外申請を提出しました。Pカード設定: {request_item.p_card_usage_label}。管理者が承認するまで利用サービスには追加されません。",
                 )
                 return redirect("user_services")
     else:
@@ -585,16 +638,66 @@ def service_exception_request_create(request):
 
 
 @login_required
+def user_service_p_card_update(request, pk: int):
+    """ユーザーが自分の利用サービスのPカード利用有無を変更する。"""
+
+    if request.user.is_staff:
+        return redirect("staff_services")
+    service = get_object_or_404(RegisteredService, pk=pk, user=request.user)
+    previous_value = service.uses_p_card
+    if request.method == "POST":
+        form = UserServicePCardForm(request.POST, instance=service)
+        if form.is_valid():
+            service = form.save()
+            if previous_value and not service.uses_p_card:
+                ReceiptResubmissionRequest.objects.filter(
+                    user=request.user,
+                    service_name_snapshot=service.name,
+                    billing_type_snapshot=service.billing_type,
+                    is_extra=False,
+                    status=ResubmissionRequestStatus.OPEN,
+                ).update(
+                    status=ResubmissionRequestStatus.RESOLVED,
+                    resolved_at=timezone.now(),
+                    resolved_by=request.user,
+                )
+                messages.success(
+                    request,
+                    f"{service.display_name} をPカード未使用に変更しました。このサービスは領収書提出・リマインドメール・Pカード明細照合の対象外です。既存の領収書履歴は保持されます。",
+                )
+            elif not previous_value and service.uses_p_card:
+                messages.success(
+                    request,
+                    f"{service.display_name} をPカード利用に変更しました。領収書提出・リマインドメール・Pカード明細照合の対象に含まれます。",
+                )
+            else:
+                messages.info(request, f"{service.display_name} のPカード設定に変更はありません。")
+            return redirect("user_services")
+    else:
+        form = UserServicePCardForm(instance=service)
+    return render(
+        request,
+        "receipts/user_service_p_card_form.html",
+        {
+            "service": service,
+            "form": form,
+            "back_url": reverse("user_services"),
+        },
+    )
+
+
+@login_required
 def user_service_stop(request, pk: int):
     service = get_object_or_404(RegisteredService, pk=pk, user=request.user, is_active=True)
     if request.method == "POST":
         form = UserServiceStopForm(request.POST, service=service)
         if form.is_valid():
             form.save(stopped_by=request.user)
-            messages.success(
-                request,
-                f"{service.display_name} を利用停止にしました。最後にアップロードすべき領収書月は {service.final_receipt_month:%Y年%m月} として管理者画面にも記録されます。",
-            )
+            if service.final_receipt_month:
+                detail = f"最後にアップロードすべき領収書月は {service.final_receipt_month:%Y年%m月} として管理者画面にも記録されます。"
+            else:
+                detail = "Pカード未使用のため、最後にアップロードすべき領収書月はありません。"
+            messages.success(request, f"{service.display_name} を利用停止にしました。{detail}")
             return redirect("user_services")
     else:
         form = UserServiceStopForm(service=service)
@@ -655,6 +758,7 @@ def approve_service_exception_request(request_id: int, *, reviewer, review_note:
                 name=catalog.name,
                 billing_type=catalog.billing_type,
                 is_active=True,
+                uses_p_card=request_item.uses_p_card,
                 memo=purpose_note,
                 registration_source=ServiceRegistrationSource.EXCEPTION_REQUEST,
                 registered_by=reviewer,
@@ -664,6 +768,7 @@ def approve_service_exception_request(request_id: int, *, reviewer, review_note:
             service.name = catalog.name
             service.billing_type = catalog.billing_type
             service.is_active = True
+            service.uses_p_card = request_item.uses_p_card
             if purpose_note not in (service.memo or ""):
                 service.memo = "\n".join(part for part in [service.memo.strip(), purpose_note] if part)
             service.registration_source = ServiceRegistrationSource.EXCEPTION_REQUEST
@@ -791,6 +896,16 @@ def staff_services(request):
                 filter=Q(registered_services__is_active=True),
                 distinct=True,
             ),
+            active_p_card_service_count=Count(
+                "registered_services",
+                filter=Q(registered_services__is_active=True, registered_services__uses_p_card=True),
+                distinct=True,
+            ),
+            active_non_p_card_service_count=Count(
+                "registered_services",
+                filter=Q(registered_services__is_active=True, registered_services__uses_p_card=False),
+                distinct=True,
+            ),
             user_registered_count=Count(
                 "registered_services",
                 filter=Q(registered_services__registration_source__in=[ServiceRegistrationSource.USER, ServiceRegistrationSource.EXCEPTION_REQUEST]),
@@ -854,11 +969,14 @@ def staff_user_services(request, user_id: int):
         form = StaffServiceForm(request.POST, fixed_user=managed_user, registered_by=request.user)
         if form.is_valid():
             service = form.save()
-            messages.success(request, f"{managed_user.username} に {service.display_name} を登録しました。")
+            messages.success(request, f"{managed_user.username} に {service.display_name} を登録しました。Pカード設定: {service.p_card_usage_label}。")
             return redirect("staff_user_services", user_id=managed_user.pk)
     else:
         form = StaffServiceForm(fixed_user=managed_user, registered_by=request.user)
     services = RegisteredService.objects.select_related("catalog_service", "registered_by", "deactivated_by").filter(user=managed_user).order_by("-is_active", "name", "billing_type")
+    active_services = [service for service in services if service.is_active]
+    active_p_card_count = sum(service.uses_p_card for service in active_services)
+    active_non_p_card_count = len(active_services) - active_p_card_count
     return render(
         request,
         "receipts/staff_user_services.html",
@@ -866,6 +984,8 @@ def staff_user_services(request, user_id: int):
             "managed_user": managed_user,
             "services": services,
             "form": form,
+            "active_p_card_count": active_p_card_count,
+            "active_non_p_card_count": active_non_p_card_count,
         },
     )
 
@@ -880,7 +1000,7 @@ def staff_service_create(request):
         form = StaffServiceForm(request.POST, registered_by=request.user)
         if form.is_valid():
             service = form.save()
-            messages.success(request, f"{service.user.username} に {service.display_name} を登録しました。")
+            messages.success(request, f"{service.user.username} に {service.display_name} を登録しました。Pカード設定: {service.p_card_usage_label}。")
             return redirect("staff_user_services", user_id=service.user_id)
     else:
         form = StaffServiceForm(initial=initial, registered_by=request.user)
@@ -899,11 +1019,27 @@ def staff_service_create(request):
 @staff_member_required
 def staff_service_update(request, pk: int):
     service = get_object_or_404(RegisteredService.objects.select_related("user"), pk=pk, user__is_staff=False, user__is_superuser=False)
+    previous_p_card_value = service.uses_p_card
     if request.method == "POST":
         form = StaffServiceForm(request.POST, instance=service, fixed_user=service.user, registered_by=request.user)
         if form.is_valid():
             service = form.save()
-            messages.success(request, f"{service.user.username} の {service.display_name} を更新しました。")
+            if previous_p_card_value and not service.uses_p_card:
+                ReceiptResubmissionRequest.objects.filter(
+                    user=service.user,
+                    service_name_snapshot=service.name,
+                    billing_type_snapshot=service.billing_type,
+                    is_extra=False,
+                    status=ResubmissionRequestStatus.OPEN,
+                ).update(
+                    status=ResubmissionRequestStatus.RESOLVED,
+                    resolved_at=timezone.now(),
+                    resolved_by=request.user,
+                )
+            messages.success(
+                request,
+                f"{service.user.username} の {service.display_name} を更新しました。Pカード設定: {service.p_card_usage_label}。",
+            )
             return redirect("staff_user_services", user_id=service.user_id)
     else:
         form = StaffServiceForm(instance=service, fixed_user=service.user, registered_by=request.user)
@@ -1673,6 +1809,27 @@ def staff_user_month_status(request, user_id: int):
         )
         .first()
     )
+    has_available_receipts = bool(
+        submission
+        and any(receipt.file_available for receipt in submission.receipts.all())
+    )
+    has_extra_receipts = bool(
+        submission
+        and any(receipt.file_available and receipt.is_extra for receipt in submission.receipts.all())
+    )
+    has_open_resubmission_requests = ReceiptResubmissionRequest.objects.filter(
+        user=managed_user,
+        period_month=selected_month,
+        status=ResubmissionRequestStatus.OPEN,
+    ).exists()
+    display_status_label, display_status_class = month_submission_display_status(
+        submission,
+        monthly_summary,
+        has_available_receipts=(
+            has_available_receipts if monthly_summary.total_services else has_extra_receipts
+        ),
+        has_open_resubmission_requests=has_open_resubmission_requests,
+    )
     global_statement_count = CardStatement.objects.filter(period_month=selected_month).count()
     return render(
         request,
@@ -1694,6 +1851,8 @@ def staff_user_month_status(request, user_id: int):
             "previous_proxy_user": previous_proxy_user,
             "next_proxy_user": next_proxy_user,
             "proxy_upload_completed_count": proxy_upload_completed_count,
+            "display_status_label": display_status_label,
+            "display_status_class": display_status_class,
         },
     )
 
@@ -1702,6 +1861,7 @@ def global_statement_services(statement_month):
     target_receipt_month = receipt_month_for_statement(statement_month)
     return (
         RegisteredService.objects.filter(user__is_active=True, user__is_staff=False, user__is_superuser=False)
+        .filter(uses_p_card=True)
         .filter(Q(is_active=True) | Q(is_active=False, final_receipt_month__gte=target_receipt_month))
         .select_related("user", "catalog_service")
         .order_by("user__username", "name", "billing_type")
@@ -1943,6 +2103,7 @@ def staff_update_statement_item(request, pk: int):
             pk=service_id,
             user__is_staff=False,
             user__is_superuser=False,
+            uses_p_card=True,
         )
         item.matched_user = service.user
         item.matched_catalog_service = service.catalog_service
@@ -1979,6 +2140,16 @@ def staff_history(request):
                 filter=Q(registered_services__is_active=True),
                 distinct=True,
             ),
+            active_p_card_service_count=Count(
+                "registered_services",
+                filter=Q(registered_services__is_active=True, registered_services__uses_p_card=True),
+                distinct=True,
+            ),
+            active_non_p_card_service_count=Count(
+                "registered_services",
+                filter=Q(registered_services__is_active=True, registered_services__uses_p_card=False),
+                distinct=True,
+            ),
             user_registered_count=Count(
                 "registered_services",
                 filter=Q(registered_services__registration_source__in=[ServiceRegistrationSource.USER, ServiceRegistrationSource.EXCEPTION_REQUEST]),
@@ -2000,20 +2171,32 @@ def staff_history(request):
         .annotate(receipts_count=Count("receipts"))
     )
     submissions_by_user = {submission.user_id: submission for submission in submissions}
+    open_resubmission_user_ids = set(
+        ReceiptResubmissionRequest.objects.filter(
+            period_month=selected_month,
+            status=ResubmissionRequestStatus.OPEN,
+            user_id__in=user_ids,
+        ).values_list("user_id", flat=True)
+    )
 
     rows = []
     for user in users:
         submission = submissions_by_user.get(user.id)
         summary = build_user_month_summary(user, selected_month)
         submission_receipts = list(submission.receipts.all()) if submission is not None else []
-        if submission is None:
-            status = "未着手"
-        elif submission.status == SubmissionStatus.SUBMITTED:
-            status = "提出済み"
-        else:
-            status = SubmissionStatus.DRAFT.label
         receipt_count = len(submission_receipts)
         available_file_count = sum(1 for receipt in submission_receipts if receipt.file_available)
+        extra_file_count = sum(
+            1 for receipt in submission_receipts if receipt.file_available and receipt.is_extra
+        )
+        status, status_class = month_submission_display_status(
+            submission,
+            summary,
+            has_available_receipts=(
+                available_file_count > 0 if summary.total_services else extra_file_count > 0
+            ),
+            has_open_resubmission_requests=user.pk in open_resubmission_user_ids,
+        )
         purged_file_count = sum(1 for receipt in submission_receipts if receipt.file_deleted_at)
         manual_review_count = sum(1 for receipt in submission_receipts if receipt.needs_manual_review)
         rows.append(
@@ -2021,10 +2204,13 @@ def staff_history(request):
                 "user": user,
                 "submission": submission,
                 "status": status,
+                "status_class": status_class,
                 "receipt_count": receipt_count,
                 "available_file_count": available_file_count,
                 "purged_file_count": purged_file_count,
                 "active_service_count": user.active_service_count,
+                "active_p_card_service_count": user.active_p_card_service_count,
+                "active_non_p_card_service_count": user.active_non_p_card_service_count,
                 "user_registered_count": user.user_registered_count,
                 "user_stopped_count": user.user_stopped_count,
                 "monthly_summary": summary,
@@ -2050,12 +2236,15 @@ def staff_history(request):
         "submitted": sum(1 for row in rows if row["status"] == "提出済み"),
         "draft": sum(1 for row in rows if row["status"] == SubmissionStatus.DRAFT.label),
         "not_started": sum(1 for row in rows if row["status"] == "未着手"),
+        "not_required": sum(1 for row in rows if row["status"] == "提出不要"),
         "incomplete_users": sum(1 for row in rows if not row["monthly_summary"].is_complete),
         "missing_service_count": sum(row["monthly_summary"].missing_required_count for row in rows),
         "api_pending_count": sum(row["monthly_summary"].api_pending_count for row in rows),
         "receipt_count": sum(row["receipt_count"] for row in rows),
         "available_file_count": sum(row["available_file_count"] for row in rows),
         "active_service_count": sum(row["active_service_count"] for row in rows),
+        "active_p_card_service_count": sum(row["active_p_card_service_count"] for row in rows),
+        "active_non_p_card_service_count": sum(row["active_non_p_card_service_count"] for row in rows),
         "user_registered_count": sum(row["user_registered_count"] for row in rows),
         "user_stopped_count": sum(row["user_stopped_count"] for row in rows),
         "ai_pending_count": ai_stats["ai_pending_count"],
@@ -2100,14 +2289,35 @@ def history(request):
     for submission in submissions:
         summary = build_user_month_summary(request.user, submission.period_month)
         remaining_service_count = summary.missing_required_count + summary.api_pending_count
+        submission_receipts = list(submission.receipts.all())
+        has_available_receipts = any(receipt.file_available for receipt in submission_receipts)
+        has_extra_receipts = any(
+            receipt.file_available and receipt.is_extra for receipt in submission_receipts
+        )
+        has_open_resubmission_requests = ReceiptResubmissionRequest.objects.filter(
+            user=request.user,
+            period_month=submission.period_month,
+            status=ResubmissionRequestStatus.OPEN,
+        ).exists()
+        status_label, status_class = month_submission_display_status(
+            submission,
+            summary,
+            has_available_receipts=(
+                has_available_receipts if summary.total_services else has_extra_receipts
+            ),
+            has_open_resubmission_requests=has_open_resubmission_requests,
+        )
         rows.append(
             {
                 "submission": submission,
                 "receipt_month": submission.target_receipt_month,
-                "status_label": submission.get_status_display(),
+                "status_label": status_label,
+                "status_class": status_class,
                 "required_service_count": summary.required_service_count,
                 "usage_based_service_count": summary.usage_based_service_count,
                 "total_service_count": summary.total_services,
+                "non_p_card_service_count": summary.non_p_card_service_count,
+                "total_registered_service_count": summary.total_registered_service_count,
                 "resolved_service_count": summary.resolved_count,
                 "remaining_service_count": remaining_service_count,
             }
@@ -2382,6 +2592,7 @@ def receipt_manifest_csv(submissions) -> str:
         "receipt_kind",
         "service_name",
         "billing_type",
+        "p_card_usage_at_upload",
         "amount",
         "currency",
         "issued_on",
@@ -2431,6 +2642,7 @@ def receipt_manifest_csv(submissions) -> str:
                 "extra" if receipt.is_extra else "registered_service",
                 receipt.service_name_snapshot,
                 receipt.get_billing_type_snapshot_display(),
+                "yes" if receipt.p_card_usage_snapshot else "no",
                 receipt.amount if receipt.amount is not None else "",
                 receipt.currency,
                 receipt.issued_on.isoformat() if receipt.issued_on else "",

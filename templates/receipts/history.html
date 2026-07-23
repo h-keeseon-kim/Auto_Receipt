@@ -29,7 +29,7 @@
                 {% for row in history_rows %}
                     <tr>
                         <td><strong>{{ row.receipt_month|date:"Y年m月" }}</strong></td>
-                        <td><span class="badge {{ row.submission.status }}">{{ row.status_label }}</span></td>
+                        <td><span class="badge {{ row.status_class }}">{{ row.status_label }}</span></td>
                         <td>
                             <div class="service-count-breakdown" aria-label="サービス登録数の内訳">
                                 <span class="service-count-line">
@@ -39,6 +39,10 @@
                                 <span class="service-count-line">
                                     <span class="service-count-label">利用時提出（API等）</span>
                                     <strong class="service-count-value">{{ row.usage_based_service_count }}</strong>
+                                </span>
+                                <span class="service-count-line">
+                                    <span class="service-count-label">提出不要（Pカード未使用）</span>
+                                    <strong class="service-count-value">{{ row.non_p_card_service_count }}</strong>
                                 </span>
                             </div>
                         </td>

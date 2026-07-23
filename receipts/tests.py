@@ -27,12 +27,15 @@ from .forms import (
     ReceiptUploadForm,
     ServiceExceptionRequestForm,
     StaffReceiptReviewForm,
+    StaffServiceForm,
     UserServiceRegistrationForm,
 )
 from .monthly_status import build_user_month_summary
 from .statement_ai import StatementAnalysisItem, StatementAnalysisResult, build_statement_result_from_payload
 from .statement_processing import (
     CARD_STATEMENT_MONTH_SEMANTICS_RECONCILE_MARKER,
+    _available_receipts_for_statement_month,
+    _registered_services_for_period,
     process_card_statement,
 )
 from .models import (
@@ -2039,6 +2042,7 @@ class StaffServiceAssignmentTests(TestCase):
             reverse("staff_user_services", args=[self.user.pk]),
             {
                 "catalog_service": self.catalog.pk,
+                "uses_p_card": "true",
                 "is_active": "on",
                 "memo": "API利用料",
             },
@@ -2224,6 +2228,7 @@ class StaffServiceAssignmentTests(TestCase):
                 reverse("staff_user_services", args=[self.user.pk]),
                 {
                     "catalog_service": catalog.pk,
+                    "uses_p_card": "true",
                     "is_active": "on",
                 },
             )
@@ -2262,13 +2267,14 @@ class UserServiceRegistrationTests(TestCase):
             created_by=self.admin,
         )
 
-    def submit_exception_request(self, *, name="Figma", billing_type=BillingType.SUBSCRIPTION, purpose="デザイン制作"):
+    def submit_exception_request(self, *, name="Figma", billing_type=BillingType.SUBSCRIPTION, purpose="デザイン制作", uses_p_card=True):
         self.client.login(username="user@example.com", password="password123")
         return self.client.post(
             reverse("service_exception_request_create"),
             {
                 "service_name": name,
                 "billing_type": billing_type,
+                "uses_p_card": "true" if uses_p_card else "false",
                 "purpose": purpose,
             },
         )
@@ -2285,7 +2291,7 @@ class UserServiceRegistrationTests(TestCase):
 
         response = self.client.post(
             reverse("user_service_create"),
-            {"catalog_service": self.catalog.pk, "memo": "チーム連絡に利用"},
+            {"catalog_service": self.catalog.pk, "uses_p_card": "true", "memo": "チーム連絡に利用"},
         )
 
         self.assertRedirects(response, reverse("user_services"))
@@ -2295,6 +2301,87 @@ class UserServiceRegistrationTests(TestCase):
         self.assertEqual(service.registered_by, self.user)
         self.assertEqual(service.memo, "チーム連絡に利用")
         self.assertFalse(ServiceExceptionRequest.objects.filter(user=self.user).exists())
+
+    def test_p_card_choice_is_required_when_user_registers_service(self):
+        self.client.login(username="user@example.com", password="password123")
+
+        response = self.client.post(
+            reverse("user_service_create"),
+            {"catalog_service": self.catalog.pk},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "Pカードを利用するか選択してください")
+        self.assertFalse(RegisteredService.objects.filter(user=self.user, catalog_service=self.catalog).exists())
+
+    def test_new_service_forms_do_not_preselect_p_card_usage(self):
+        registration_form = UserServiceRegistrationForm(user=self.user)
+        exception_form = ServiceExceptionRequestForm(user=self.user)
+
+        staff_form = StaffServiceForm(registered_by=self.admin)
+        self.assertIn(registration_form["uses_p_card"].value(), (None, ""))
+        self.assertEqual(exception_form["uses_p_card"].value(), "")
+        self.assertEqual(staff_form["uses_p_card"].value(), "")
+        self.assertEqual(list(registration_form.fields["uses_p_card"].choices)[0][0], "")
+        self.assertEqual(list(exception_form.fields["uses_p_card"].choices)[0][0], "")
+
+    def test_user_can_register_non_p_card_service_and_change_setting_later(self):
+        self.client.login(username="user@example.com", password="password123")
+        response = self.client.post(
+            reverse("user_service_create"),
+            {"catalog_service": self.catalog.pk, "uses_p_card": "false", "memo": "個人カードで支払い"},
+        )
+        self.assertRedirects(response, reverse("user_services"))
+        service = RegisteredService.objects.get(user=self.user, catalog_service=self.catalog)
+        self.assertFalse(service.uses_p_card)
+
+        service_page = self.client.get(reverse("user_services"))
+        self.assertContains(service_page, "Pカード未使用")
+        self.assertContains(service_page, reverse("user_service_p_card_update", args=[service.pk]))
+
+        summary = build_user_month_summary(self.user, date(2026, 7, 1))
+        self.assertEqual(summary.total_services, 0)
+        self.assertEqual(summary.non_p_card_service_count, 1)
+        upload_page = self.client.get(reverse("dashboard") + "?receipt_month=2026-06")
+        choices = dict(upload_page.context["upload_form"].fields["service"].choices)
+        self.assertNotIn(str(service.pk), choices)
+        self.assertContains(upload_page, "Pカード未使用サービスは提出不要です")
+        self.assertEqual(upload_page.context["display_status_label"], "提出不要")
+        self.assertFalse(upload_page.context["can_submit"])
+        self.assertNotContains(upload_page, ">提出する</button>")
+
+        history_page = self.client.get(reverse("history"))
+        self.assertContains(history_page, "提出不要")
+        self.assertContains(history_page, "提出不要（Pカード未使用）")
+
+        response = self.client.post(
+            reverse("user_service_p_card_update", args=[service.pk]),
+            {"uses_p_card": "true"},
+        )
+        self.assertRedirects(response, reverse("user_services"))
+        service.refresh_from_db()
+        self.assertTrue(service.uses_p_card)
+        summary = build_user_month_summary(self.user, date(2026, 7, 1))
+        self.assertEqual(summary.total_services, 1)
+        self.assertEqual(summary.non_p_card_service_count, 0)
+
+    def test_exception_request_p_card_setting_is_applied_on_approval(self):
+        self.submit_exception_request(name="New Non Card Tool", uses_p_card=False)
+        request_item = ServiceExceptionRequest.objects.get(user=self.user, service_name="New Non Card Tool")
+        self.assertFalse(request_item.uses_p_card)
+        self.client.logout()
+        self.client.login(username="admin", password="admin-password-123")
+
+        response = self.client.post(
+            reverse("staff_exception_requests"),
+            {"request_id": request_item.pk, "decision": "approve", "review_note": "承認"},
+        )
+
+        self.assertRedirects(response, reverse("staff_exception_requests") + "?status=pending")
+        request_item.refresh_from_db()
+        service = request_item.approved_registered_service
+        self.assertIsNotNone(service)
+        self.assertFalse(service.uses_p_card)
 
     def test_service_registration_contains_exception_request_action_and_back_path(self):
         self.client.login(username="user@example.com", password="password123")
@@ -2319,6 +2406,7 @@ class UserServiceRegistrationTests(TestCase):
             {
                 "service_name": "slack",
                 "billing_type": BillingType.SUBSCRIPTION,
+                "uses_p_card": "true",
                 "purpose": "チーム連絡",
             },
         )
@@ -2341,6 +2429,7 @@ class UserServiceRegistrationTests(TestCase):
             {
                 "service_name": "old service",
                 "billing_type": BillingType.OTHER,
+                "uses_p_card": "true",
                 "purpose": "既存契約の再開",
             },
         )
@@ -2384,8 +2473,8 @@ class UserServiceRegistrationTests(TestCase):
         )
         self.client.login(username="user@example.com", password="password123")
 
-        first = self.client.post(reverse("user_service_create"), {"catalog_service": subscription.pk})
-        second = self.client.post(reverse("user_service_create"), {"catalog_service": metered.pk})
+        first = self.client.post(reverse("user_service_create"), {"catalog_service": subscription.pk, "uses_p_card": "true"})
+        second = self.client.post(reverse("user_service_create"), {"catalog_service": metered.pk, "uses_p_card": "true"})
 
         self.assertRedirects(first, reverse("user_services"))
         self.assertRedirects(second, reverse("user_services"))
@@ -2412,7 +2501,7 @@ class UserServiceRegistrationTests(TestCase):
         )
         self.client.login(username="user@example.com", password="password123")
 
-        response = self.client.post(reverse("user_service_create"), {"catalog_service": self.catalog.pk})
+        response = self.client.post(reverse("user_service_create"), {"catalog_service": self.catalog.pk, "uses_p_card": "true"})
 
         self.assertRedirects(response, reverse("user_services"))
         stopped.refresh_from_db()
@@ -2424,14 +2513,15 @@ class UserServiceRegistrationTests(TestCase):
 
     def test_exception_application_form_requires_service_payment_method_and_purpose(self):
         form = ServiceExceptionRequestForm(
-            data={"service_name": "", "billing_type": "", "purpose": ""},
+            data={"service_name": "", "billing_type": "", "uses_p_card": "", "purpose": ""},
             user=self.user,
         )
 
-        self.assertEqual(list(form.fields), ["service_name", "billing_type", "purpose"])
+        self.assertEqual(list(form.fields), ["service_name", "billing_type", "uses_p_card", "purpose"])
         self.assertFalse(form.is_valid())
         self.assertIn("service_name", form.errors)
         self.assertIn("billing_type", form.errors)
+        self.assertIn("uses_p_card", form.errors)
         self.assertIn("purpose", form.errors)
 
     def test_user_submits_exception_request_without_immediate_service_registration(self):
@@ -2540,6 +2630,7 @@ class UserServiceRegistrationTests(TestCase):
             {
                 "service_name": "chatgpt",
                 "billing_type": BillingType.SUBSCRIPTION,
+                "uses_p_card": "true",
                 "purpose": "別用途",
             },
         )
@@ -2551,6 +2642,7 @@ class UserServiceRegistrationTests(TestCase):
             {
                 "service_name": "ChatGPT",
                 "billing_type": BillingType.METERED,
+                "uses_p_card": "true",
                 "purpose": "API検証",
             },
         )
@@ -2690,6 +2782,7 @@ class TutorialTests(TestCase):
         self.assertIn("使わなくなったサービスを停止します", script)
         self.assertIn("領収書アップロードページです。", script)
         self.assertIn("提出履歴ページです。", script)
+        self.assertIn("Pカードを利用するか必ず指定", script)
         self.assertNotIn("提出履歴ページへ移動します", script)
         self.assertNotIn("hint:", script)
         self.assertNotIn("data-tutorial-hint", script)
@@ -2783,6 +2876,19 @@ class EmailReminderTests(TestCase):
         recipients = {message.to[0] for message in mail.outbox}
         self.assertEqual(recipients, {"a@example.com", "c@example.com"})
         self.assertTrue(all(message.subject.startswith("【重要】") for message in mail.outbox))
+
+    def test_reminders_exclude_active_services_that_do_not_use_p_card(self):
+        service = self.services[self.user_b.pk]
+        service.uses_p_card = False
+        service.save(update_fields=["uses_p_card", "updated_at"])
+        self.user_b.profile.refresh_from_db()
+        self.assertEqual(self.user_b.profile.account_status, UserAccountStatus.ACTIVE)
+
+        call_command("send_receipt_reminders", "--kind", "initial", "--month", "2026-06")
+
+        recipients = {message.to[0] for message in mail.outbox}
+        self.assertEqual(recipients, {"a@example.com", "c@example.com"})
+        self.assertFalse(EmailDeliveryLog.objects.filter(to_email="b@example.com").exists())
 
     def test_reminders_exclude_stopped_users(self):
         self.user_b.profile.account_status = UserAccountStatus.STOPPED
@@ -3869,6 +3975,44 @@ class FinalWorkflowAcceptanceTests(TestCase):
         self.assertEqual(item.match_confidence, 1.0)
         self.assertTrue(item.match_memo.startswith("管理者"))
 
+
+    def test_p_card_setting_controls_statement_scope_and_can_be_changed_by_admin(self):
+        self.client.login(username="admin", password="admin-password-123")
+        response = self.client.post(
+            reverse("staff_service_update", args=[self.subscription.pk]),
+            {
+                "catalog_service": self.subscription_catalog.pk,
+                "uses_p_card": "false",
+                "is_active": "on",
+                "memo": "Pカードを利用しない契約へ変更",
+            },
+        )
+        self.assertRedirects(response, reverse("staff_user_services", args=[self.user.pk]))
+        self.subscription.refresh_from_db()
+        self.assertFalse(self.subscription.uses_p_card)
+
+        scoped_service_ids = {
+            service.pk for service in _registered_services_for_period(date(2026, 7, 1))
+        }
+        self.assertNotIn(self.subscription.pk, scoped_service_ids)
+        self.assertIn(self.api_service.pk, scoped_service_ids)
+
+        receipt = self.create_receipt(service=self.subscription, filename="non-p-card.pdf")
+        receipt.refresh_from_db()
+        self.assertFalse(receipt.p_card_usage_snapshot)
+        available_receipt_ids = {
+            candidate.pk for candidate in _available_receipts_for_statement_month(date(2026, 7, 1))
+        }
+        self.assertNotIn(receipt.pk, available_receipt_ids)
+
+        self.client.logout()
+        self.client.login(username="user@example.com", password="password123")
+        page = self.client.get(reverse("user_services"))
+        self.assertContains(page, "Pカード未使用")
+        upload_page = self.client.get(reverse("dashboard") + "?receipt_month=2026-06")
+        choices = dict(upload_page.context["upload_form"].fields["service"].choices)
+        self.assertNotIn(str(self.subscription.pk), choices)
+
     def test_user_management_places_superuser_settings_last_and_removes_service_shortcut(self):
         self.client.login(username="admin", password="admin-password-123")
         response = self.client.get(reverse("staff_user_create"))
@@ -4044,7 +4188,7 @@ class FinalWorkflowAcceptanceTests(TestCase):
         self.assertEqual(response.status_code, 404)
 
     def test_version_file_is_present_without_web_display_requirement(self):
-        self.assertEqual(Path("VERSION").read_text(encoding="utf-8").strip(), "1.7.2")
+        self.assertEqual(Path("VERSION").read_text(encoding="utf-8").strip(), "1.8.0")
 
 
 @override_settings(PASSWORD_HASHERS=FAST_PASSWORD_HASHERS)

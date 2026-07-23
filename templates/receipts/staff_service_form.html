@@ -4,6 +4,7 @@
 <section class="auth-card wide">
     <h1>{{ title }}</h1>
     {% if managed_user %}<p class="muted">対象ユーザー: <strong>{{ managed_user.username }}</strong></p>{% endif %}
+    <p class="muted">Pカード利用有無を必ず選択してください。「利用しない」場合は領収書提出、リマインドメール、全社ご利用代金明細照合の対象外になります。</p>
     <form method="post" class="stack">
         {% csrf_token %}
         {{ form.as_p }}

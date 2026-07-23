@@ -23,6 +23,7 @@ class ReceiptInline(admin.TabularInline):
     readonly_fields = (
         "service_name_snapshot",
         "billing_type_snapshot",
+        "p_card_usage_snapshot",
         "original_filename",
         "generated_filename",
         "ai_filename_status",
@@ -60,6 +61,7 @@ class ReceiptInline(admin.TabularInline):
         "service",
         "service_name_snapshot",
         "billing_type_snapshot",
+        "p_card_usage_snapshot",
         "memo",
         "amount",
         "currency",
@@ -106,13 +108,14 @@ class RegisteredServiceAdmin(admin.ModelAdmin):
         "name",
         "user",
         "billing_type",
+        "uses_p_card",
         "is_active",
         "registration_source",
         "deactivation_source",
         "final_receipt_month",
         "updated_at",
     )
-    list_filter = ("billing_type", "is_active", "registration_source", "deactivation_source", "final_receipt_month")
+    list_filter = ("billing_type", "uses_p_card", "is_active", "registration_source", "deactivation_source", "final_receipt_month")
     search_fields = ("name", "user__username", "user__email", "memo", "stop_note")
     readonly_fields = ("created_at", "updated_at", "deactivated_at")
 
@@ -123,12 +126,13 @@ class ServiceExceptionRequestAdmin(admin.ModelAdmin):
         "user",
         "service_name",
         "billing_type",
+        "uses_p_card",
         "status",
         "reviewed_by",
         "created_at",
         "reviewed_at",
     )
-    list_filter = ("status", "billing_type", "created_at", "reviewed_at")
+    list_filter = ("status", "billing_type", "uses_p_card", "created_at", "reviewed_at")
     search_fields = ("user__username", "user__email", "service_name", "purpose", "review_note")
     readonly_fields = ("created_at", "updated_at", "reviewed_at")
 
@@ -156,6 +160,7 @@ class ReceiptAdmin(admin.ModelAdmin):
         "service_name_snapshot",
         "is_extra",
         "billing_type_snapshot",
+        "p_card_usage_snapshot",
         "submission",
         "amount",
         "currency",
@@ -173,11 +178,12 @@ class ReceiptAdmin(admin.ModelAdmin):
         "admin_review_status",
         "file_status",
     )
-    list_filter = ("is_extra", "upload_source", "admin_review_status", "ai_resubmission_recommended", "billing_type_snapshot", "currency", "ai_filename_status", "ai_period_check_status", "ai_check_recipient_name", "ai_check_service_payee_related", "ai_check_period_match", "submission__period_month", "file_deleted_at")
+    list_filter = ("is_extra", "p_card_usage_snapshot", "upload_source", "admin_review_status", "ai_resubmission_recommended", "billing_type_snapshot", "currency", "ai_filename_status", "ai_period_check_status", "ai_check_recipient_name", "ai_check_service_payee_related", "ai_check_period_match", "submission__period_month", "file_deleted_at")
     search_fields = ("service_name_snapshot", "memo", "submission__user__username", "uploaded_by__username", "uploaded_by__email", "original_filename", "generated_filename", "ai_extracted_payee", "ai_extracted_recipient_name", "ai_filename_admin_memo", "ai_period_check_memo", "ai_recipient_name_check_memo", "ai_service_payee_check_memo", "ai_resubmission_recommendation_memo")
     readonly_fields = (
         "service_name_snapshot",
         "billing_type_snapshot",
+        "p_card_usage_snapshot",
         "original_filename",
         "generated_filename",
         "ai_filename_status",

@@ -228,11 +228,8 @@ class RegisteredServiceQuerySet(models.QuerySet):
     def active(self):
         return self.filter(is_active=True)
 
-    def uploadable_for(self, user, period_month=None):
-        """提出月に対してアップロード可能なサービスを返す。
-
-        final_receipt_month は実際の領収書月で管理するため、提出月の前月と比較する。
-        """
+    def in_scope_for(self, user, period_month=None):
+        """指定月に利用対象となるサービスを、Pカード利用有無に関係なく返す。"""
 
         queryset = self.filter(user=user)
         if period_month is None:
@@ -241,6 +238,15 @@ class RegisteredServiceQuerySet(models.QuerySet):
         return queryset.filter(
             Q(is_active=True) | Q(is_active=False, final_receipt_month__gte=target_receipt_month)
         ).order_by("-is_active", "name", "billing_type")
+
+    def uploadable_for(self, user, period_month=None):
+        """領収書提出対象となるPカード利用サービスだけを返す。
+
+        final_receipt_month は実際の領収書月で管理するため、提出月の前月と比較する。
+        Pカードを利用しないサービスは利用中であっても、領収書提出・リマインド対象外とする。
+        """
+
+        return self.in_scope_for(user, period_month).filter(uses_p_card=True)
 
 
 class RegisteredService(models.Model):
@@ -256,6 +262,11 @@ class RegisteredService(models.Model):
     name = models.CharField("サービス名", max_length=120)
     billing_type = models.CharField("支払い種別", max_length=20, choices=BillingType.choices)
     is_active = models.BooleanField("利用中", default=True)
+    uses_p_card = models.BooleanField(
+        "Pカード利用",
+        default=True,
+        help_text="OFFの場合、このサービスは領収書提出・リマインドメール・Pカード明細照合の対象外です。",
+    )
     memo = models.TextField("メモ", blank=True)
     registration_source = models.CharField(
         "登録元",
@@ -320,8 +331,13 @@ class RegisteredService(models.Model):
             self.final_receipt_month = month_start(self.final_receipt_month)
         if self.is_active and self.deactivation_source:
             raise ValidationError("利用中サービスには停止元を設定できません。")
-        if not self.is_active and self.deactivation_source == ServiceDeactivationSource.USER and not self.final_receipt_month:
-            raise ValidationError({"final_receipt_month": "ユーザー停止の場合は最後にアップロードすべき領収書月を選択してください。"})
+        if (
+            not self.is_active
+            and self.uses_p_card
+            and self.deactivation_source == ServiceDeactivationSource.USER
+            and not self.final_receipt_month
+        ):
+            raise ValidationError({"final_receipt_month": "Pカード利用サービスをユーザー停止する場合は、最後にアップロードすべき領収書月を選択してください。"})
 
     def save(self, *args, **kwargs):
         old_user_id = None
@@ -343,6 +359,12 @@ class RegisteredService(models.Model):
             self.name = " ".join(self.name.strip().split())
         if self.final_receipt_month:
             self.final_receipt_month = month_start(self.final_receipt_month)
+        if not self.uses_p_card:
+            self.final_receipt_month = None
+            if kwargs.get("update_fields") is not None:
+                update_fields = set(kwargs["update_fields"])
+                update_fields.add("final_receipt_month")
+                kwargs["update_fields"] = update_fields
         super().save(*args, **kwargs)
 
         if old_user_id and old_user_id != self.user_id:
@@ -351,10 +373,20 @@ class RegisteredService(models.Model):
             sync_user_account_status_from_services(self.user_id)
 
     def is_uploadable_for(self, period_month) -> bool:
+        if not self.uses_p_card:
+            return False
         target_receipt_month = receipt_month_for_submission(period_month)
         return self.is_active or bool(
             self.final_receipt_month and target_receipt_month <= self.final_receipt_month
         )
+
+    @property
+    def p_card_usage_label(self) -> str:
+        return "Pカード利用" if self.uses_p_card else "Pカード未使用"
+
+    @property
+    def p_card_badge_class(self) -> str:
+        return "submitted" if self.uses_p_card else "neutral"
 
     @property
     def display_name(self) -> str:
@@ -425,6 +457,11 @@ class ServiceExceptionRequest(models.Model):
     )
     service_name = models.CharField("サービス名", max_length=120)
     billing_type = models.CharField("支払い方法", max_length=20, choices=BillingType.choices)
+    uses_p_card = models.BooleanField(
+        "Pカード利用",
+        default=True,
+        help_text="承認後にこのサービスの支払いへPカードを利用するかを記録します。",
+    )
     purpose = models.TextField("用途")
     status = models.CharField(
         "ステータス",
@@ -500,6 +537,14 @@ class ServiceExceptionRequest(models.Model):
     @property
     def display_name(self) -> str:
         return f"{self.service_name}（{self.get_billing_type_display()}）"
+
+    @property
+    def p_card_usage_label(self) -> str:
+        return "Pカード利用" if self.uses_p_card else "Pカード未使用"
+
+    @property
+    def p_card_badge_class(self) -> str:
+        return "submitted" if self.uses_p_card else "neutral"
 
     @property
     def badge_class(self) -> str:
@@ -685,6 +730,11 @@ class Receipt(models.Model):
     )
     service_name_snapshot = models.CharField("提出時サービス名", max_length=120)
     billing_type_snapshot = models.CharField("提出時支払い種別", max_length=20, choices=BillingType.choices)
+    p_card_usage_snapshot = models.BooleanField(
+        "提出時Pカード利用",
+        default=True,
+        help_text="登録サービスのPカード設定を後から変更しても、提出時点の監査情報を保持します。",
+    )
     amount = models.DecimalField("金額", max_digits=12, decimal_places=2, validators=[MinValueValidator(0)], null=True, blank=True)
     currency = models.CharField("通貨", max_length=3, default="JPY")
     issued_on = models.DateField("発行日 / 支払日", null=True, blank=True)
@@ -818,6 +868,8 @@ class Receipt(models.Model):
         elif self.service_id:
             self.service_name_snapshot = self.service.name
             self.billing_type_snapshot = self.service.billing_type
+            if self._state.adding:
+                self.p_card_usage_snapshot = self.service.uses_p_card
         if self.currency:
             self.currency = self.currency.upper()
         if self.file and not self.expires_at:
@@ -1121,6 +1173,8 @@ class MonthlyServiceDeclaration(models.Model):
             raise ValidationError("自分に登録されたサービスだけを申告できます。")
         if self.service_id and self.service.billing_type != BillingType.METERED:
             raise ValidationError("当月利用なし申告は従量課金 / APIサービスだけで利用できます。")
+        if self.service_id and not self.service.uses_p_card:
+            raise ValidationError("Pカードを利用しないサービスは領収書提出対象外のため、当月利用なし申告も不要です。")
 
     def save(self, *args, **kwargs):
         if self.period_month:

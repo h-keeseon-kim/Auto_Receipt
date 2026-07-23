@@ -64,6 +64,7 @@ class UserMonthSummary:
     user: User
     period_month: date
     rows: tuple[ServiceMonthStatus, ...]
+    non_p_card_services: tuple[RegisteredService, ...] = ()
 
     @property
     def target_receipt_month(self) -> date:
@@ -71,7 +72,19 @@ class UserMonthSummary:
 
     @property
     def total_services(self) -> int:
+        """領収書提出・API利用確認の対象となるPカード利用サービス数。"""
+
         return len(self.rows)
+
+    @property
+    def non_p_card_service_count(self) -> int:
+        """Pカード未使用のため領収書提出対象外となるサービス数。"""
+
+        return len(self.non_p_card_services)
+
+    @property
+    def total_registered_service_count(self) -> int:
+        return self.total_services + self.non_p_card_service_count
 
     @property
     def uploaded_count(self) -> int:
@@ -139,11 +152,13 @@ class UserMonthSummary:
 
 def build_user_month_summary(user: User, period_month: date) -> UserMonthSummary:
     period_month = month_start(period_month)
-    services = list(
-        RegisteredService.objects.uploadable_for(user, period_month)
+    all_services = list(
+        RegisteredService.objects.in_scope_for(user, period_month)
         .select_related("catalog_service")
         .order_by("name", "billing_type")
     )
+    services = [service for service in all_services if service.uses_p_card]
+    non_p_card_services = tuple(service for service in all_services if not service.uses_p_card)
     submission = Submission.objects.filter(user=user, period_month=period_month).first()
     receipts_by_service: dict[int, list[Receipt]] = {}
     if submission is not None:
@@ -170,7 +185,12 @@ def build_user_month_summary(user: User, period_month: date) -> UserMonthSummary
         )
         for service in services
     )
-    return UserMonthSummary(user=user, period_month=period_month, rows=rows)
+    return UserMonthSummary(
+        user=user,
+        period_month=period_month,
+        rows=rows,
+        non_p_card_services=non_p_card_services,
+    )
 
 
 def can_submit_without_receipt(user: User, period_month: date) -> bool:

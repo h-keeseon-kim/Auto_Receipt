@@ -125,6 +125,37 @@ def current_receipt_month():
     return receipt_month_for_submission(current_month())
 
 
+P_CARD_USAGE_CHOICES = (
+    ("", "選択してください"),
+    ("true", "利用する（領収書提出対象）"),
+    ("false", "利用しない（提出不要）"),
+)
+
+
+def coerce_p_card_usage(value):
+    if value in (True, "true", "True", "1", 1):
+        return True
+    if value in (False, "false", "False", "0", 0):
+        return False
+    raise forms.ValidationError("Pカードを利用するか選択してください。")
+
+
+def p_card_usage_field(*, label="Pカードを利用しますか？", help_text=None):
+    return forms.TypedChoiceField(
+        label=label,
+        choices=P_CARD_USAGE_CHOICES,
+        coerce=coerce_p_card_usage,
+        empty_value=None,
+        required=True,
+        error_messages={
+            "required": "Pカードを利用するか選択してください。",
+            "invalid_choice": "Pカードを利用するか正しく選択してください。",
+        },
+        help_text=help_text
+        or "『利用しない』の場合、このサービスは領収書提出・リマインドメール・Pカード明細照合の対象外です。",
+    )
+
+
 class MonthSelectForm(forms.Form):
     month = MonthField(label="提出月", initial=current_month)
 
@@ -193,11 +224,12 @@ class ServiceCatalogForm(forms.ModelForm):
 class StaffServiceForm(forms.ModelForm):
     """管理者が一般ユーザーへサービスマスターを割り当てるためのフォーム。"""
 
+    uses_p_card = p_card_usage_field()
     final_receipt_month = MonthField(label="最後にアップロードすべき領収書月", required=False)
 
     class Meta:
         model = RegisteredService
-        fields = ["user", "catalog_service", "is_active", "memo", "final_receipt_month"]
+        fields = ["user", "catalog_service", "uses_p_card", "is_active", "memo", "final_receipt_month"]
         widgets = {
             "memo": forms.Textarea(attrs={"rows": 3, "placeholder": "任意: 用途、担当、契約メモなど"}),
         }
@@ -233,6 +265,10 @@ class StaffServiceForm(forms.ModelForm):
         self.fields["catalog_service"].queryset = catalog_queryset
         self.fields["catalog_service"].empty_label = "サービスマスターを選択"
         self.fields["catalog_service"].label_from_instance = lambda catalog: catalog.display_name
+        if self.instance.pk:
+            self.initial["uses_p_card"] = "true" if self.instance.uses_p_card else "false"
+        else:
+            self.initial["uses_p_card"] = ""
         apply_design_classes(self)
 
     def clean_user(self):
@@ -255,8 +291,14 @@ class StaffServiceForm(forms.ModelForm):
             duplicate = RegisteredService.objects.filter(user=user).filter(same_service_identity_q(catalog)).exclude(pk=self.instance.pk)
             if duplicate.exists():
                 self.add_error("catalog_service", "このユーザーには同じサービス・同じ支払い種別がすでに登録されています。停止中の場合は再開してください。")
-        if not is_active and final_receipt_month is None and self.instance.deactivation_source == ServiceDeactivationSource.USER:
-            self.add_error("final_receipt_month", "ユーザー停止の記録には最終領収書月が必要です。")
+        uses_p_card = cleaned.get("uses_p_card")
+        if (
+            not is_active
+            and uses_p_card
+            and final_receipt_month is None
+            and self.instance.deactivation_source == ServiceDeactivationSource.USER
+        ):
+            self.add_error("final_receipt_month", "Pカード利用サービスのユーザー停止記録には最終領収書月が必要です。")
         return cleaned
 
     def save(self, commit=True):
@@ -298,6 +340,7 @@ class UserServiceRegistrationForm(forms.Form):
         empty_label="サービスを選択",
         help_text="管理者が登録したサービスマスターから選択します。一覧にない新規サービスだけ、別の例外申請を利用してください。",
     )
+    uses_p_card = p_card_usage_field()
     memo = forms.CharField(
         label="メモ",
         required=False,
@@ -352,6 +395,7 @@ class UserServiceRegistrationForm(forms.Form):
         service.name = catalog.name
         service.billing_type = catalog.billing_type
         service.is_active = True
+        service.uses_p_card = self.cleaned_data["uses_p_card"]
         service.memo = memo or service.memo
         service.registration_source = ServiceRegistrationSource.USER
         service.registered_by = self.user
@@ -368,9 +412,13 @@ class UserServiceRegistrationForm(forms.Form):
 class ServiceExceptionRequestForm(forms.ModelForm):
     """サービスマスターに存在しない新規サービスだけを申請するフォーム。"""
 
+    uses_p_card = p_card_usage_field(
+        help_text="承認後、この新規サービスの支払いにPカードを利用するかを選択します。『利用しない』場合は領収書提出とリマインドの対象外です。"
+    )
+
     class Meta:
         model = ServiceExceptionRequest
-        fields = ["service_name", "billing_type", "purpose"]
+        fields = ["service_name", "billing_type", "uses_p_card", "purpose"]
         labels = {
             "service_name": "サービス名",
             "billing_type": "支払い方法",
@@ -394,6 +442,10 @@ class ServiceExceptionRequestForm(forms.ModelForm):
     def __init__(self, *args, user: User, **kwargs):
         self.user = user
         super().__init__(*args, **kwargs)
+        if self.instance.pk:
+            self.initial["uses_p_card"] = "true" if self.instance.uses_p_card else "false"
+        else:
+            self.initial["uses_p_card"] = ""
         apply_design_classes(self)
 
     def clean_service_name(self):
@@ -505,11 +557,28 @@ class StaffServiceExceptionReviewForm(forms.Form):
         return cleaned
 
 
+class UserServicePCardForm(forms.ModelForm):
+    """一般ユーザーが自分のサービスのPカード利用有無を後から変更する。"""
+
+    uses_p_card = p_card_usage_field()
+
+    class Meta:
+        model = RegisteredService
+        fields = ["uses_p_card"]
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        if self.instance.pk:
+            self.initial["uses_p_card"] = "true" if self.instance.uses_p_card else "false"
+        apply_design_classes(self)
+
+
 class UserServiceStopForm(forms.Form):
     final_receipt_month = MonthField(
         label="最後にアップロードすべき領収書月",
         initial=current_month,
-        help_text="例: 2026年6月分まで領収書提出が必要な場合は 2026-06 を選択します。",
+        required=False,
+        help_text="Pカード利用サービスで、最後に提出が必要な領収書月を選択します。Pカード未使用の場合は入力不要です。",
     )
     stop_note = forms.CharField(
         label="利用停止メモ",
@@ -520,6 +589,11 @@ class UserServiceStopForm(forms.Form):
     def __init__(self, *args, service: RegisteredService, **kwargs):
         self.service = service
         super().__init__(*args, **kwargs)
+        if service.uses_p_card:
+            self.fields["final_receipt_month"].required = True
+        else:
+            self.fields["final_receipt_month"].required = False
+            self.fields["final_receipt_month"].widget = forms.HiddenInput()
         apply_design_classes(self)
 
     def save(self, *, stopped_by: User) -> RegisteredService:

@@ -4,7 +4,7 @@
 <div class="page-title">
     <div>
         <h1>{{ managed_user.username }} の利用サービス</h1>
-        <p class="muted">このユーザーが領収書アップロード時に選択できるサービスを管理します。例外申請の承認履歴とユーザーによる利用停止も確認できます。</p>
+        <p class="muted">このユーザーの利用サービスとPカード利用有無を管理します。Pカード未使用サービスは領収書提出・リマインド・全社明細照合の対象外です。</p>
     </div>
     <div class="actions">
         <a class="button" href="{% url 'staff_services' %}">サービス管理一覧へ</a>
@@ -16,11 +16,13 @@
     <div class="card"><span class="label">対象ユーザー</span><strong>{{ managed_user.username }}</strong></div>
     <div class="card"><span class="label">メール</span><strong>{{ managed_user.email|default:"-" }}</strong></div>
     <div class="card"><span class="label">登録サービス数</span><strong>{{ services|length }}</strong></div>
+    <div class="card"><span class="label">Pカード利用中</span><strong>{{ active_p_card_count }}</strong></div>
+    <div class="card"><span class="label">Pカード未使用</span><strong>{{ active_non_p_card_count }}</strong></div>
 </section>
 
 <section class="card section">
     <h2>サービスを登録</h2>
-    <p class="muted">サービスマスターから選択して登録します。サービスマスターがない場合は、先にサービス管理一覧で作成してください。</p>
+    <p class="muted">サービスマスターから選択し、Pカード利用有無を必須選択して登録します。サービスマスターがない場合は、先にサービス管理一覧で作成してください。</p>
     <form method="post" class="stack">
         {% csrf_token %}
         {{ form.as_p }}
@@ -32,21 +34,22 @@
     <div class="section-header">
         <div>
             <h2>登録済みサービス</h2>
-            <p class="muted">停止中のサービスは通常の利用サービス一覧から外れます。ユーザー停止の場合は最終領収書月が表示されます。</p>
+            <p class="muted">「編集」からPカード利用有無を後で変更できます。Pカード未使用サービスは提出対象外ですが、利用サービス履歴には残ります。</p>
         </div>
     </div>
     <div class="table-wrap">
         <table>
-            <thead><tr><th>サービス</th><th>種別</th><th>状態</th><th>登録元</th><th>停止元</th><th>最終領収書月</th><th>メモ</th><th>更新日時</th><th>操作</th></tr></thead>
+            <thead><tr><th>サービス</th><th>種別</th><th>状態</th><th>Pカード</th><th>登録元</th><th>停止元</th><th>最終領収書月</th><th>メモ</th><th>更新日時</th><th>操作</th></tr></thead>
             <tbody>
                 {% for service in services %}
                     <tr>
                         <td><strong>{{ service.display_name }}</strong></td>
                         <td>{{ service.get_billing_type_display }}</td>
                         <td>{% if service.is_active %}<span class="badge submitted">利用中</span>{% else %}<span class="badge neutral">停止中</span>{% endif %}</td>
+                        <td><span class="badge {{ service.p_card_badge_class }}">{{ service.p_card_usage_label }}</span></td>
                         <td><span class="badge {{ service.source_badge_class }}">{{ service.get_registration_source_display }}</span></td>
                         <td>{% if service.deactivation_source %}<span class="badge {{ service.stop_badge_class }}">{{ service.get_deactivation_source_display }}</span>{% else %}-{% endif %}</td>
-                        <td>{% if service.final_receipt_month %}{{ service.final_receipt_month|date:"Y年m月" }}{% else %}-{% endif %}</td>
+                        <td>{% if service.uses_p_card and service.final_receipt_month %}{{ service.final_receipt_month|date:"Y年m月" }}{% else %}-{% endif %}</td>
                         <td>{{ service.memo|default:service.stop_note|default:"-"|truncatechars:80 }}</td>
                         <td>{{ service.updated_at|date:"Y-m-d H:i" }}</td>
                         <td class="actions">
@@ -65,7 +68,7 @@
                         </td>
                     </tr>
                 {% empty %}
-                    <tr><td colspan="9" class="muted center">このユーザーにはサービスがまだ登録されていません。</td></tr>
+                    <tr><td colspan="10" class="muted center">このユーザーにはサービスがまだ登録されていません。</td></tr>
                 {% endfor %}
             </tbody>
         </table>

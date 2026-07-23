@@ -33,6 +33,7 @@
                     <th>申請ユーザー</th>
                     <th>サービス</th>
                     <th>支払い方法</th>
+                    <th>Pカード</th>
                     <th>用途</th>
                     <th>申請日時</th>
                     <th>ステータス</th>
@@ -45,6 +46,7 @@
                         <td><strong>{{ request_item.user.username }}</strong></td>
                         <td><strong>{{ request_item.service_name }}</strong></td>
                         <td>{{ request_item.get_billing_type_display }}</td>
+                        <td><span class="badge {{ request_item.p_card_badge_class }}">{{ request_item.p_card_usage_label }}</span></td>
                         <td class="purpose-cell">{{ request_item.purpose|linebreaksbr }}</td>
                         <td>{{ request_item.created_at|date:"Y-m-d H:i" }}</td>
                         <td><span class="badge {{ request_item.badge_class }}">{{ request_item.get_status_display }}</span></td>
@@ -70,7 +72,7 @@
                         </td>
                     </tr>
                 {% empty %}
-                    <tr><td colspan="7" class="muted center">該当する例外申請はありません。</td></tr>
+                    <tr><td colspan="8" class="muted center">該当する例外申請はありません。</td></tr>
                 {% endfor %}
             </tbody>
         </table>

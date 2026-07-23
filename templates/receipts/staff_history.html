@@ -19,9 +19,12 @@
     <div class="card"><span class="label">対象領収書月</span><strong>{{ target_receipt_month|date:"Y年m月" }}</strong></div>
     <div class="card"><span class="label">利用中ユーザー</span><strong>{{ stats.active_users }}</strong></div>
     <div class="card"><span class="label">提出済み</span><strong>{{ stats.submitted }}</strong></div>
+    <div class="card"><span class="label">提出不要</span><strong>{{ stats.not_required }}</strong></div>
     <div class="card"><span class="label">未提出ユーザー</span><strong class="{% if stats.incomplete_users %}danger{% endif %}">{{ stats.incomplete_users }}</strong></div>
     <div class="card"><span class="label">領収書未提出サービス</span><strong class="{% if stats.missing_service_count %}danger{% endif %}">{{ stats.missing_service_count }}</strong></div>
     <div class="card"><span class="label">API利用確認待ち</span><strong class="{% if stats.api_pending_count %}danger{% endif %}">{{ stats.api_pending_count }}</strong></div>
+    <div class="card"><span class="label">Pカード利用サービス</span><strong>{{ stats.active_p_card_service_count }}</strong></div>
+    <div class="card"><span class="label">Pカード未使用 / 提出不要</span><strong>{{ stats.active_non_p_card_service_count }}</strong></div>
     <div class="card"><span class="label">領収書数</span><strong>{{ stats.receipt_count }}</strong></div>
     <div class="card"><span class="label">AI未確認</span><strong data-ai-summary="ai_pending_count">{{ stats.ai_pending_count }}</strong></div>
     <div class="card"><span class="label">AI抽出中</span><strong data-ai-summary="ai_processing_count">{{ stats.ai_processing_count }}</strong></div>
@@ -53,7 +56,7 @@
                     <tr class="{% if row.needs_attention %}attention-row{% endif %}">
                         <td><strong>{{ row.user.username }}</strong><div class="muted small">{{ row.user.email|default:"-" }}</div></td>
                         <td><span class="badge {% if row.user.profile.account_status == 'active' %}submitted{% else %}neutral{% endif %}">{{ row.user.profile.get_account_status_display }}</span></td>
-                        <td><span class="badge {% if row.status == '提出済み' %}submitted{% elif row.status == '未提出領収書あり' %}draft{% else %}neutral{% endif %}">{{ row.status }}</span></td>
+                        <td><span class="badge {{ row.status_class }}">{{ row.status }}</span></td>
                         <td><strong>{{ row.monthly_summary.progress_label }}</strong> / {{ row.monthly_summary.total_services }}件</td>
                         <td>{% if row.monthly_summary.missing_required_count %}<span class="badge draft">{{ row.monthly_summary.missing_required_count }}</span>{% else %}<span class="badge submitted">0</span>{% endif %}</td>
                         <td>{% if row.monthly_summary.api_pending_count %}<span class="badge draft">{{ row.monthly_summary.api_pending_count }}</span>{% else %}<span class="badge submitted">0</span>{% endif %}</td>

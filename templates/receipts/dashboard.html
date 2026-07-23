@@ -20,13 +20,27 @@
     </div>
     <div class="card">
         <span class="label">ステータス</span>
-        <strong class="badge {{ submission.status }}">{{ submission.get_status_display }}</strong>
+        <strong class="badge {{ display_status_class }}">{{ display_status_label }}</strong>
     </div>
     <div class="card">
         <span class="label">提出対象の確認</span>
         <strong>{{ monthly_summary.progress_label }}</strong>
     </div>
 </section>
+
+{% if display_status_label == "提出不要" %}
+<section class="notice section compact-notice">
+    <strong>この領収書発行月は提出不要です</strong>
+    <p class="muted small">Pカードを利用する提出対象サービスがありません。「その他」の領収書が発生した場合は、この画面から追加できます。</p>
+</section>
+{% endif %}
+
+{% if monthly_summary.non_p_card_service_count %}
+<section class="notice section compact-notice">
+    <strong>Pカード未使用サービスは提出不要です</strong>
+    <p class="muted small">Pカード未使用に設定された {{ monthly_summary.non_p_card_service_count }}件のサービスは、領収書アップロード・リマインドメール・全社ご利用代金明細照合の対象外です。Pカード設定は「利用サービス」から変更できます。</p>
+</section>
+{% endif %}
 
 {% if monthly_summary.metered_rows %}
 <section class="card section api-usage-section" data-tutorial-target="api-usage-section">
@@ -151,7 +165,7 @@
 <section class="card section" data-tutorial-target="uploaded-receipts-section">
     <div class="section-header">
         <h2>アップロード済み領収書</h2>
-        {% if not submission.is_submitted %}
+        {% if can_submit %}
             <form method="post" onsubmit="return confirm('現在アップロード済みの内容を確認します。未提出サービスが残っている場合は、忘れないよう注意書きが表示されます。');">
                 {% csrf_token %}
                 <input type="hidden" name="action" value="submit">
