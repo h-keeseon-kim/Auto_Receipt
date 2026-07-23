@@ -39,6 +39,7 @@ a:hover { text-decoration: underline; }
 }
 .brand { font-size: 1.2rem; font-weight: 800; color: var(--text); }
 .nav { display: flex; align-items: center; gap: 1rem; flex-wrap: wrap; }
+.nav > a, .nav-with-count, .link-button { white-space: nowrap; word-break: keep-all; }
 .nav-with-count { display: inline-flex; align-items: center; gap: 0.35rem; }
 .nav-count-badge {
     display: inline-flex;
@@ -84,6 +85,8 @@ p { margin-top: 0; }
     font-size: 0.85rem;
     background: var(--neutral-bg);
     color: var(--neutral);
+    white-space: nowrap;
+    word-break: keep-all;
 }
 .badge.submitted { background: var(--success-bg); color: var(--success); }
 .badge.draft { background: var(--draft-bg); color: var(--draft); }
@@ -113,16 +116,21 @@ ul.errorlist { color: var(--danger); margin: 0.2rem 0 0.6rem; padding-left: 1.2r
     align-items: center;
     justify-content: center;
     gap: 0.35rem;
+    max-width: 100%;
     border: 1px solid var(--border);
     border-radius: 10px;
     background: #fff;
     color: var(--text);
     padding: 0.6rem 0.9rem;
-    font-weight: 700;
     cursor: pointer;
     text-decoration: none;
     font: inherit;
+    font-weight: 700;
     line-height: 1.2;
+    white-space: nowrap;
+    word-break: keep-all;
+    overflow-wrap: normal;
+    flex: 0 0 auto;
 }
 .button:hover { text-decoration: none; border-color: var(--primary); }
 .button.primary { background: var(--primary); color: #fff; border-color: var(--primary); }
@@ -296,6 +304,62 @@ tr:last-child td { border-bottom: 0; }
     top: 1px;
 }
 .tab-panel { border-top-left-radius: 0; }
+
+/* v1.8.1: service-master user visibility */
+.catalog-users-cell { min-width: 17rem; }
+.catalog-user-details { min-width: 15rem; }
+.catalog-user-details > summary {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.45rem;
+    cursor: pointer;
+    color: var(--primary);
+    font-weight: 700;
+    white-space: nowrap;
+    word-break: keep-all;
+    list-style: none;
+}
+.catalog-user-details > summary::-webkit-details-marker { display: none; }
+.catalog-user-details > summary::after {
+    content: "▾";
+    display: inline-block;
+    font-size: 0.8rem;
+    transition: transform 0.15s ease;
+}
+.catalog-user-details[open] > summary::after { transform: rotate(180deg); }
+.catalog-user-details > summary:hover { text-decoration: underline; }
+.catalog-user-list {
+    display: flex;
+    flex-direction: column;
+    gap: 0.25rem;
+    max-height: 15rem;
+    min-width: 16rem;
+    margin-top: 0.55rem;
+    padding: 0.45rem;
+    overflow: auto;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    background: #f8fafc;
+}
+.catalog-user-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.65rem;
+    padding: 0.45rem 0.55rem;
+    border-radius: 8px;
+    color: var(--text);
+}
+.catalog-user-row:hover,
+.catalog-user-row:focus-visible {
+    background: #eef4ff;
+    text-decoration: none;
+}
+.catalog-user-name {
+    min-width: 0;
+    overflow-wrap: anywhere;
+    font-weight: 700;
+}
 
 @media (max-width: 760px) {
     .filter-form { grid-template-columns: 1fr; }

@@ -941,10 +941,29 @@ def staff_services(request):
             | Q(deactivation_source=ServiceDeactivationSource.USER)
         ).order_by("-updated_at")
 
-    catalog_queryset = ServiceCatalog.objects.annotate(
-        assigned_count=Count("registered_services", distinct=True),
-        active_user_count=Count("registered_services", filter=Q(registered_services__is_active=True), distinct=True),
-    ).order_by("name", "billing_type")
+    active_catalog_assignments = (
+        RegisteredService.objects.select_related("user")
+        .filter(is_active=True, user__is_staff=False)
+        .order_by("user__username", "user_id")
+    )
+    catalog_queryset = (
+        ServiceCatalog.objects.annotate(
+            assigned_count=Count("registered_services", distinct=True),
+            active_user_count=Count(
+                "registered_services__user",
+                filter=Q(registered_services__is_active=True, registered_services__user__is_staff=False),
+                distinct=True,
+            ),
+        )
+        .prefetch_related(
+            Prefetch(
+                "registered_services",
+                queryset=active_catalog_assignments,
+                to_attr="active_user_assignments",
+            )
+        )
+        .order_by("name", "billing_type")
+    )
     catalog_paginator = Paginator(catalog_queryset, 25)
     catalog_page_obj = catalog_paginator.get_page(request.GET.get("catalog_page"))
 

@@ -1920,6 +1920,68 @@ class StaffServiceAssignmentTests(TestCase):
         self.assertLess(content.index("登録状況"), content.index("登録サービス一覧"))
         self.assertLess(content.index("登録サービス一覧"), content.index("新規登録/停止"))
 
+    def test_staff_catalog_shows_which_active_users_use_each_service(self):
+        RegisteredService.objects.create(
+            user=self.user,
+            catalog_service=self.catalog,
+            name=self.catalog.name,
+            billing_type=self.catalog.billing_type,
+            uses_p_card=True,
+        )
+        RegisteredService.objects.create(
+            user=self.other_user,
+            catalog_service=self.catalog,
+            name=self.catalog.name,
+            billing_type=self.catalog.billing_type,
+            uses_p_card=False,
+        )
+        stopped_user = User.objects.create_user(
+            username="stopped@example.com",
+            email="stopped@example.com",
+            password="password123",
+        )
+        RegisteredService.objects.create(
+            user=stopped_user,
+            catalog_service=self.catalog,
+            name=self.catalog.name,
+            billing_type=self.catalog.billing_type,
+            is_active=False,
+        )
+        self.client.login(username="admin", password="admin-password-123")
+
+        response = self.client.get(reverse("staff_services") + "?tab=catalog")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "利用者を表示")
+        self.assertContains(response, "2人")
+        self.assertContains(response, self.user.username)
+        self.assertContains(response, self.other_user.username)
+        self.assertContains(response, "Pカード利用")
+        self.assertContains(response, "Pカード未使用")
+        self.assertContains(response, f"?tab=users&amp;user={self.user.pk}")
+        self.assertNotContains(response, stopped_user.username)
+
+        catalog = next(
+            item for item in response.context["catalog_page_obj"].object_list if item.pk == self.catalog.pk
+        )
+        self.assertEqual(
+            [assignment.user_id for assignment in catalog.active_user_assignments],
+            [self.other_user.pk, self.user.pk],
+        )
+
+    def test_global_button_styles_keep_japanese_labels_on_one_line(self):
+        css_path = Path(__file__).resolve().parents[1] / "static" / "css" / "app.css"
+        css = css_path.read_text(encoding="utf-8")
+        button_rule = css.split("\n.button {\n", 1)[1].split("}", 1)[0]
+
+        self.assertIn("white-space: nowrap", button_rule)
+        self.assertIn("word-break: keep-all", button_rule)
+        self.assertIn("flex: 0 0 auto", button_rule)
+
+        self.client.login(username=self.user.username, password="password123")
+        response = self.client.get(reverse("user_services"))
+        self.assertContains(response, ">サービス利用登録</a>")
+
     def test_staff_can_start_ai_processing_manually_and_processed_items_are_skipped(self):
         service = RegisteredService.objects.create(
             user=self.user,

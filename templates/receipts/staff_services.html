@@ -18,7 +18,7 @@
     <div class="section-header">
         <div>
             <h2>サービスマスター</h2>
-            <p class="muted">管理者による登録、または例外申請の承認時に利用するサービスマスターです。</p>
+            <p class="muted">管理者による登録、または例外申請の承認時に利用するサービスマスターです。各サービスの利用中ユーザーを展開して確認できます。</p>
         </div>
         <a class="button" href="{% url 'staff_catalog_create' %}">サービスマスター登録</a>
     </div>
@@ -32,7 +32,26 @@
                         <td>{{ catalog.get_billing_type_display }}</td>
                         <td>{{ catalog.merchant_aliases|default:"-"|linebreaksbr|truncatechars_html:120 }}</td>
                         <td>{% if catalog.is_active %}<span class="badge submitted">選択可能</span>{% else %}<span class="badge neutral">停止中</span>{% endif %}</td>
-                        <td>{{ catalog.active_user_count }}</td>
+                        <td class="catalog-users-cell">
+                            {% if catalog.active_user_assignments %}
+                                <details class="catalog-user-details">
+                                    <summary>
+                                        <span class="badge submitted">{{ catalog.active_user_count }}人</span>
+                                        <span>利用者を表示</span>
+                                    </summary>
+                                    <div class="catalog-user-list" role="list" aria-label="{{ catalog.display_name }} の利用中ユーザー">
+                                        {% for assignment in catalog.active_user_assignments %}
+                                            <a class="catalog-user-row" role="listitem" href="{% url 'staff_services' %}?tab=users&amp;user={{ assignment.user_id }}">
+                                                <span class="catalog-user-name">{{ assignment.user.username }}</span>
+                                                <span class="badge {{ assignment.p_card_badge_class }}">{{ assignment.p_card_usage_label }}</span>
+                                            </a>
+                                        {% endfor %}
+                                    </div>
+                                </details>
+                            {% else %}
+                                <span class="muted">0人</span>
+                            {% endif %}
+                        </td>
                         <td>{{ catalog.assigned_count }}</td>
                         <td>{{ catalog.memo|default:"-"|truncatechars:80 }}</td>
                         <td class="actions">
