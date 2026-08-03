@@ -58,7 +58,7 @@
             </div>
             <fieldset class="review-checklist-fieldset">
                 <legend>確認チェック</legend>
-                <p class="muted small">領収書本体を確認できた項目だけチェックしてください。すべてチェックすると確認済みにできます。</p>
+                <p class="muted small">領収書本体を確認できた項目だけチェックしてください。カード末尾は任意項目で、領収書に記載がない場合は未チェックのままでも確認済みにできます。</p>
                 <div class="review-checklist-grid">
                     {% for field in review_form %}
                         {% if field.name|slice:':9' == 'ai_check_' %}
@@ -77,7 +77,7 @@
             {% endif %}
             <div class="actions">
                 <button type="submit" name="review_action" value="save" class="button">確認内容を保存</button>
-                <button type="submit" name="review_action" value="confirm" class="button primary">{% if receipt.needs_resubmission_decision %}再提出不要として確認済みにする{% else %}すべて確認済みにする{% endif %}</button>
+                <button type="submit" name="review_action" value="confirm" class="button primary">{% if receipt.needs_resubmission_decision %}再提出不要として確認済みにする{% else %}必須項目を確認済みにする{% endif %}</button>
             </div>
         </form>
     {% endif %}

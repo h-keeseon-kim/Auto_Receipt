@@ -1210,6 +1210,20 @@ body.tutorial-open { overflow-x: hidden; }
     box-shadow: 0 0 0 2px rgba(47, 99, 218, 0.12);
 }
 
+.statement-candidate-card.rejected {
+    border-color: #f2b8b5;
+    background: #fff8f7;
+}
+
+.statement-match-rule-notice {
+    line-height: 1.65;
+}
+
+.statement-match-reason {
+    margin-top: 0.35rem;
+    color: var(--muted);
+}
+
 .statement-candidate-header {
     display: flex;
     align-items: center;

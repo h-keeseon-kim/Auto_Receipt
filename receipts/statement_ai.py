@@ -122,9 +122,10 @@ def generate_card_statement_analysis(
         "ChatGPT と OPENAI *CHATGPT / OPENAI.COM、Claude と CLAUDE.AI / ANTHROPIC.COM のような"
         "運営会社・請求名義の関連も考慮してください。\n"
         f"サービスマスター一覧: {json.dumps(catalogs, ensure_ascii=False)}\n"
-        "match_status の基準: matched=サービスマスターと十分に一致、"
-        "ambiguous=候補はあるが断定不可、unmatched=登録サービスに一致しない、"
-        "ignored=明らかに領収書管理対象外。\n"
+        "match_status の基準: matched=ご利用先名、運営会社、登録済み請求名義のいずれかでサービスとの明確な関連があり confidence 0.85以上、"
+        "ambiguous=1つ以上の具体的なサービス候補はあるが断定できない、"
+        "unmatched=サービスとの具体的な関連を確認できない、ignored=明らかに領収書管理対象外。"
+        "金額が似ているだけではサービスをmatchedまたはambiguousにしないでください。"
         "receipt_required は、ソフトウェア、SaaS、API、オンラインサービス等の請求で領収書確認が必要なら true。"
         "サービスマスターにないが領収書が必要そうな項目も、ambiguous または unmatched とし、"
         "receipt_required=true にして人が確認できるようにしてください。"
@@ -285,8 +286,11 @@ def build_statement_result_from_payload(
         match_status = str(raw.get("match_status") or StatementMatchStatus.UNMATCHED)
         if match_status not in StatementMatchStatus.values:
             match_status = StatementMatchStatus.UNMATCHED
-        if match_status == StatementMatchStatus.MATCHED and catalog_id is None:
+        confidence = normalize_confidence(raw.get("confidence"))
+        if match_status == StatementMatchStatus.MATCHED and (catalog_id is None or confidence < 0.85):
             match_status = StatementMatchStatus.AMBIGUOUS
+        if match_status == StatementMatchStatus.AMBIGUOUS and catalog_id is None and confidence < 0.50:
+            match_status = StatementMatchStatus.UNMATCHED
 
         item = StatementAnalysisItem(
             line_reference=str(raw.get("line_reference") or index)[:40],
@@ -298,7 +302,7 @@ def build_statement_result_from_payload(
             service_catalog_id=catalog_id,
             match_status=match_status,
             receipt_required=bool(raw.get("receipt_required")),
-            confidence=normalize_confidence(raw.get("confidence")),
+            confidence=confidence,
             reason=str(raw.get("reason") or "").strip()[:2000],
         )
         items.append(item)

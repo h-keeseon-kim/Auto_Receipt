@@ -199,8 +199,9 @@ def build_openai_content(
                 + f"領収書の利用者名・宛名との照合に使う対象ユーザー情報: {expected_recipient_context or '氏名情報なし'}\n"
                 + f"元ファイル名: {original_filename}\n"
                 + "必ず次の順番で確認してください。\n"
-                + f"1. 領収書内の支払カードまたは支払方法に表示されるカード末尾4桁が {target} で終わるか確認する。"
-                + "カード末尾が読めない場合は null、違う場合は読めた末尾4桁を返す。\n"
+                + f"1. 領収書内に支払カード末尾4桁の記載がある場合だけ、{target} で終わるか確認する。"
+                + "カード末尾の記載がない、または読めない場合は null を返す。"
+                + "カード情報がないことだけを理由にファイル名作成不可・確認失敗にしない。\n"
                 + "2. 領収書内の実際の払先・販売者・請求元・merchant/payee を確認する。"
                 + "画面上のサービス名やユーザー入力メモより、領収書に表示された請求元を優先する。"
                 + "例えば ChatGPT（サブスク）の払先は OpenAI、Claude（サブスク）の払先は Anthropic のように判断する。\n"
@@ -214,8 +215,10 @@ def build_openai_content(
                 + "5. 支払日または領収書日付、合計金額、通貨を確認する。\n"
                 + filename_instruction.replace("5. ", "6. ", 1)
                 + "7. ファイル名はアプリ側で YYMMDD_ユーザー名_filename_label_金額_通貨 の形式に整形する。\n"
-                + f"8. can_create_filename は、カード末尾が {target} と確認でき、払先・filename_label・日付・金額・通貨を高い確度で読め、"
-                + f"さらに{relation_name}が関連すると確認できる場合だけ true にする。"
+                + "8. can_create_filename は、払先・filename_label・日付・金額・通貨を高い確度で読め、"
+                + f"さらに{relation_name}が関連すると確認できる場合に true にする。"
+                + f"カード末尾{target}の一致は補助証拠であり、記載なしでも他の条件が揃えば true にする。"
+                + "別のカード末尾が明記された場合は reason に記載し、管理者確認対象とする。"
                 + "利用者名・宛名の一致はファイル名作成可否には含めず、独立した管理者確認項目として返す。"
                 + "作成が難しい場合は false にし、reason に管理者が確認すべき理由を日本語で短く書く。"
             ),
@@ -347,12 +350,25 @@ def build_result_from_payload(
     can_create = bool(payload.get("can_create_filename", payload.get("can_generate_filename", False)))
     model_reason = str(payload.get("reason") or payload.get("admin_memo") or "").strip()
 
+    if card_matches is None and card_last4:
+        card_matches = card_last4 == target
+    card_not_printed = card_matches is None and not card_last4
+    core_filename_ready = bool(filename_label and payment_date is not None and amount is not None and currency)
+    relation_ready = not service_relation_supplied or service_payee_related is True
+    # 旧プロンプト準拠のモデルが「カード記載なし」だけを理由に false を返しても、
+    # ファイル名作成に必要な主要項目が揃っていれば生成可能として正規化する。
+    if (
+        not can_create
+        and card_not_printed
+        and core_filename_ready
+        and relation_ready
+        and confidence >= 0.65
+    ):
+        can_create = True
+
     issues: list[str] = []
-    if card_matches is not True:
-        if card_last4:
-            issues.append(f"カード末尾が {target} ではなく {card_last4} と読み取られました。")
-        else:
-            issues.append(f"カード末尾 {target} を確認できませんでした。")
+    if card_matches is False or (card_last4 and card_last4 != target):
+        issues.append(f"カード末尾が {target} ではなく {card_last4} と読み取られました。")
     if not payee:
         issues.append("払先を確認できませんでした。")
     if not filename_label:

@@ -80,6 +80,7 @@ from .models import (
     ServiceExceptionRequest,
     ServiceExceptionRequestStatus,
     ServiceRegistrationSource,
+    StatementMatchReason,
     StatementMatchStatus,
     Submission,
     UserAccountStatus,
@@ -1734,8 +1735,7 @@ def staff_ai_summary_for_month(selected_month) -> dict:
     available = receipts.available_files()
     unresolved_available = available.filter(admin_review_status=ReceiptAdminReviewStatus.NOT_REVIEWED)
     manual_review_filter = (
-        Q(ai_check_card_last4=False)
-        | Q(ai_check_payee=False)
+        Q(ai_check_payee=False)
         | Q(ai_check_recipient_name=False)
         | Q(ai_check_service_payee_related=False)
         | Q(ai_check_date=False)
@@ -2205,6 +2205,7 @@ def staff_update_statement_item(request, pk: int):
         item.matched_service = None
         item.matched_receipt = None
         item.match_status = StatementMatchStatus.IGNORED
+        item.match_reason_code = StatementMatchReason.IGNORED
         item.receipt_required = False
         item.match_confidence = 1.0
         item.match_memo = "管理者確認により領収書管理対象外としました。"
@@ -2241,6 +2242,7 @@ def staff_update_statement_item(request, pk: int):
         item.matched_service = receipt.service
         item.matched_catalog_service = receipt.service.catalog_service if receipt.service_id else item.matched_catalog_service
         item.match_status = StatementMatchStatus.MATCHED
+        item.match_reason_code = StatementMatchReason.MANUAL_CONFIRMED
         item.receipt_required = True
         item.match_confidence = 1.0
         item.match_memo = (
@@ -2263,6 +2265,7 @@ def staff_update_statement_item(request, pk: int):
         item.matched_service = service
         item.matched_receipt = None
         item.match_status = StatementMatchStatus.MATCHED
+        item.match_reason_code = StatementMatchReason.MANUAL_CONFIRMED
         item.receipt_required = request.POST.get("receipt_required") == "on"
         item.match_confidence = 1.0
         item.match_memo = "管理者が対応ユーザーとサービスを確認しました。"
@@ -2273,6 +2276,7 @@ def staff_update_statement_item(request, pk: int):
             "matched_service",
             "matched_receipt",
             "match_status",
+            "match_reason_code",
             "receipt_required",
             "match_confidence",
             "match_memo",

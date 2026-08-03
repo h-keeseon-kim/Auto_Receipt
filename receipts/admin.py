@@ -297,6 +297,7 @@ class CardStatementItemInline(admin.TabularInline):
         "matched_catalog_service",
         "matched_service",
         "match_status",
+        "match_reason_code",
         "receipt_required",
         "matched_receipt",
         "match_memo",
@@ -347,6 +348,8 @@ class CardStatementMatchCandidateAdmin(admin.ModelAdmin):
         "item",
         "rank",
         "receipt",
+        "gate_status",
+        "priority_tier",
         "strength",
         "score",
         "confidence",
@@ -355,7 +358,7 @@ class CardStatementMatchCandidateAdmin(admin.ModelAdmin):
         "service_match",
         "date_match",
     )
-    list_filter = ("strength", "amount_match", "currency_match", "merchant_match", "service_match", "date_match")
+    list_filter = ("gate_status", "priority_tier", "strength", "amount_match", "currency_match", "merchant_match", "service_match", "date_match")
     search_fields = (
         "item__merchant_name",
         "item__line_reference",
@@ -371,6 +374,9 @@ class CardStatementMatchCandidateAdmin(admin.ModelAdmin):
         "score",
         "confidence",
         "strength",
+        "gate_status",
+        "priority_tier",
+        "gate_memo",
         "amount_match",
         "amount_match_basis",
         "currency_match",

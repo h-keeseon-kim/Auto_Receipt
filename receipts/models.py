@@ -163,6 +163,33 @@ class StatementCandidateStrength(models.TextChoices):
     POSSIBLE = "possible", "参考候補"
 
 
+class StatementCandidateGateStatus(models.TextChoices):
+    AUTO_ELIGIBLE = "auto_eligible", "自動照合対象"
+    MANUAL_ONLY = "manual_only", "手動確認のみ"
+    REJECTED = "rejected", "必須条件不一致"
+
+
+class StatementCandidatePriorityTier(models.TextChoices):
+    EXACT_IDENTITY = "exact_identity", "優先度1: 金額・通貨＋サービス/払先一致"
+    EXACT_AMOUNT_ONLY = "exact_amount_only", "優先度2: 金額・通貨一意"
+    NEAR_IDENTITY = "near_identity", "優先度3: 金額近似＋サービス/払先一致"
+    IDENTITY_ONLY = "identity_only", "優先度4: サービス/払先一致・金額不足"
+    REJECTED = "rejected", "除外: 必須条件不一致"
+
+
+class StatementMatchReason(models.TextChoices):
+    AUTO_STRONG = "auto_strong", "必須条件一致"
+    AUTO_AMOUNT_ONLY = "auto_amount_only", "金額一致・関係要確認"
+    MULTIPLE_COMPATIBLE = "multiple_compatible", "適合候補複数"
+    RECEIPT_COMPETITION = "receipt_competition", "同一領収書が複数明細で競合"
+    USER_AMBIGUOUS = "user_ambiguous", "利用者未特定"
+    INSUFFICIENT_EVIDENCE = "insufficient_evidence", "情報不足・手動確認"
+    SERVICE_ONLY = "service_only", "サービス特定・領収書未提出"
+    NO_COMPATIBLE_RECEIPT = "no_compatible_receipt", "適合する領収書なし"
+    MANUAL_CONFIRMED = "manual_confirmed", "管理者確定"
+    IGNORED = "ignored", "対象外"
+
+
 class ServiceRegistrationSource(models.TextChoices):
     ADMIN = "admin", "管理者登録"
     USER = "user", "ユーザー登録"
@@ -944,10 +971,14 @@ class Receipt(models.Model):
         return self.ai_period_check_status == ReceiptPeriodCheckStatus.MISMATCHED
 
     @property
-    def ai_check_items(self) -> list[tuple[str, bool]]:
+    def ai_required_check_items(self) -> list[tuple[str, bool]]:
+        """AI確認済み判定に必要な項目。
+
+        カード末尾は一部サービスの領収書に印字されないため、必須項目に含めない。
+        """
+
         relation_label = "メモ/領収書関連" if self.is_extra else "サービス/払先関連"
         return [
-            ("カード末尾7210", self.ai_check_card_last4),
             ("払先", self.ai_check_payee),
             ("利用者名（宛名）", self.ai_check_recipient_name),
             (relation_label, self.ai_check_service_payee_related),
@@ -958,8 +989,16 @@ class Receipt(models.Model):
         ]
 
     @property
+    def ai_optional_check_items(self) -> list[tuple[str, bool]]:
+        return [("カード末尾7210（任意・一致時加点）", self.ai_check_card_last4)]
+
+    @property
+    def ai_check_items(self) -> list[tuple[str, bool]]:
+        return [*self.ai_optional_check_items, *self.ai_required_check_items]
+
+    @property
     def ai_all_checks_passed(self) -> bool:
-        return all(checked for _label, checked in self.ai_check_items)
+        return all(checked for _label, checked in self.ai_required_check_items)
 
     @property
     def is_ai_processing(self) -> bool:
@@ -1097,7 +1136,7 @@ class Receipt(models.Model):
 
     @property
     def ai_unchecked_labels(self) -> list[str]:
-        return [label for label, checked in self.ai_check_items if not checked]
+        return [label for label, checked in self.ai_required_check_items if not checked]
 
     @property
     def ai_unchecked_summary(self) -> str:
@@ -1403,6 +1442,12 @@ class CardStatementItem(models.Model):
         verbose_name="一致サービス",
     )
     match_status = models.CharField("一致ステータス", max_length=20, choices=StatementMatchStatus.choices, default=StatementMatchStatus.UNMATCHED)
+    match_reason_code = models.CharField(
+        "判定理由",
+        max_length=40,
+        choices=StatementMatchReason.choices,
+        default=StatementMatchReason.NO_COMPATIBLE_RECEIPT,
+    )
     match_confidence = models.FloatField("一致信頼度", default=0)
     match_memo = models.TextField("確認メモ", blank=True)
     receipt_required = models.BooleanField("領収書が必要", default=False)
@@ -1421,6 +1466,13 @@ class CardStatementItem(models.Model):
         indexes = [models.Index(fields=["statement", "match_status", "receipt_required"])]
         verbose_name = "カード明細項目"
         verbose_name_plural = "カード明細項目"
+
+    @property
+    def match_reason_label(self) -> str:
+        try:
+            return StatementMatchReason(self.match_reason_code).label
+        except ValueError:
+            return self.get_match_status_display()
 
     @property
     def receipt_status_label(self) -> str:
@@ -1490,6 +1542,19 @@ class CardStatementMatchCandidate(models.Model):
         choices=StatementCandidateStrength.choices,
         default=StatementCandidateStrength.POSSIBLE,
     )
+    gate_status = models.CharField(
+        "必須条件判定",
+        max_length=20,
+        choices=StatementCandidateGateStatus.choices,
+        default=StatementCandidateGateStatus.MANUAL_ONLY,
+    )
+    priority_tier = models.CharField(
+        "優先順位",
+        max_length=30,
+        choices=StatementCandidatePriorityTier.choices,
+        default=StatementCandidatePriorityTier.IDENTITY_ONLY,
+    )
+    gate_memo = models.TextField("必須条件メモ", blank=True)
     amount_match = models.BooleanField("金額一致", default=False)
     amount_match_basis = models.CharField("金額一致基準", max_length=20, blank=True)
     currency_match = models.BooleanField("通貨一致", default=False)
@@ -1515,6 +1580,16 @@ class CardStatementMatchCandidate(models.Model):
     @property
     def evidence_labels(self) -> list[str]:
         labels: list[str] = []
+        expected_last4 = str(getattr(settings, "RECEIPT_CARD_LAST4", "7210"))[-4:]
+        extracted_last4 = "".join(
+            char for char in (self.receipt.ai_extracted_card_last4 or "") if char.isdigit()
+        )[-4:]
+        if extracted_last4 == expected_last4:
+            labels.append(f"カード末尾{expected_last4}一致（補助加点）")
+        elif extracted_last4:
+            labels.append(f"カード末尾要確認（{extracted_last4}）")
+        else:
+            labels.append("カード末尾記載なし（中立）")
         if self.amount_match:
             if self.amount_match_basis == "original":
                 labels.append("外貨金額一致")
@@ -1538,11 +1613,19 @@ class CardStatementMatchCandidate(models.Model):
 
     @property
     def badge_class(self) -> str:
-        if self.strength == StatementCandidateStrength.STRONG:
+        if self.gate_status == StatementCandidateGateStatus.REJECTED:
+            return "danger"
+        if self.gate_status == StatementCandidateGateStatus.AUTO_ELIGIBLE:
             return "submitted"
-        if self.strength == StatementCandidateStrength.AMOUNT_ONLY:
-            return "draft"
-        return "neutral"
+        return "draft"
+
+    @property
+    def gate_badge_class(self) -> str:
+        return self.badge_class
+
+    @property
+    def can_auto_match(self) -> bool:
+        return self.gate_status == StatementCandidateGateStatus.AUTO_ELIGIBLE
 
     def __str__(self) -> str:
         return f"{self.item} / 候補{self.rank}: {self.receipt.display_filename}"

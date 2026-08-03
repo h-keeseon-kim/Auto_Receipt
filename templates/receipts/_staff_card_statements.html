@@ -46,6 +46,15 @@
     {% if statement.status == 'processing' %}
         <div class="message notice processing-text">AIで全社明細の情報を抽出中です。完了した解析結果はこの画面へ自動反映されます。</div>
     {% elif statement.items.all %}
+        <div class="message notice statement-match-rule-notice">
+            <strong>照合順序：</strong> ①必須条件（対象月・金額/通貨・サービス/払先・利用者名の明確な矛盾）を確認し、
+            ②適合候補を優先度別に分け、③同じ優先度の候補だけを補助スコアで順位付けします。
+            <strong>領収書のカード末尾は必須条件ではありません。</strong>
+            末尾{{ target_card_last4 }}が記載されていれば補助スコア+40点、記載がなければ0点の中立です。
+            別番号が明記されている場合も候補から除外せず、自動確定だけを止めて管理者確認へ送ります。
+            明細書本体のカード末尾{{ target_card_last4 }}確認は、対象Pカードの明細かを確認するため別途維持します。
+            <strong>情報不明</strong>と<strong>明確な不一致</strong>を区別し、明確な不一致候補は点数に関係なく「曖昧」へ含めず除外します。
+        </div>
         <div class="table-wrap scroll-box xlarge table-scroll-wide">
             <table class="statement-items-table global-statement-table">
                 <thead><tr><th>明細No.</th><th>利用日</th><th>ご利用先</th><th>金額</th><th>照合ユーザー</th><th>対応サービス</th><th>照合判定</th><th>領収書状況</th><th>確認メモ</th><th>管理者確認</th></tr></thead>
@@ -61,7 +70,10 @@
                             </td>
                             <td>{{ item.matched_user_label }}</td>
                             <td>{{ item.matched_service_label }}</td>
-                            <td><span class="badge {% if item.match_status == 'matched' %}submitted{% elif item.match_status == 'ignored' %}neutral{% else %}draft{% endif %}">{{ item.get_match_status_display }}</span></td>
+                            <td>
+                                <span class="badge {% if item.match_status == 'matched' %}submitted{% elif item.match_status == 'ignored' %}neutral{% else %}draft{% endif %}">{{ item.get_match_status_display }}</span>
+                                <div class="small statement-match-reason">{{ item.match_reason_label }}</div>
+                            </td>
                             <td class="statement-receipt-cell">
                                 <span class="badge {% if item.matched_receipt and item.matched_receipt.file_available %}submitted{% elif not item.receipt_required %}neutral{% else %}draft{% endif %}">{{ item.receipt_status_label }}</span>
                                 {% if item.matched_receipt and item.matched_receipt.file_available %}
@@ -69,13 +81,17 @@
                                 {% endif %}
                                 {% if item.match_candidates.all %}
                                     <details class="statement-candidates">
-                                        <summary>照合候補 {{ item.match_candidates.all|length }}件</summary>
+                                        <summary>照合候補・除外 {{ item.match_candidates.all|length }}件</summary>
                                         <div class="statement-candidate-list">
                                             {% for candidate in item.match_candidates.all %}
-                                                <article class="statement-candidate-card {% if item.matched_receipt_id == candidate.receipt_id %}selected{% endif %}">
+                                                <article class="statement-candidate-card {% if item.matched_receipt_id == candidate.receipt_id %}selected{% endif %} {% if candidate.gate_status == 'rejected' %}rejected{% endif %}">
                                                     <div class="statement-candidate-header">
                                                         <strong>候補{{ candidate.rank }}：{{ candidate.receipt.submission.user.username }}</strong>
-                                                        <span class="badge {{ candidate.badge_class }}">{{ candidate.get_strength_display }} {{ candidate.confidence_percent }}%</span>
+                                                        <div class="actions compact">
+                                                            <span class="badge {{ candidate.gate_badge_class }}">{{ candidate.get_gate_status_display }}</span>
+                                                            <span class="badge neutral">{{ candidate.get_priority_tier_display }}</span>
+                                                            <span class="badge neutral">信頼度 {{ candidate.confidence_percent }}%</span>
+                                                        </div>
                                                     </div>
                                                     <div class="small"><a href="{% url 'download_receipt' candidate.receipt.pk %}">{{ candidate.receipt.display_filename }}</a></div>
                                                     <div class="muted small">
@@ -88,14 +104,15 @@
                                                             {% for label in candidate.evidence_labels %}<span>{{ label }}</span>{% endfor %}
                                                         </div>
                                                     {% endif %}
-                                                    {% if candidate.rationale %}<p class="muted small">{{ candidate.rationale }}</p>{% endif %}
+                                                    {% if candidate.gate_memo %}<p class="small {% if candidate.gate_status == 'rejected' %}danger{% else %}muted{% endif %}"><strong>必須条件：</strong>{{ candidate.gate_memo }}</p>{% endif %}
+                                                    {% if candidate.rationale %}<p class="muted small"><strong>順位付け根拠：</strong>{{ candidate.rationale }}</p>{% endif %}
                                                     {% if item.matched_receipt_id == candidate.receipt_id %}
                                                         <span class="badge submitted">現在の照合先</span>
                                                     {% else %}
-                                                        <form method="post" action="{% url 'staff_update_statement_item' item.pk %}">
+                                                        <form method="post" action="{% url 'staff_update_statement_item' item.pk %}"{% if candidate.gate_status == 'rejected' %} onsubmit="return confirm('この候補は必須条件不一致として除外されています。領収書本体を確認し、管理者判断で確定しますか？');"{% endif %}>
                                                             {% csrf_token %}
                                                             <input type="hidden" name="receipt_id" value="{{ candidate.receipt_id }}">
-                                                            <button type="submit" name="item_action" value="receipt" class="button small">この領収書で確定</button>
+                                                            <button type="submit" name="item_action" value="receipt" class="button small {% if candidate.gate_status == 'rejected' %}danger-outline{% endif %}">{% if candidate.gate_status == 'rejected' %}除外候補を管理者判断で確定{% else %}この領収書で確定{% endif %}</button>
                                                         </form>
                                                     {% endif %}
                                                 </article>
@@ -128,7 +145,7 @@
                 </tbody>
             </table>
         </div>
-        <p class="muted small statement-highlight-legend"><span class="legend-swatch missing"></span> 黄色は提出済み領収書を確定できていない行、<span class="legend-swatch review"></span> 薄橙色は金額一致などで領収書の提出は確認できたものの、ご利用先・サービスとの対応を手動確認する行です。</p>
+        <p class="muted small statement-highlight-legend"><span class="legend-swatch missing"></span> 黄色は必須条件を満たす提出済み領収書を確定できていない行、<span class="legend-swatch review"></span> 薄橙色は金額・通貨が一意に一致して領収書の提出は確認できたものの、ご利用先・サービスとの対応を手動確認する行です。明確な矛盾候補は曖昧判定に含めません。</p>
     {% else %}
         <p class="muted center">解析結果はありません。</p>
     {% endif %}

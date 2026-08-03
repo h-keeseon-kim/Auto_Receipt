@@ -858,7 +858,11 @@ class StaffReceiptReviewForm(forms.Form):
         max_length=255,
         help_text="実ファイルの保存名は変更せず、画面・ダウンロード・ZIPで使う名前だけを変更します。",
     )
-    ai_check_card_last4 = forms.BooleanField(label="カード末尾7210", required=False)
+    ai_check_card_last4 = forms.BooleanField(
+        label="カード末尾7210（任意・領収書に記載がある場合のみ）",
+        required=False,
+        help_text="カード情報が印字されていない領収書では未チェックのまま確認済みにできます。",
+    )
     ai_check_payee = forms.BooleanField(label="払先", required=False)
     ai_check_recipient_name = forms.BooleanField(label="利用者名（宛名）", required=False)
     ai_check_service_payee_related = forms.BooleanField(label="サービス / 払先関連", required=False)
@@ -882,6 +886,9 @@ class StaffReceiptReviewForm(forms.Form):
         "ai_check_amount",
         "ai_check_currency",
         "ai_check_period_match",
+    )
+    REQUIRED_CHECK_FIELDS = tuple(
+        field_name for field_name in CHECK_FIELDS if field_name != "ai_check_card_last4"
     )
 
     def __init__(self, *args, receipt: Receipt, **kwargs):
@@ -929,10 +936,14 @@ class StaffReceiptReviewForm(forms.Form):
     def clean(self):
         cleaned = super().clean()
         if self.data.get("review_action") == "confirm":
-            unchecked = [self.fields[name].label for name in self.CHECK_FIELDS if not cleaned.get(name)]
+            unchecked = [
+                self.fields[name].label
+                for name in self.REQUIRED_CHECK_FIELDS
+                if not cleaned.get(name)
+            ]
             if unchecked:
                 raise forms.ValidationError(
-                    "確認済みにするには、すべての確認項目へチェックを入れてください。未確認: "
+                    "確認済みにするには、必須確認項目へチェックを入れてください。未確認: "
                     + "、".join(unchecked)
                 )
             if not cleaned.get("generated_filename"):

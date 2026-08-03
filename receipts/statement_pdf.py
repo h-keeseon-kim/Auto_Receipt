@@ -295,7 +295,7 @@ def _all_items_table(items: list[CardStatementItem], styles: dict[str, Paragraph
             _paragraph("金額", styles["header"]),
             _paragraph("ユーザー", styles["header"]),
             _paragraph("サービス", styles["header"]),
-            _paragraph("AI一致", styles["header"]),
+            _paragraph("判定理由", styles["header"]),
             _paragraph("領収書", styles["header"]),
         ]
     ]
@@ -308,7 +308,7 @@ def _all_items_table(items: list[CardStatementItem], styles: dict[str, Paragraph
                 _paragraph(_amount_text(item), styles["small"]),
                 _paragraph(item.matched_user_label, styles["small"]),
                 _paragraph(item.matched_service_label, styles["small"]),
-                _paragraph(item.get_match_status_display(), styles["small"]),
+                _paragraph(item.match_reason_label, styles["small"]),
                 _paragraph(item.receipt_status_label, styles["small"]),
             ]
         )
