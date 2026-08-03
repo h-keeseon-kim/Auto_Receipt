@@ -618,6 +618,9 @@ body.tutorial-open { overflow-x: hidden; }
 }
 .ai-process-form .button[disabled] {
     opacity: 0.7;
+    cursor: not-allowed;
+}
+.ai-process-form .button[aria-busy="true"] {
     cursor: wait;
 }
 .processing-note,
@@ -1346,6 +1349,13 @@ body.tutorial-open { overflow-x: hidden; }
     gap: 0.8rem;
     margin-bottom: 0.65rem;
     font-size: 0.9rem;
+}
+.receipt-review-list-summary-label {
+    display: inline-flex;
+    align-items: baseline;
+    gap: 0.25rem;
+    min-width: 0;
+    white-space: nowrap;
 }
 .receipt-review-table-wrap {
     max-height: 680px;

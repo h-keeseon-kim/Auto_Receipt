@@ -32,11 +32,22 @@
         messageElement.classList.toggle("processing-text", Boolean(isWorking));
     }
 
-    function setButtonState(form, disabled) {
+    function setButtonState(form, disabled, isWorking) {
         const button = form.querySelector("[data-ai-process-button]");
         if (!button) return;
+
+        const working = Boolean(isWorking);
         button.disabled = Boolean(disabled);
-        button.textContent = disabled ? "AIで情報を抽出中" : "AIでファイル名を修正・検査";
+        button.setAttribute("aria-busy", working ? "true" : "false");
+        button.textContent = working ? "AIで情報を抽出中" : "AIでファイル名を修正・検査";
+
+        if (working) {
+            button.title = "AI処理中です。完了までお待ちください。";
+        } else if (button.disabled) {
+            button.title = "AI未確認の領収書はありません。";
+        } else {
+            button.removeAttribute("title");
+        }
     }
 
     function pollStatus(form) {
@@ -53,16 +64,16 @@
                 updateSummary(payload.stats);
                 replaceReceiptTable(payload.receipts_html, payload.visible_count);
                 if (Number(payload.processing_count || 0) > 0) {
-                    setButtonState(form, true);
+                    setButtonState(form, true, true);
                     setMessage(form, "AIで情報を抽出中です。完了した領収書から順番に反映されます。", true);
                     window.setTimeout(function () { pollStatus(form); }, 2500);
                 } else {
-                    setButtonState(form, Number(payload.processable_count || 0) === 0);
+                    setButtonState(form, Number(payload.processable_count || 0) === 0, false);
                     setMessage(form, "AI処理が完了しました。処理済み項目は次回ボタン押下時にスキップされます。", false);
                 }
             })
             .catch(function () {
-                setButtonState(form, false);
+                setButtonState(form, false, false);
                 setMessage(form, "AI処理状況の取得に失敗しました。ページを再読み込みしてください。", false);
             });
     }
@@ -73,7 +84,7 @@
 
         form.addEventListener("submit", function (event) {
             event.preventDefault();
-            setButtonState(form, true);
+            setButtonState(form, true, true);
             setMessage(form, "AIで情報を抽出中です。", true);
 
             fetch(form.action, {
@@ -93,18 +104,22 @@
                     if (Number(payload.started_count || 0) > 0 || (payload.stats && Number(payload.stats.ai_processing_count || 0) > 0)) {
                         pollStatus(form);
                     } else {
-                        setButtonState(form, false);
+                        setButtonState(
+                            form,
+                            Number((payload.stats && payload.stats.ai_ready_count) || 0) === 0,
+                            false
+                        );
                     }
                 })
                 .catch(function () {
-                    setButtonState(form, false);
+                    setButtonState(form, false, false);
                     setMessage(form, "AI処理の開始に失敗しました。時間をおいて再度実行してください。", false);
                 });
         });
 
         const currentProcessing = Number((document.querySelector("[data-ai-summary='ai_processing_count']") || {}).textContent || 0);
         if (currentProcessing > 0) {
-            setButtonState(form, true);
+            setButtonState(form, true, true);
             pollStatus(form);
         }
     }

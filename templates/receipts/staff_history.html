@@ -157,7 +157,14 @@
             <input type="hidden" name="month" value="{{ selected_month|date:'Y-m' }}">
             <input type="hidden" name="receipt_status" value="{{ selected_receipt_status }}">
             <input type="hidden" name="limit" value="50">
-            <button type="submit" class="button primary" data-ai-process-button {% if not stats.ai_ready_count and not stats.ai_processing_count %}disabled{% endif %}>{% if stats.ai_processing_count %}AIで情報を抽出中{% else %}AIでファイル名を修正・検査{% endif %}</button>
+            <button
+                type="submit"
+                class="button primary"
+                data-ai-process-button
+                aria-busy="{% if stats.ai_processing_count %}true{% else %}false{% endif %}"
+                {% if stats.ai_processing_count or not stats.ai_ready_count %}disabled{% endif %}
+                {% if stats.ai_processing_count %}title="AI処理中です。完了までお待ちください。"{% elif not stats.ai_ready_count %}title="AI未確認の領収書はありません。"{% endif %}
+            >{% if stats.ai_processing_count %}AIで情報を抽出中{% else %}AIでファイル名を修正・検査{% endif %}</button>
             <span class="muted small" data-ai-process-message>{% if stats.ai_processing_count %}AIで情報を抽出中です。完了した領収書から順番に反映されます。{% elif stats.ai_ready_count %}AI未確認の領収書だけを処理します。{% else %}処理済み項目は再検査しません。{% endif %}</span>
         </form>
     </div>
@@ -182,7 +189,7 @@
     </div>
 
     <div class="receipt-review-list-summary">
-        <strong>{{ selected_receipt_status_label }}</strong>を表示中
+        <span class="receipt-review-list-summary-label"><strong>{{ selected_receipt_status_label }}</strong><span>を表示中</span></span>
         <span class="muted"><span data-ai-visible-count>{{ receipts|length }}</span>件 / 全<span data-ai-summary="receipt_status_count_all">{{ stats.receipt_status_count_all }}</span>件</span>
     </div>
 

@@ -1856,6 +1856,10 @@ class StaffServiceAssignmentTests(TestCase):
         self.assertContains(response, "AI確認済み")
         self.assertContains(response, "管理者確認済み")
         self.assertContains(response, 'data-ai-summary="receipt_status_count_all">6</strong>')
+        self.assertContains(response, 'class="receipt-review-list-summary-label"')
+        self.assertContains(response, '<strong>すべて</strong><span>を表示中</span>', html=True)
+        self.assertContains(response, 'aria-busy="true"')
+        self.assertContains(response, 'title="AI処理中です。完了までお待ちください。"')
 
         filtered = self.client.get(
             reverse("history") + "?month=2026-07&receipt_status=resubmission_decision"
@@ -1882,6 +1886,16 @@ class StaffServiceAssignmentTests(TestCase):
         self.assertIn("manual-review.pdf", payload["receipts_html"])
         self.assertNotIn("resubmission.pdf", payload["receipts_html"])
         self.assertEqual(payload["stats"]["receipt_status_count_manual_review"], 1)
+
+        Receipt.objects.filter(
+            original_filename__in=["unprocessed.pdf", "processing.pdf"]
+        ).update(
+            ai_filename_status=ReceiptFilenameStatus.GENERATED,
+            ai_filename_checked_at=timezone.now(),
+        )
+        idle_response = self.client.get(reverse("history") + "?month=2026-07")
+        self.assertContains(idle_response, 'aria-busy="false"')
+        self.assertContains(idle_response, 'title="AI未確認の領収書はありません。"')
 
     def test_staff_can_proxy_upload_multiple_receipts_for_user_service(self):
         service = RegisteredService.objects.create(
