@@ -449,7 +449,7 @@ class ReceiptFlowTests(TestCase):
         self.client.logout()
         self.client.login(username="admin", password="admin-password-123")
         staff_response = self.client.get(reverse("history") + "?month=2026-07")
-        self.assertContains(staff_response, "manual-review-row")
+        self.assertContains(staff_response, "receipt-review-row-manual_review")
         self.assertContains(staff_response, "サービス/メモ関連要確認")
         self.assertContains(staff_response, "確認")
         self.assertNotContains(staff_response, ">再提出を依頼<")
@@ -695,7 +695,7 @@ class ReceiptFlowTests(TestCase):
         self.client.login(username="admin", password="admin-password-123")
         response = self.client.get(reverse("history") + "?month=2026-07")
 
-        self.assertContains(response, "manual-review-row")
+        self.assertContains(response, "receipt-review-row-manual_review")
         self.assertContains(response, "サービス/払先関連")
         self.assertNotContains(response, ">再提出を依頼<")
         self.assertContains(response, "ChatGPT と Anthropic の関連性を断定できません")
@@ -1743,8 +1743,13 @@ class StaffServiceAssignmentTests(TestCase):
 
         self.assertContains(response, "アップロード済み領収書")
         self.assertContains(response, "アップロード日時の新しい順")
-        self.assertContains(response, "receipt-history-table")
-        self.assertContains(response, "table-scroll-wide")
+        self.assertContains(response, "receipt-review-table")
+        self.assertContains(response, "<th>利用者 / 領収書月</th>", html=True)
+        self.assertContains(response, "<th>サービス / ファイル</th>", html=True)
+        self.assertContains(response, "<th>確認状況</th>", html=True)
+        self.assertNotContains(response, "<th>提出月</th>", html=True)
+        self.assertNotContains(response, "<th>保存状態</th>", html=True)
+        self.assertNotContains(response, "<th>アップロード日時</th>", html=True)
         content = response.content.decode()
         upload_section = content[content.index("アップロード済み領収書"):]
         self.assertLess(upload_section.index("other.pdf"), upload_section.index("user.pdf"))
@@ -1768,6 +1773,115 @@ class StaffServiceAssignmentTests(TestCase):
         self.client.login(username="user@example.com", password="password123")
         response = self.client.get(reverse("history"))
         self.assertNotContains(response, "2026年06月")
+
+    def test_staff_history_filters_receipts_by_exclusive_review_status(self):
+        service = RegisteredService.objects.create(
+            user=self.user,
+            catalog_service=self.catalog,
+            name=self.catalog.name,
+            billing_type=self.catalog.billing_type,
+        )
+        submission = Submission.objects.create(user=self.user, period_month=date(2026, 7, 1))
+        common = {
+            "submission": submission,
+            "service": service,
+            "service_name_snapshot": service.name,
+            "billing_type_snapshot": service.billing_type,
+            "expires_at": timezone.now() + timedelta(days=30),
+        }
+        Receipt.objects.create(
+            **common,
+            original_filename="unprocessed.pdf",
+            file=SimpleUploadedFile("unprocessed.pdf", b"%PDF-1.4 unprocessed", content_type="application/pdf"),
+        )
+        Receipt.objects.create(
+            **common,
+            original_filename="processing.pdf",
+            file=SimpleUploadedFile("processing.pdf", b"%PDF-1.4 processing", content_type="application/pdf"),
+            ai_filename_status=ReceiptFilenameStatus.PROCESSING,
+        )
+        passed_checks = {
+            "ai_check_card_last4": True,
+            "ai_check_payee": True,
+            "ai_check_recipient_name": True,
+            "ai_check_service_payee_related": True,
+            "ai_check_date": True,
+            "ai_check_amount": True,
+            "ai_check_currency": True,
+            "ai_check_period_match": True,
+        }
+        Receipt.objects.create(
+            **common,
+            **passed_checks,
+            original_filename="ai-ok.pdf",
+            generated_filename="260601_user_OpenAI_22_USD.pdf",
+            file=SimpleUploadedFile("ai-ok.pdf", b"%PDF-1.4 ok", content_type="application/pdf"),
+            ai_filename_status=ReceiptFilenameStatus.GENERATED,
+            ai_filename_checked_at=timezone.now(),
+        )
+        Receipt.objects.create(
+            **common,
+            original_filename="manual-review.pdf",
+            file=SimpleUploadedFile("manual-review.pdf", b"%PDF-1.4 manual", content_type="application/pdf"),
+            ai_filename_status=ReceiptFilenameStatus.NEEDS_REVIEW,
+            ai_filename_checked_at=timezone.now(),
+            ai_check_card_last4=True,
+        )
+        Receipt.objects.create(
+            **common,
+            original_filename="resubmission.pdf",
+            file=SimpleUploadedFile("resubmission.pdf", b"%PDF-1.4 resubmit", content_type="application/pdf"),
+            ai_filename_status=ReceiptFilenameStatus.NEEDS_REVIEW,
+            ai_filename_checked_at=timezone.now(),
+            ai_resubmission_recommended=True,
+            ai_resubmission_recommendation_memo="カード番号が一致しません。",
+        )
+        Receipt.objects.create(
+            **common,
+            original_filename="admin-confirmed.pdf",
+            file=SimpleUploadedFile("admin-confirmed.pdf", b"%PDF-1.4 confirmed", content_type="application/pdf"),
+            ai_filename_status=ReceiptFilenameStatus.GENERATED,
+            ai_filename_checked_at=timezone.now(),
+            admin_review_status=ReceiptAdminReviewStatus.CONFIRMED,
+            admin_reviewed_by=self.admin,
+            admin_reviewed_at=timezone.now(),
+        )
+
+        self.client.login(username="admin", password="admin-password-123")
+        response = self.client.get(reverse("history") + "?month=2026-07")
+        self.assertContains(response, "再提出判断待ち")
+        self.assertContains(response, "確認が必要")
+        self.assertContains(response, "AI未確認")
+        self.assertContains(response, "AI処理中")
+        self.assertContains(response, "AI確認済み")
+        self.assertContains(response, "管理者確認済み")
+        self.assertContains(response, 'data-ai-summary="receipt_status_count_all">6</strong>')
+
+        filtered = self.client.get(
+            reverse("history") + "?month=2026-07&receipt_status=resubmission_decision"
+        )
+        self.assertContains(filtered, "resubmission.pdf")
+        self.assertNotContains(filtered, "unprocessed.pdf")
+        self.assertNotContains(filtered, "manual-review.pdf")
+        self.assertContains(filtered, "AI再提出候補")
+
+        manual = self.client.get(
+            reverse("history") + "?month=2026-07&receipt_status=manual_review"
+        )
+        self.assertContains(manual, "manual-review.pdf")
+        self.assertNotContains(manual, "resubmission.pdf")
+        self.assertContains(manual, "未確認項目")
+
+        status_response = self.client.get(
+            reverse("staff_ai_processing_status")
+            + "?month=2026-07&receipt_status=manual_review",
+            HTTP_X_REQUESTED_WITH="XMLHttpRequest",
+        )
+        payload = status_response.json()
+        self.assertEqual(payload["visible_count"], 1)
+        self.assertIn("manual-review.pdf", payload["receipts_html"])
+        self.assertNotIn("resubmission.pdf", payload["receipts_html"])
+        self.assertEqual(payload["stats"]["receipt_status_count_manual_review"], 1)
 
     def test_staff_can_proxy_upload_multiple_receipts_for_user_service(self):
         service = RegisteredService.objects.create(
@@ -2927,6 +3041,149 @@ class TutorialTests(TestCase):
         self.assertEqual(response.status_code, 405)
         user.profile.refresh_from_db()
         self.assertIsNone(user.profile.tutorial_completed_at)
+
+
+@override_settings(
+    PASSWORD_HASHERS=FAST_PASSWORD_HASHERS,
+    EMAIL_BACKEND="django.core.mail.backends.locmem.EmailBackend",
+    DEFAULT_FROM_EMAIL="noreply@mkt-dev3.info",
+    APP_BASE_URL="https://receipthub.example.com",
+)
+class ResubmissionRequestEmailTests(TestCase):
+    def setUp(self):
+        mail.outbox = []
+        self.media_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.media_dir.cleanup)
+        self.media_override = override_settings(MEDIA_ROOT=self.media_dir.name)
+        self.media_override.enable()
+        self.addCleanup(self.media_override.disable)
+        self.user = User.objects.create_user(
+            username="alice@example.com",
+            email="alice@example.com",
+            password="password123",
+        )
+        self.admin = User.objects.create_superuser(
+            username="admin",
+            email="admin@example.com",
+            password="admin-password-123",
+        )
+        self.service = RegisteredService.objects.create(
+            user=self.user,
+            name="ChatGPT",
+            billing_type=BillingType.SUBSCRIPTION,
+        )
+        self.submission = Submission.objects.create(
+            user=self.user,
+            period_month=date(2026, 7, 1),
+            status=SubmissionStatus.SUBMITTED,
+            submitted_at=timezone.now(),
+        )
+
+    def create_receipt(self, *, ai_status=ReceiptFilenameStatus.NOT_PROCESSED):
+        checked_at = None
+        if ai_status in {
+            ReceiptFilenameStatus.GENERATED,
+            ReceiptFilenameStatus.NEEDS_REVIEW,
+            ReceiptFilenameStatus.FAILED,
+            ReceiptFilenameStatus.SKIPPED,
+        }:
+            checked_at = timezone.now()
+        return Receipt.objects.create(
+            submission=self.submission,
+            service=self.service,
+            service_name_snapshot=self.service.name,
+            billing_type_snapshot=self.service.billing_type,
+            original_filename="chatgpt.pdf",
+            generated_filename="260615_alice_OpenAI_22_USD.pdf" if checked_at else "",
+            file=SimpleUploadedFile("chatgpt.pdf", b"%PDF-1.4 test", content_type="application/pdf"),
+            expires_at=timezone.now() + timedelta(days=30),
+            ai_filename_status=ai_status,
+            ai_filename_checked_at=checked_at,
+        )
+
+    def test_resubmission_button_is_enabled_only_after_ai_check_finishes(self):
+        receipt = self.create_receipt()
+        self.client.login(username=self.admin.username, password="admin-password-123")
+
+        response = self.client.get(reverse("history") + "?month=2026-07")
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "AIでファイル名を修正・検査が完了すると利用できます。")
+        self.assertNotContains(response, "data-resubmission-request-form")
+
+        receipt.ai_filename_status = ReceiptFilenameStatus.GENERATED
+        receipt.ai_filename_checked_at = timezone.now()
+        receipt.save(update_fields=["ai_filename_status", "ai_filename_checked_at", "updated_at"])
+
+        response = self.client.get(reverse("history") + "?month=2026-07")
+        self.assertContains(response, "data-resubmission-request-form")
+        self.assertContains(response, ">再提出依頼</button>")
+
+    def test_direct_resubmission_request_registers_request_and_sends_email(self):
+        receipt = self.create_receipt(ai_status=ReceiptFilenameStatus.GENERATED)
+        self.client.login(username=self.admin.username, password="admin-password-123")
+
+        response = self.client.post(
+            reverse("staff_request_receipt_resubmission", args=[receipt.pk]),
+            {
+                "next": reverse("history") + "?month=2026-07",
+                "reason": "宛名が対象ユーザーと一致しないため、正しい領収書を提出してください。",
+            },
+            follow=True,
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertFalse(Receipt.objects.filter(pk=receipt.pk).exists())
+        request_item = ReceiptResubmissionRequest.objects.get()
+        self.assertEqual(request_item.status, ResubmissionRequestStatus.OPEN)
+        self.assertContains(response, "再提出依頼管理")
+        self.assertContains(response, "再提出依頼メールも送信しました")
+
+        self.assertEqual(len(mail.outbox), 1)
+        message = mail.outbox[0]
+        self.assertEqual(message.to, ["alice@example.com"])
+        self.assertTrue(message.subject.startswith("【再提出依頼】ReceiptHub"))
+        self.assertIn("2026年06月分", message.subject)
+        self.assertIn("ChatGPT（サブスク）", message.body)
+        self.assertIn("宛名が対象ユーザーと一致しない", message.body)
+        self.assertIn("https://receipthub.example.com/dashboard/?receipt_month=2026-06", message.body)
+
+        log = EmailDeliveryLog.objects.get(email_type=EmailType.RESUBMISSION_REQUEST)
+        self.assertEqual(log.user, self.user)
+        self.assertEqual(log.status, EmailDeliveryStatus.SENT)
+        self.assertEqual(log.target_month, date(2026, 7, 1))
+
+    def test_resubmission_request_is_rejected_before_ai_check_finishes(self):
+        receipt = self.create_receipt()
+        self.client.login(username=self.admin.username, password="admin-password-123")
+
+        response = self.client.post(
+            reverse("staff_request_receipt_resubmission", args=[receipt.pk]),
+            {"next": reverse("history") + "?month=2026-07"},
+            follow=True,
+        )
+
+        self.assertTrue(Receipt.objects.filter(pk=receipt.pk).exists())
+        self.assertFalse(ReceiptResubmissionRequest.objects.exists())
+        self.assertEqual(len(mail.outbox), 0)
+        self.assertContains(response, "AIによるファイル名修正・検査が完了した領収書だけ")
+
+    def test_stopped_user_keeps_in_app_request_but_email_is_skipped(self):
+        receipt = self.create_receipt(ai_status=ReceiptFilenameStatus.GENERATED)
+        self.user.profile.account_status = UserAccountStatus.STOPPED
+        self.user.profile.save(update_fields=["account_status", "updated_at"])
+        self.client.login(username=self.admin.username, password="admin-password-123")
+
+        response = self.client.post(
+            reverse("staff_request_receipt_resubmission", args=[receipt.pk]),
+            {"next": reverse("history") + "?month=2026-07"},
+            follow=True,
+        )
+
+        self.assertTrue(ReceiptResubmissionRequest.objects.exists())
+        self.assertEqual(len(mail.outbox), 0)
+        log = EmailDeliveryLog.objects.get(email_type=EmailType.RESUBMISSION_REQUEST)
+        self.assertEqual(log.status, EmailDeliveryStatus.SKIPPED)
+        self.assertContains(response, "対象ユーザーが停止中のため、再提出依頼メールは送信していません")
 
 
 @override_settings(

@@ -30,7 +30,7 @@ from django.views.decorators.http import require_POST
 
 from .ai_processing import claim_pending_receipts_for_ai_processing, reset_ai_processing_state, start_background_ai_processing
 from .ai_filename import target_card_last4
-from .emailing import send_test_email
+from .emailing import send_resubmission_request_email, send_test_email
 from .forms import (
     MonthSelectForm,
     ReceiptMonthSelectForm,
@@ -1322,6 +1322,10 @@ def staff_request_receipt_resubmission(request, pk: int):
         raise Http404
 
     fallback_url = f"{reverse('history')}?month={month_query(receipt.submission.period_month)}"
+    if not receipt.can_request_resubmission:
+        messages.error(request, "AIによるファイル名修正・検査が完了した領収書だけ再提出依頼を送信できます。")
+        return redirect_back_or(request, fallback_url)
+
     with transaction.atomic():
         submission = receipt.submission
         selected_month = submission.period_month
@@ -1351,7 +1355,7 @@ def staff_request_receipt_resubmission(request, pk: int):
             f"理由: {admin_reason}。"
             "該当ファイルは提出項目から削除済みです。正しい領収書ファイルを再度アップロードして、提出してください。"
         )
-        ReceiptResubmissionRequest.objects.create(
+        request_item = ReceiptResubmissionRequest.objects.create(
             user=submission.user,
             period_month=selected_month,
             service_name_snapshot=receipt.service_name_snapshot,
@@ -1370,10 +1374,22 @@ def staff_request_receipt_resubmission(request, pk: int):
             submission.submitted_at = None
             submission.save(update_fields=["status", "submitted_at", "updated_at"])
 
-    messages.success(
-        request,
-        f"{username} / {service_name} に再提出を依頼しました。対象領収書は提出項目から削除され、ユーザーは該当月で再アップロードできます。",
+    email_log, email_sent = send_resubmission_request_email(request_item, created_by=request.user)
+    success_message = (
+        f"{username} / {service_name} に再提出を依頼しました。"
+        "対象領収書は提出項目から削除され、再提出依頼管理へ登録されました。"
     )
+    if email_sent:
+        success_message += "ユーザーへ再提出依頼メールも送信しました。"
+    messages.success(request, success_message)
+
+    if email_log is None:
+        messages.warning(request, "対象ユーザーに送信可能なメールアドレスがないため、メールは送信していません。アプリ内の再提出依頼は登録済みです。")
+    elif email_log.status == EmailDeliveryStatus.SKIPPED:
+        messages.warning(request, "対象ユーザーが停止中のため、再提出依頼メールは送信していません。アプリ内の再提出依頼は登録済みです。")
+    elif email_log.status == EmailDeliveryStatus.FAILED:
+        messages.error(request, "再提出依頼は登録しましたが、メール送信に失敗しました。メール送信ログを確認してください。")
+
     return redirect_back_or(request, fallback_url)
 
 
@@ -1656,9 +1672,67 @@ def staff_month_receipts_queryset(selected_month):
     )
 
 
+STAFF_RECEIPT_STATUS_FILTERS = (
+    ("all", "すべて"),
+    ("resubmission_decision", "再提出判断待ち"),
+    ("manual_review", "確認が必要"),
+    ("ai_unprocessed", "AI未確認"),
+    ("ai_processing", "AI処理中"),
+    ("ai_ok", "AI確認済み"),
+    ("admin_confirmed", "管理者確認済み"),
+    ("file_unavailable", "ファイルなし"),
+)
+STAFF_RECEIPT_STATUS_KEYS = {key for key, _label in STAFF_RECEIPT_STATUS_FILTERS}
+
+
+def normalize_staff_receipt_status_filter(value: str | None) -> str:
+    value = (value or "all").strip()
+    return value if value in STAFF_RECEIPT_STATUS_KEYS else "all"
+
+
+def build_staff_receipt_status_view(receipts, selected_status: str):
+    """領収書を排他的な確認ステータスへ分類し、絞り込み用情報を返す。"""
+
+    receipt_list = list(receipts)
+    counts = {key: 0 for key, _label in STAFF_RECEIPT_STATUS_FILTERS}
+    counts["all"] = len(receipt_list)
+    for receipt in receipt_list:
+        counts[receipt.staff_review_status_key] += 1
+
+    filtered_receipts = (
+        receipt_list
+        if selected_status == "all"
+        else [receipt for receipt in receipt_list if receipt.staff_review_status_key == selected_status]
+    )
+    label_by_key = dict(STAFF_RECEIPT_STATUS_FILTERS)
+    options = [
+        {
+            "key": key,
+            "label": label,
+            "count": counts[key],
+            "active": key == selected_status,
+        }
+        for key, label in STAFF_RECEIPT_STATUS_FILTERS
+    ]
+    return {
+        "receipts": filtered_receipts,
+        "counts": counts,
+        "options": options,
+        "selected_key": selected_status,
+        "selected_label": label_by_key[selected_status],
+    }
+
+
+def add_staff_receipt_status_counts_to_stats(stats: dict, counts: dict) -> dict:
+    for key, count in counts.items():
+        stats[f"receipt_status_count_{key}"] = count
+    return stats
+
+
 def staff_ai_summary_for_month(selected_month) -> dict:
     receipts = staff_month_receipts_queryset(selected_month)
     available = receipts.available_files()
+    unresolved_available = available.filter(admin_review_status=ReceiptAdminReviewStatus.NOT_REVIEWED)
     manual_review_filter = (
         Q(ai_check_card_last4=False)
         | Q(ai_check_payee=False)
@@ -1671,16 +1745,28 @@ def staff_ai_summary_for_month(selected_month) -> dict:
     )
     return {
         "ai_ready_count": available.filter(ai_filename_status=ReceiptFilenameStatus.NOT_PROCESSED).count(),
-        "ai_pending_count": receipts.filter(ai_filename_status=ReceiptFilenameStatus.NOT_PROCESSED).count(),
+        "ai_pending_count": available.filter(ai_filename_status=ReceiptFilenameStatus.NOT_PROCESSED).count(),
         "ai_processing_count": available.filter(
             ai_filename_status__in=[ReceiptFilenameStatus.QUEUED, ReceiptFilenameStatus.PROCESSING]
         ).count(),
         "ai_queued_count": available.filter(ai_filename_status=ReceiptFilenameStatus.QUEUED).count(),
-        "ai_review_count": receipts.filter(ai_filename_status__in=[ReceiptFilenameStatus.NEEDS_REVIEW, ReceiptFilenameStatus.FAILED]).count(),
-        "period_mismatch_count": receipts.filter(ai_period_check_status=ReceiptPeriodCheckStatus.MISMATCHED).count(),
-        "manual_review_count": available.filter(ai_filename_checked_at__isnull=False).filter(manual_review_filter).count(),
-        "recipient_name_review_count": available.filter(ai_filename_checked_at__isnull=False, ai_check_recipient_name=False).count(),
-        "service_payee_review_count": available.filter(ai_filename_checked_at__isnull=False, ai_check_service_payee_related=False).count(),
+        "ai_review_count": unresolved_available.filter(
+            ai_filename_status__in=[ReceiptFilenameStatus.NEEDS_REVIEW, ReceiptFilenameStatus.FAILED]
+        ).count(),
+        "period_mismatch_count": unresolved_available.filter(
+            ai_period_check_status=ReceiptPeriodCheckStatus.MISMATCHED
+        ).count(),
+        "manual_review_count": unresolved_available.filter(
+            ai_filename_checked_at__isnull=False
+        ).filter(manual_review_filter).count(),
+        "recipient_name_review_count": unresolved_available.filter(
+            ai_filename_checked_at__isnull=False,
+            ai_check_recipient_name=False,
+        ).count(),
+        "service_payee_review_count": unresolved_available.filter(
+            ai_filename_checked_at__isnull=False,
+            ai_check_service_payee_related=False,
+        ).count(),
         "resubmission_decision_count": available.filter(
             ai_resubmission_recommended=True,
             admin_review_status=ReceiptAdminReviewStatus.NOT_REVIEWED,
@@ -1693,6 +1779,9 @@ def staff_ai_summary_for_month(selected_month) -> dict:
 @require_POST
 def staff_start_ai_processing(request):
     selected_month = parse_month_value(request.POST.get("month"))
+    selected_receipt_status = normalize_staff_receipt_status_filter(
+        request.POST.get("receipt_status")
+    )
     limit = int(request.POST.get("limit") or getattr(settings, "RECEIPT_AI_MANUAL_BATCH_SIZE", 100))
     limit = min(max(limit, 1), 500)
     base_queryset = staff_month_receipts_queryset(selected_month).available_files()
@@ -1705,11 +1794,17 @@ def staff_start_ai_processing(request):
     else:
         message = "AI未確認の領収書はありません。AI確認済み・要確認・失敗・スキップ済みの項目は再検査しません。"
 
+    status_view = build_staff_receipt_status_view(
+        staff_month_receipts_queryset(selected_month).order_by("-uploaded_at", "-pk"),
+        selected_receipt_status,
+    )
+    stats = staff_ai_summary_for_month(selected_month)
+    add_staff_receipt_status_counts_to_stats(stats, status_view["counts"])
     payload = {
         "ok": True,
         "started_count": len(claimed_ids),
         "message": message,
-        "stats": staff_ai_summary_for_month(selected_month),
+        "stats": stats,
     }
     if request.headers.get("x-requested-with") == "XMLHttpRequest":
         return JsonResponse(payload)
@@ -1718,17 +1813,31 @@ def staff_start_ai_processing(request):
         messages.success(request, message)
     else:
         messages.info(request, message)
-    return redirect(f"{reverse('history')}?month={month_query(selected_month)}")
+    return redirect(
+        f"{reverse('history')}?month={month_query(selected_month)}"
+        f"&receipt_status={selected_receipt_status}#uploaded-receipts"
+    )
 
 
 @staff_member_required
 def staff_ai_processing_status(request):
     selected_month = parse_month_value(request.GET.get("month"))
-    receipts = staff_month_receipts_queryset(selected_month).order_by("-uploaded_at", "-pk")
+    selected_receipt_status = normalize_staff_receipt_status_filter(
+        request.GET.get("receipt_status")
+    )
+    receipt_status_view = build_staff_receipt_status_view(
+        staff_month_receipts_queryset(selected_month).order_by("-uploaded_at", "-pk"),
+        selected_receipt_status,
+    )
     stats = staff_ai_summary_for_month(selected_month)
+    add_staff_receipt_status_counts_to_stats(stats, receipt_status_view["counts"])
     receipts_html = render_to_string(
         "receipts/_staff_receipt_rows.html",
-        {"receipts": receipts},
+        {
+            "receipts": receipt_status_view["receipts"],
+            "selected_receipt_status": receipt_status_view["selected_key"],
+            "selected_receipt_status_label": receipt_status_view["selected_label"],
+        },
         request=request,
     )
     return JsonResponse(
@@ -1736,6 +1845,7 @@ def staff_ai_processing_status(request):
             "ok": True,
             "receipts_html": receipts_html,
             "stats": stats,
+            "visible_count": len(receipt_status_view["receipts"]),
             "processing_count": stats["ai_processing_count"],
             "processable_count": stats["ai_ready_count"],
             "done": stats["ai_processing_count"] == 0,
@@ -2262,7 +2372,14 @@ def staff_history(request):
             }
         )
 
-    receipts = staff_month_receipts_queryset(selected_month).order_by("-uploaded_at", "-pk")
+    selected_receipt_status = normalize_staff_receipt_status_filter(
+        request.GET.get("receipt_status")
+    )
+    receipt_status_view = build_staff_receipt_status_view(
+        staff_month_receipts_queryset(selected_month).order_by("-uploaded_at", "-pk"),
+        selected_receipt_status,
+    )
+    receipts = receipt_status_view["receipts"]
     ai_stats = staff_ai_summary_for_month(selected_month)
     month_resubmission_requests = (
         ReceiptResubmissionRequest.objects.filter(period_month=selected_month)
@@ -2302,6 +2419,7 @@ def staff_history(request):
         "resubmission_decision_count": ai_stats["resubmission_decision_count"],
         "open_resubmission_request_count": open_resubmission_request_count,
     }
+    add_staff_receipt_status_counts_to_stats(stats, receipt_status_view["counts"])
     return render(
         request,
         "receipts/staff_history.html",
@@ -2312,6 +2430,9 @@ def staff_history(request):
             "selected_month": selected_month,
             "target_receipt_month": receipt_month_for_submission(selected_month),
             "receipts": receipts,
+            "receipt_status_options": receipt_status_view["options"],
+            "selected_receipt_status": receipt_status_view["selected_key"],
+            "selected_receipt_status_label": receipt_status_view["selected_label"],
             "month_resubmission_requests": month_resubmission_requests,
             "month_resubmission_request_count": month_resubmission_requests.count(),
             "all_resubmission_request_count": all_resubmission_request_count,

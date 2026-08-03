@@ -21,6 +21,7 @@ from .models import (
     EmailDeliveryStatus,
     EmailReminderSchedule,
     EmailType,
+    ReceiptResubmissionRequest,
     UserAccountStatus,
     add_months,
     month_start,
@@ -371,4 +372,63 @@ def send_test_email(*, to_email: str, subject: str, body: str, created_by: User 
         idempotency_key=key,
         created_by=created_by,
         force=True,
+    )
+
+
+def resubmission_request_email_subject(request_item: ReceiptResubmissionRequest) -> str:
+    receipt_month = receipt_month_for_submission(request_item.period_month)
+    app_name = getattr(settings, "APP_NAME", "ReceiptHub")
+    return (
+        f"【再提出依頼】{app_name}: {receipt_month:%Y年%m月}分 "
+        f"{request_item.service_display_name_snapshot} の領収書を再度アップロードしてください"
+    )[:255]
+
+
+def resubmission_request_email_body(request_item: ReceiptResubmissionRequest) -> str:
+    user = request_item.user
+    receipt_month = receipt_month_for_submission(request_item.period_month)
+    upload_url = build_app_url(
+        f"{reverse('dashboard')}?receipt_month={receipt_month:%Y-%m}"
+    )
+    user_name = user.get_full_name() or user.get_username()
+    filename = request_item.display_filename or request_item.original_filename or "-"
+    app_name = getattr(settings, "APP_NAME", "ReceiptHub")
+    return (
+        f"{user_name} 様\n\n"
+        f"{app_name}にアップロードされた領収書について、管理者確認の結果、再提出が必要になりました。\n\n"
+        f"対象領収書月: {receipt_month:%Y年%m月}\n"
+        f"対象サービス: {request_item.service_display_name_snapshot}\n"
+        f"対象ファイル: {filename}\n\n"
+        f"{request_item.message.strip()}\n\n"
+        "以下のページから正しい領収書を再度アップロードしてください。\n"
+        f"{upload_url}\n\n"
+        "このメールはReceiptHubから自動送信されています。"
+    )
+
+
+def send_resubmission_request_email(
+    request_item: ReceiptResubmissionRequest,
+    *,
+    created_by: User | None = None,
+) -> tuple[EmailDeliveryLog | None, bool]:
+    """再提出依頼の作成後に対象ユーザーへ通知メールを送る。
+
+    ユーザーにメールアドレスがない場合はログを作成せず、呼び出し側で
+    管理者へ案内できるよう ``(None, False)`` を返す。
+    """
+
+    user = request_item.user
+    to_email = user_email(user)
+    if not to_email:
+        return None, False
+    key = f"receipthub:resubmission-request:{request_item.pk}:user-{user.pk}"
+    return send_logged_email(
+        email_type=EmailType.RESUBMISSION_REQUEST,
+        user=user,
+        target_month=request_item.period_month,
+        to_email=to_email,
+        subject=resubmission_request_email_subject(request_item),
+        body=resubmission_request_email_body(request_item),
+        idempotency_key=key,
+        created_by=created_by,
     )

@@ -133,6 +133,7 @@ class UserAccountStatus(models.TextChoices):
 class EmailType(models.TextChoices):
     REMINDER_INITIAL = "reminder_initial", "通常リマインダー"
     REMINDER_URGENT = "reminder_urgent", "重要リマインダー"
+    RESUBMISSION_REQUEST = "resubmission_request", "再提出依頼"
     TEST = "test", "テスト送信"
 
 
@@ -983,6 +984,17 @@ class Receipt(models.Model):
         return self.file_available and self.ai_has_check_result and not self.ai_all_checks_passed
 
     @property
+    def can_request_resubmission(self) -> bool:
+        """AI検査が完了し、管理者が再提出依頼を出せる状態か。"""
+
+        return (
+            self.file_available
+            and self.ai_has_check_result
+            and not self.ai_is_queued
+            and not self.is_ai_processing
+        )
+
+    @property
     def needs_resubmission_decision(self) -> bool:
         return self.file_available and self.ai_resubmission_recommended and not self.admin_reviewed
 
@@ -1015,6 +1027,73 @@ class Receipt(models.Model):
         if self.needs_manual_review:
             return "手動確認"
         return "確認OK"
+
+    @property
+    def staff_review_status_key(self) -> str:
+        """管理者の領収書一覧で使う排他的な確認ステータス。"""
+
+        if not self.file_available:
+            return "file_unavailable"
+        if self.admin_reviewed:
+            return "admin_confirmed"
+        if self.ai_is_queued or self.is_ai_processing:
+            return "ai_processing"
+        if not self.ai_has_check_result:
+            return "ai_unprocessed"
+        if self.needs_resubmission_decision:
+            return "resubmission_decision"
+        if self.needs_ai_filename_review or self.ai_filename_status == ReceiptFilenameStatus.SKIPPED:
+            return "manual_review"
+        if self.ai_all_checks_passed:
+            return "ai_ok"
+        return "manual_review"
+
+    @property
+    def staff_review_status_label(self) -> str:
+        labels = {
+            "file_unavailable": "ファイルなし",
+            "admin_confirmed": "管理者確認済み",
+            "ai_processing": "AI処理中",
+            "ai_unprocessed": "AI未確認",
+            "resubmission_decision": "再提出判断待ち",
+            "ai_ok": "AI確認済み",
+            "manual_review": "確認が必要",
+        }
+        return labels[self.staff_review_status_key]
+
+    @property
+    def staff_review_status_badge_class(self) -> str:
+        classes = {
+            "file_unavailable": "neutral",
+            "admin_confirmed": "submitted",
+            "ai_processing": "processing",
+            "ai_unprocessed": "neutral",
+            "resubmission_decision": "danger",
+            "ai_ok": "submitted",
+            "manual_review": "draft",
+        }
+        return classes[self.staff_review_status_key]
+
+    @property
+    def staff_review_row_class(self) -> str:
+        return f"receipt-review-row-{self.staff_review_status_key}"
+
+    @property
+    def staff_review_status_summary(self) -> str:
+        key = self.staff_review_status_key
+        if key == "file_unavailable":
+            return "保存期限切れまたは削除済みで、領収書ファイルを確認できません。"
+        if key == "admin_confirmed":
+            return "管理者が領収書本体と確認項目を確認済みです。"
+        if key == "ai_processing":
+            return "AIで領収書情報を抽出しています。完了後に自動更新されます。"
+        if key == "ai_unprocessed":
+            return "AIによるファイル名修正・検査がまだ実行されていません。"
+        if key == "resubmission_decision":
+            return "AIが明確な不一致候補を検出しました。管理者が再提出の要否を判断してください。"
+        if key == "ai_ok":
+            return "AIの確認項目はすべてチェック済みです。"
+        return f"管理者確認が必要です。未確認項目: {self.ai_unchecked_summary}"
 
     @property
     def ai_unchecked_labels(self) -> list[str]:
@@ -1565,7 +1644,7 @@ class EmailReminderSchedule(models.Model):
         return f"通常: 毎月{self.reminder_day}日 / 警告: 毎月{self.warning_day}日"
 
 class EmailDeliveryLog(models.Model):
-    """リマインダー・テストメールの送信結果ログ。重複送信防止にも使う。"""
+    """リマインダー・再提出依頼・テストメールの送信結果ログ。重複送信防止にも使う。"""
 
     email_type = models.CharField("メール種別", max_length=40, choices=EmailType.choices)
     user = models.ForeignKey(

@@ -98,6 +98,15 @@
                         {% endif %}
                         {% if user.is_staff and receipt.submission.user != user %}
                             <a class="button small primary" href="{% url 'staff_receipt_review' receipt.pk %}">{% if receipt.needs_resubmission_decision %}再提出判断{% else %}確認{% endif %}</a>
+                            {% if receipt.can_request_resubmission %}
+                                <form method="post" action="{% url 'staff_request_receipt_resubmission' receipt.pk %}" data-resubmission-request-form onsubmit="return confirm('この領収書に再提出を依頼しますか？対象ファイルと履歴は提出項目から削除され、再提出依頼管理へ登録されます。ユーザーへ再提出依頼メールも送信します。');">
+                                    {% csrf_token %}
+                                    <input type="hidden" name="next" value="{{ request.get_full_path }}">
+                                    <button type="submit" class="button small danger-outline">再提出依頼</button>
+                                </form>
+                            {% elif receipt.file_available %}
+                                <button type="button" class="button small danger-outline" disabled title="AIでファイル名を修正・検査が完了すると利用できます。">再提出依頼</button>
+                            {% endif %}
                             <form method="post" action="{% url 'staff_delete_receipt' receipt.pk %}" onsubmit="return confirm('この領収書ファイルと履歴を削除しますか？該当ユーザーの画面からも削除されます。');">
                                 {% csrf_token %}
                                 <input type="hidden" name="next" value="{{ request.get_full_path }}">

@@ -1,64 +1,121 @@
 {% for receipt in receipts %}
-    <tr class="{% if receipt.ai_is_queued or receipt.is_ai_processing %}ai-processing-row{% elif receipt.needs_manual_review %}manual-review-row{% endif %}" data-receipt-row="{{ receipt.pk }}">
-        <td><strong>{{ receipt.submission.user.username }}</strong></td>
-        <td>{{ receipt.submission.period_month|date:"Y年m月" }}<div class="muted small">領収書: {{ receipt.submission.target_receipt_month|date:"Y年m月" }}</div></td>
-        <td><span class="badge {{ receipt.submission.status }}">{{ receipt.submission.get_status_display }}</span></td>
-        <td>
-            <strong>{{ receipt.service_display_name_snapshot }}</strong>
-            {% if receipt.is_extra %}<span class="badge neutral">追加</span>{% endif %}
-            {% if receipt.memo %}<div class="muted small">{{ receipt.memo|linebreaksbr }}</div>{% endif %}
-        </td>
-        <td>
-            <div><strong>{{ receipt.display_filename|default:"-" }}</strong></div>
-            {% if receipt.generated_filename and receipt.original_filename %}<div class="muted small">元: {{ receipt.original_filename }}</div>{% endif %}
-            <div class="muted small">{{ receipt.file_size|filesizeformat }}</div>
-            <div class="muted small">アップロード元: {{ receipt.uploader_label }}（{{ receipt.uploaded_by_label }}）</div>
-        </td>
-        <td>
-            <div class="ai-check-status">
-                <span class="badge {{ receipt.ai_filename_badge_class }}">{{ receipt.get_ai_filename_status_display }}</span>
-                <span class="badge {{ receipt.ai_period_check_badge_class }}">{{ receipt.get_ai_period_check_status_display }}</span>
-                <span class="badge {{ receipt.manual_review_badge_class }}">{{ receipt.manual_review_label }}</span>
+    <tr class="receipt-review-row {{ receipt.staff_review_row_class }}" data-receipt-row="{{ receipt.pk }}">
+        <td data-label="利用者 / 領収書月" class="receipt-review-user-cell">
+            <strong class="receipt-review-user">{{ receipt.submission.user.username }}</strong>
+            <div class="receipt-review-meta-stack">
+                <span>領収書発行月: <strong>{{ receipt.submission.target_receipt_month|date:"Y年m月" }}</strong></span>
+                <span class="badge {{ receipt.submission.status }}">{{ receipt.submission.get_status_display }}</span>
             </div>
-            <div class="ai-checklist" aria-label="AI確認項目">
-                {% for label, checked in receipt.ai_check_items %}
-                    <label class="ai-check-item {% if not checked %}unchecked{% endif %}">
-                        <input type="checkbox" disabled {% if checked %}checked{% endif %}> {{ label }}
-                    </label>
-                {% endfor %}
+            <div class="muted small">アップロード: {{ receipt.uploaded_at|date:"Y-m-d H:i" }}</div>
+        </td>
+
+        <td data-label="サービス / ファイル" class="receipt-review-file-cell">
+            <div class="receipt-review-service-line">
+                <strong>{{ receipt.service_display_name_snapshot }}</strong>
+                {% if receipt.is_extra %}<span class="badge neutral">追加</span>{% endif %}
             </div>
-            {% if receipt.ai_receipt_month %}<div class="muted small">AI判定領収書月: {{ receipt.ai_receipt_month }}</div>{% endif %}
-            {% if receipt.ai_extracted_payee %}<div class="muted small">払先: {{ receipt.ai_extracted_payee }}</div>{% endif %}
-            {% if receipt.ai_extracted_recipient_name %}<div class="muted small">利用者名（宛名）: {{ receipt.ai_extracted_recipient_name }}</div>{% endif %}
-            {% if receipt.ai_extracted_card_last4 %}<div class="muted small">カード下4桁: {{ receipt.ai_extracted_card_last4 }}</div>{% endif %}
-            {% if receipt.ai_recipient_name_check_memo %}<div class="danger small">{{ receipt.ai_recipient_name_check_memo|truncatechars:120 }}</div>{% endif %}
-            {% if receipt.ai_service_payee_check_memo %}<div class="danger small">{{ receipt.ai_service_payee_check_memo|truncatechars:120 }}</div>{% endif %}
-            {% if receipt.ai_filename_admin_memo %}<div class="{% if receipt.ai_is_queued or receipt.is_ai_processing %}muted{% else %}danger{% endif %} small">{{ receipt.ai_filename_admin_memo|truncatechars:120 }}</div>{% endif %}
-            {% if receipt.ai_period_check_memo %}<div class="muted small">{{ receipt.ai_period_check_memo|truncatechars:120 }}</div>{% endif %}
-            {% if receipt.ai_resubmission_recommended and not receipt.admin_reviewed %}<div class="danger small"><strong>AI再提出候補:</strong> {{ receipt.ai_resubmission_recommendation_memo|truncatechars:160 }}</div>{% elif receipt.ai_resubmission_recommended and receipt.admin_reviewed %}<div class="success small">AI再提出候補を管理者が再提出不要と確認済み</div>{% endif %}
-            {% if receipt.admin_reviewed %}<div class="success small">管理者確認: {{ receipt.admin_reviewer_label }} / {{ receipt.admin_reviewed_at|date:"Y-m-d H:i" }}</div>{% endif %}
+            {% if receipt.memo %}
+                <div class="muted small receipt-review-memo">{{ receipt.memo|truncatechars:120 }}</div>
+            {% endif %}
+            <div class="receipt-review-filename">{{ receipt.display_filename|default:"-" }}</div>
+            {% if receipt.generated_filename and receipt.original_filename and receipt.generated_filename != receipt.original_filename %}
+                <div class="muted small">元ファイル: {{ receipt.original_filename }}</div>
+            {% endif %}
+            <div class="receipt-review-file-meta">
+                <span>{{ receipt.file_size|filesizeformat }}</span>
+                <span class="badge {% if receipt.file_available %}submitted{% else %}neutral{% endif %}">{{ receipt.file_status_label }}</span>
+                <span>{{ receipt.uploader_label }}</span>
+                {% if receipt.uploaded_by_label != "-" %}<span>実行者: {{ receipt.uploaded_by_label }}</span>{% endif %}
+            </div>
         </td>
-        <td>
-            <span class="badge {% if receipt.file_available %}submitted{% else %}neutral{% endif %}">{{ receipt.file_status_label }}</span>
-            {% if receipt.expires_at %}<div class="muted small">保存期限: {{ receipt.expires_at|date:"Y-m-d H:i" }}</div>{% endif %}
-            {% if receipt.file_deleted_at %}<div class="danger small">削除: {{ receipt.file_deleted_at|date:"Y-m-d H:i" }}</div>{% endif %}
+
+        <td data-label="確認状況" class="receipt-review-status-cell">
+            <div class="receipt-review-primary-status">
+                <span class="badge {{ receipt.staff_review_status_badge_class }}">{{ receipt.staff_review_status_label }}</span>
+                <span class="small">{{ receipt.staff_review_status_summary }}</span>
+            </div>
+
+            {% if receipt.file_available %}
+                <div class="receipt-review-secondary-statuses">
+                    <span class="badge {{ receipt.ai_filename_badge_class }}">ファイル名: {{ receipt.get_ai_filename_status_display }}</span>
+                    <span class="badge {{ receipt.ai_period_check_badge_class }}">領収書月: {{ receipt.get_ai_period_check_status_display }}</span>
+                </div>
+            {% endif %}
+
+            {% if receipt.staff_review_status_key == "resubmission_decision" %}
+                <div class="receipt-review-alert danger-alert">
+                    <strong>AI再提出候補</strong>
+                    <span>{{ receipt.ai_resubmission_recommendation_memo|default:"再提出の要否を確認してください。"|truncatechars:180 }}</span>
+                </div>
+            {% elif receipt.staff_review_status_key == "manual_review" %}
+                <div class="receipt-review-alert warning-alert">
+                    <strong>未確認項目</strong>
+                    <span>{{ receipt.ai_unchecked_summary }}</span>
+                </div>
+            {% endif %}
+
+            {% if receipt.ai_has_check_result or receipt.admin_reviewed %}
+                <details class="receipt-review-details">
+                    <summary>確認内容・AI抽出情報を表示</summary>
+                    <div class="receipt-review-details-body">
+                        <div class="ai-checklist compact-ai-checklist" aria-label="AI確認項目">
+                            {% for label, checked in receipt.ai_check_items %}
+                                <label class="ai-check-item {% if not checked %}unchecked{% endif %}">
+                                    <input type="checkbox" disabled {% if checked %}checked{% endif %}> {{ label }}
+                                </label>
+                            {% endfor %}
+                        </div>
+
+                        <dl class="receipt-review-extracted-grid">
+                            {% if receipt.ai_receipt_month %}<div><dt>AI判定領収書月</dt><dd>{{ receipt.ai_receipt_month }}</dd></div>{% endif %}
+                            {% if receipt.ai_extracted_payee %}<div><dt>払先</dt><dd>{{ receipt.ai_extracted_payee }}</dd></div>{% endif %}
+                            {% if receipt.ai_extracted_recipient_name %}<div><dt>利用者名（宛名）</dt><dd>{{ receipt.ai_extracted_recipient_name }}</dd></div>{% endif %}
+                            {% if receipt.ai_extracted_card_last4 %}<div><dt>カード下4桁</dt><dd>{{ receipt.ai_extracted_card_last4 }}</dd></div>{% endif %}
+                        </dl>
+
+                        {% if receipt.ai_recipient_name_check_memo %}<div class="receipt-review-note">{{ receipt.ai_recipient_name_check_memo }}</div>{% endif %}
+                        {% if receipt.ai_service_payee_check_memo %}<div class="receipt-review-note">{{ receipt.ai_service_payee_check_memo }}</div>{% endif %}
+                        {% if receipt.ai_filename_admin_memo %}<div class="receipt-review-note">{{ receipt.ai_filename_admin_memo }}</div>{% endif %}
+                        {% if receipt.ai_period_check_memo %}<div class="receipt-review-note muted">{{ receipt.ai_period_check_memo }}</div>{% endif %}
+                        {% if receipt.admin_reviewed %}
+                            <div class="success small">管理者確認: {{ receipt.admin_reviewer_label }} / {{ receipt.admin_reviewed_at|date:"Y-m-d H:i" }}</div>
+                        {% endif %}
+                    </div>
+                </details>
+            {% endif %}
         </td>
-        <td>{{ receipt.uploaded_at|date:"Y-m-d H:i" }}</td>
-        <td>
-            <div class="table-actions receipt-table-actions">
-                <a class="button small primary" href="{% url 'staff_receipt_review' receipt.pk %}">{% if receipt.needs_resubmission_decision %}再提出判断{% else %}確認{% endif %}</a>
-                <a class="button small" href="{% url 'staff_submission_detail' receipt.submission.pk %}">詳細</a>
+
+        <td data-label="操作" class="receipt-review-actions-cell">
+            <div class="receipt-compact-actions">
                 {% if receipt.file_available %}
-                    <a class="button small" href="{% url 'download_receipt' receipt.pk %}">DL</a>
+                    <a class="button small primary" href="{% url 'staff_receipt_review' receipt.pk %}">{% if receipt.needs_resubmission_decision %}再提出判断{% else %}確認{% endif %}</a>
+                    {% if receipt.can_request_resubmission %}
+                        <form method="post" action="{% url 'staff_request_receipt_resubmission' receipt.pk %}" data-resubmission-request-form onsubmit="return confirm('この領収書に再提出を依頼しますか？対象ファイルと履歴は提出項目から削除され、再提出依頼管理へ登録されます。ユーザーへ再提出依頼メールも送信します。');">
+                            {% csrf_token %}
+                            <input type="hidden" name="next" value="{% url 'history' %}?month={{ receipt.submission.period_month|date:'Y-m' }}&receipt_status={{ selected_receipt_status|default:'all' }}#uploaded-receipts">
+                            <button type="submit" class="button small danger-outline">再提出依頼</button>
+                        </form>
+                    {% else %}
+                        <button type="button" class="button small danger-outline" disabled title="AIでファイル名を修正・検査が完了すると利用できます。">再提出依頼</button>
+                    {% endif %}
+                {% endif %}
+
+                <a class="button small" href="{% url 'staff_submission_detail' receipt.submission.pk %}">提出詳細</a>
+                {% if receipt.file_available %}
+                    <a class="button small" href="{% url 'download_receipt' receipt.pk %}">ダウンロード</a>
                 {% endif %}
                 <form method="post" action="{% url 'staff_delete_receipt' receipt.pk %}" onsubmit="return confirm('この領収書ファイルと履歴を削除しますか？該当ユーザーの画面からも削除されます。');">
                     {% csrf_token %}
-                    <input type="hidden" name="next" value="{{ request.get_full_path }}">
+                    <input type="hidden" name="next" value="{% url 'history' %}?month={{ receipt.submission.period_month|date:'Y-m' }}&receipt_status={{ selected_receipt_status|default:'all' }}#uploaded-receipts">
                     <button type="submit" class="button small danger-outline">削除</button>
                 </form>
             </div>
         </td>
     </tr>
 {% empty %}
-    <tr><td colspan="9" class="muted center">この提出月にアップロード済み領収書はありません。</td></tr>
+    <tr>
+        <td colspan="4" class="muted center receipt-review-empty">
+            「{{ selected_receipt_status_label|default:"選択中のステータス" }}」に該当する領収書はありません。
+        </td>
+    </tr>
 {% endfor %}

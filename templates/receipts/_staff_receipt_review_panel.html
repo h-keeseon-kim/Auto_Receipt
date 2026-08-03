@@ -84,17 +84,24 @@
 
     <div class="subsection review-danger-actions">
         <h3>再提出が必要と判断した場合</h3>
-        <p class="muted small">AIの判定だけでは領収書を自動削除しません。管理者が領収書本体を確認し、本当に問題がある場合だけ再提出を依頼してください。対象ファイルと提出項目は削除され、ユーザーへ再アップロード依頼が表示されます。</p>
+        <p class="muted small">AIの判定だけでは領収書を自動削除しません。管理者が領収書本体を確認し、本当に問題がある場合だけ再提出を依頼してください。対象ファイルと提出項目は削除され、再提出依頼管理へ登録し、ユーザー画面の通知とメールを送信します。</p>
         <div class="actions">
-            <form method="post" action="{% url 'staff_request_receipt_resubmission' receipt.pk %}" class="form-grid" onsubmit="return confirm('この領収書に再提出を依頼しますか？対象ファイルと履歴は提出項目から削除されます。');">
-                {% csrf_token %}
-                <input type="hidden" name="next" value="{% url 'staff_user_month_status' receipt.submission.user.pk %}?month={{ receipt.submission.period_month|date:'Y-m' }}">
-                <div class="form-row">
-                    <label for="resubmission-reason-{{ receipt.pk }}">ユーザーへ伝える理由（任意）</label>
-                    <textarea id="resubmission-reason-{{ receipt.pk }}" name="reason" rows="3" maxlength="1000" placeholder="例: カード番号が異なるため、正しい領収書を再アップロードしてください。"></textarea>
+            {% if receipt.can_request_resubmission %}
+                <form method="post" action="{% url 'staff_request_receipt_resubmission' receipt.pk %}" class="form-grid" data-resubmission-request-form onsubmit="return confirm('この領収書に再提出を依頼しますか？対象ファイルと履歴は提出項目から削除され、再提出依頼管理へ登録されます。ユーザーへ再提出依頼メールも送信します。');">
+                    {% csrf_token %}
+                    <input type="hidden" name="next" value="{% url 'staff_user_month_status' receipt.submission.user.pk %}?month={{ receipt.submission.period_month|date:'Y-m' }}">
+                    <div class="form-row">
+                        <label for="resubmission-reason-{{ receipt.pk }}">ユーザーへ伝える理由（任意）</label>
+                        <textarea id="resubmission-reason-{{ receipt.pk }}" name="reason" rows="3" maxlength="1000" placeholder="例: カード番号が異なるため、正しい領収書を再アップロードしてください。"></textarea>
+                    </div>
+                    <button type="submit" class="button danger-outline">再提出を依頼</button>
+                </form>
+            {% else %}
+                <div class="form-grid">
+                    <p class="muted small">「AIでファイル名を修正・検査」が完了すると、再提出依頼を送信できます。</p>
+                    <button type="button" class="button danger-outline" disabled>再提出を依頼</button>
                 </div>
-                <button type="submit" class="button danger-outline">再提出を依頼</button>
-            </form>
+            {% endif %}
             <form method="post" action="{% url 'staff_delete_receipt' receipt.pk %}" onsubmit="return confirm('この領収書ファイルと履歴を削除しますか？');">
                 {% csrf_token %}
                 <input type="hidden" name="next" value="{% url 'staff_user_month_status' receipt.submission.user.pk %}?month={{ receipt.submission.period_month|date:'Y-m' }}">

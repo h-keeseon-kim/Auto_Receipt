@@ -16,10 +16,13 @@
         });
     }
 
-    function replaceReceiptTable(html) {
+    function replaceReceiptTable(html, visibleCount) {
         const body = document.querySelector("[data-ai-receipt-table-body]");
-        if (!body || typeof html !== "string") return;
-        body.innerHTML = html;
+        if (body && typeof html === "string") body.innerHTML = html;
+        const countElement = document.querySelector("[data-ai-visible-count]");
+        if (countElement && visibleCount !== undefined && visibleCount !== null) {
+            countElement.textContent = String(visibleCount);
+        }
     }
 
     function setMessage(form, message, isWorking) {
@@ -48,7 +51,7 @@
             .then(function (payload) {
                 if (!payload || !payload.ok) throw new Error("Invalid AI processing status response");
                 updateSummary(payload.stats);
-                replaceReceiptTable(payload.receipts_html);
+                replaceReceiptTable(payload.receipts_html, payload.visible_count);
                 if (Number(payload.processing_count || 0) > 0) {
                     setButtonState(form, true);
                     setMessage(form, "AIで情報を抽出中です。完了した領収書から順番に反映されます。", true);

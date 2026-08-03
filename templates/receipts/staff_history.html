@@ -86,7 +86,7 @@
     <div class="section-header">
         <div>
             <h2>再提出依頼管理</h2>
-            <p class="muted">AIは領収書を自動で取り下げません。管理者が領収書を確認し、必要な場合だけ再提出を依頼します。依頼を削除するとユーザー画面の通知も消えます。</p>
+            <p class="muted">AIは領収書を自動で取り下げません。管理者が再提出依頼を実行した項目がここへ登録され、対象ユーザーにはアプリ内通知とメールを送信します。依頼を削除するとユーザー画面の通知も消えます。</p>
         </div>
         {% if all_resubmission_request_count %}
             <div class="actions nowrap">
@@ -146,23 +146,56 @@
     {% endif %}
 </section>
 
-<section class="card section" data-tutorial-target="staff-receipts-section">
-    <div class="section-header">
+<section class="card section" id="uploaded-receipts" data-tutorial-target="staff-receipts-section">
+    <div class="section-header receipt-review-section-header">
         <div>
             <h2>アップロード済み領収書</h2>
-            <p class="muted">提出月 {{ selected_month|date:"Y年m月" }}（対象領収書月 {{ target_receipt_month|date:"Y年m月" }}）の領収書を、アップロード日時の新しい順に表示します。AI修正・検査は未確認ファイルだけを処理し、不一致候補があっても自動で再提出依頼は出しません。</p>
+            <p class="muted">領収書発行月 {{ target_receipt_month|date:"Y年m月" }} の領収書をアップロード日時の新しい順に表示します。確認ステータスを選ぶと、対応が必要な領収書だけに絞り込めます。</p>
         </div>
-        <form method="post" action="{% url 'staff_start_ai_processing' %}" class="ai-process-form" data-ai-process-form data-status-url="{% url 'staff_ai_processing_status' %}?month={{ selected_month|date:'Y-m' }}">
+        <form method="post" action="{% url 'staff_start_ai_processing' %}" class="ai-process-form" data-ai-process-form data-status-url="{% url 'staff_ai_processing_status' %}?month={{ selected_month|date:'Y-m' }}&receipt_status={{ selected_receipt_status }}">
             {% csrf_token %}
             <input type="hidden" name="month" value="{{ selected_month|date:'Y-m' }}">
+            <input type="hidden" name="receipt_status" value="{{ selected_receipt_status }}">
             <input type="hidden" name="limit" value="50">
-            <button type="submit" class="button primary" data-ai-process-button>AIでファイル名を修正・検査</button>
-            <span class="muted small" data-ai-process-message>{% if stats.ai_processing_count %}AIで情報を抽出中です。完了した領収書から順番に反映されます。{% else %}処理済み項目は再検査しません。{% endif %}</span>
+            <button type="submit" class="button primary" data-ai-process-button {% if not stats.ai_ready_count and not stats.ai_processing_count %}disabled{% endif %}>{% if stats.ai_processing_count %}AIで情報を抽出中{% else %}AIでファイル名を修正・検査{% endif %}</button>
+            <span class="muted small" data-ai-process-message>{% if stats.ai_processing_count %}AIで情報を抽出中です。完了した領収書から順番に反映されます。{% elif stats.ai_ready_count %}AI未確認の領収書だけを処理します。{% else %}処理済み項目は再検査しません。{% endif %}</span>
         </form>
     </div>
-    <div class="table-wrap scroll-box large table-scroll-wide" aria-label="アップロード済み領収書テーブル" data-tutorial-target="staff-receipt-table">
-        <table class="receipt-history-table">
-            <thead><tr><th>ユーザー</th><th>提出月</th><th>ステータス</th><th>サービス</th><th>ファイル</th><th>AI確認 / 対象領収書月</th><th>保存状態</th><th>アップロード日時</th><th>操作</th></tr></thead>
+
+    <nav class="receipt-status-filters" aria-label="領収書確認ステータス">
+        {% for option in receipt_status_options %}
+            <a
+                class="receipt-status-filter receipt-status-filter-{{ option.key }}{% if option.active %} active{% endif %}"
+                href="?month={{ selected_month|date:'Y-m' }}&receipt_status={{ option.key }}#uploaded-receipts"
+                {% if option.active %}aria-current="page"{% endif %}
+            >
+                <span>{{ option.label }}</span>
+                <strong data-ai-summary="receipt_status_count_{{ option.key }}">{{ option.count }}</strong>
+            </a>
+        {% endfor %}
+    </nav>
+
+    <div class="receipt-status-guide" aria-label="確認ステータスの説明">
+        <span><strong>再提出判断待ち:</strong> AIが明確な不一致候補を検出</span>
+        <span><strong>確認が必要:</strong> 曖昧・未確認項目があり管理者確認が必要</span>
+        <span><strong>AI確認済み:</strong> AIの全確認項目がチェック済み</span>
+    </div>
+
+    <div class="receipt-review-list-summary">
+        <strong>{{ selected_receipt_status_label }}</strong>を表示中
+        <span class="muted"><span data-ai-visible-count>{{ receipts|length }}</span>件 / 全<span data-ai-summary="receipt_status_count_all">{{ stats.receipt_status_count_all }}</span>件</span>
+    </div>
+
+    <div class="table-wrap scroll-box large receipt-review-table-wrap" aria-label="アップロード済み領収書テーブル" data-tutorial-target="staff-receipt-table">
+        <table class="receipt-review-table">
+            <thead>
+                <tr>
+                    <th>利用者 / 領収書月</th>
+                    <th>サービス / ファイル</th>
+                    <th>確認状況</th>
+                    <th>操作</th>
+                </tr>
+            </thead>
             <tbody data-ai-receipt-table-body>
                 {% include "receipts/_staff_receipt_rows.html" %}
             </tbody>
