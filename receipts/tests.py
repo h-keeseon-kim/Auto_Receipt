@@ -115,6 +115,17 @@ class ReceiptFlowTests(TestCase):
         self.assertContains(response, "＋")
         self.assertNotContains(response, ">アップロード</button>")
 
+    def test_dashboard_receipt_month_changes_without_display_button(self):
+        self.client.login(username="alice", password="password123")
+
+        response = self.client.get(reverse("dashboard") + "?receipt_month=2026-06")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "data-auto-month-form")
+        self.assertContains(response, "data-auto-submit-on-change")
+        self.assertContains(response, "月を選ぶと自動で切り替わります。")
+        self.assertNotContains(response, ">表示</button>")
+
 
     def test_ai_payload_uses_receipt_payee_for_filename_not_selected_service_name(self):
         result = build_result_from_ai_payload(
@@ -927,6 +938,47 @@ class ReceiptFlowTests(TestCase):
             ["receipt-a.pdf", "receipt-b.pdf", "receipt-c.pdf"],
         )
         self.assertEqual(submission.receipts.filter(service=self.service).count(), 3)
+
+    def test_repeated_single_uploads_with_same_filename_are_appended_not_overwritten(self):
+        self.client.login(username="alice", password="password123")
+        url = reverse("dashboard") + "?receipt_month=2026-06"
+
+        first = self.client.post(
+            url,
+            {
+                "action": "add_receipts",
+                "service": str(self.service.id),
+                "files": [SimpleUploadedFile("receipt.pdf", b"%PDF-1.4 first", content_type="application/pdf")],
+            },
+        )
+        second = self.client.post(
+            url,
+            {
+                "action": "add_receipts",
+                "service": str(self.service.id),
+                "files": [SimpleUploadedFile("receipt.pdf", b"%PDF-1.4 second", content_type="application/pdf")],
+            },
+        )
+
+        self.assertEqual(first.status_code, 302)
+        self.assertEqual(second.status_code, 302)
+        submission = Submission.objects.get(user=self.user, period_month=date(2026, 7, 1))
+        receipts = list(submission.receipts.filter(service=self.service).order_by("pk"))
+        self.assertEqual(len(receipts), 2)
+        self.assertNotEqual(receipts[0].pk, receipts[1].pk)
+        self.assertNotEqual(receipts[0].file.name, receipts[1].file.name)
+        self.assertEqual([receipt.original_filename for receipt in receipts], ["receipt.pdf", "receipt.pdf"])
+        with receipts[0].file.open("rb") as first_file:
+            self.assertEqual(first_file.read(), b"%PDF-1.4 first")
+        with receipts[1].file.open("rb") as second_file:
+            self.assertEqual(second_file.read(), b"%PDF-1.4 second")
+
+    def test_multiple_file_dropzone_accumulates_separate_selections(self):
+        script = (Path(__file__).resolve().parent.parent / "static" / "js" / "file_dropzone.js").read_text()
+
+        self.assertIn("mergeUniqueFiles", script)
+        self.assertIn("追加選択しました", script)
+        self.assertIn("filedropzone:reset", script)
 
     def test_user_can_replace_receipt_file_after_submit(self):
         self.client.login(username="alice", password="password123")

@@ -77,6 +77,7 @@
                             <form method="post" action="{% url 'replace_receipt_file' receipt.pk %}" enctype="multipart/form-data" class="replace-file-form">
                                 {% csrf_token %}
                                 <input type="hidden" name="next" value="{{ request.get_full_path }}">
+                                <p class="muted small replace-file-warning">この操作は現在の領収書ファイルを差し替えます。新しい領収書を追加する場合は、上の「領収書を追加」を使用してください。</p>
                                 <div class="file-dropzone compact inline-dropzone" data-file-dropzone data-max-files="1">
                                     <label class="sr-only" for="replace-file-{{ receipt.pk }}">修正後ファイル</label>
                                     <input id="replace-file-{{ receipt.pk }}" class="sr-only" type="file" name="file" accept=".pdf,.png,.jpg,.jpeg,.webp" required data-file-dropzone-input>
@@ -86,7 +87,7 @@
                                     </button>
                                     <div class="file-dropzone-files muted small" data-file-dropzone-files>未選択</div>
                                 </div>
-                                <button type="submit" class="button small">ファイル修正</button>
+                                <button type="submit" class="button small">既存ファイルを差し替え</button>
                             </form>
                         {% endif %}
                         {% if not submission.is_submitted and receipt.submission.user == user %}

@@ -7,10 +7,10 @@
         <h1>提出履歴</h1>
         <p class="muted">ユーザー別の提出進捗、未提出サービス、AI確認対象、アップロード済み領収書を確認できます。</p>
     </div>
-    <form method="get" class="month-form" data-tutorial-target="staff-month-form">
+    <form method="get" class="month-form auto-month-form" data-tutorial-target="staff-month-form" data-auto-submit-on-change>
         {{ month_form.month.label_tag }}
         {{ month_form.month }}
-        <button class="button" type="submit">表示</button>
+        <span class="muted small auto-month-form-note">月を選ぶと自動で切り替わります。</span>
     </form>
 </div>
 

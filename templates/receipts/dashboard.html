@@ -6,10 +6,10 @@
         <h1>領収書アップロード</h1>
         <p class="muted">何月に発行された領収書を提出するか選び、対象サービスごとにアップロードします。</p>
     </div>
-    <form method="get" class="month-form" data-tutorial-target="upload-month-form">
+    <form method="get" class="month-form auto-month-form" data-tutorial-target="upload-month-form" data-auto-month-form data-auto-submit-on-change>
         {{ month_form.receipt_month.label_tag }}
         {{ month_form.receipt_month }}
-        <button class="button" type="submit">表示</button>
+        <span class="muted small auto-month-form-note">月を選ぶと自動で切り替わります。</span>
     </form>
 </div>
 
@@ -196,6 +196,14 @@
         return serviceSelect.options[serviceSelect.selectedIndex].text || "";
     }
 
+    function resetSelectedFiles() {
+        if (!fileInput) return;
+        fileInput.value = "";
+        if (dropzone && typeof CustomEvent === "function") {
+            dropzone.dispatchEvent(new CustomEvent("filedropzone:reset"));
+        }
+    }
+
     function refreshUploadControls() {
         const value = serviceSelect ? serviceSelect.value : "";
         const isOther = value === "other";
@@ -222,7 +230,7 @@
 
     if (serviceSelect) {
         serviceSelect.addEventListener("change", function () {
-            if (fileInput) fileInput.value = "";
+            resetSelectedFiles();
             if (memoInput && serviceSelect.value !== "other") memoInput.value = "";
             refreshUploadControls();
         });
@@ -230,7 +238,7 @@
 
     if (memoInput) {
         memoInput.addEventListener("input", function () {
-            if (fileInput && !memoInput.value.trim()) fileInput.value = "";
+            if (!memoInput.value.trim()) resetSelectedFiles();
             refreshUploadControls();
         });
     }

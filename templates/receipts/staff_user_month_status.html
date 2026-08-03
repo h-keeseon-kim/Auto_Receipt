@@ -11,10 +11,10 @@
             <a class="button" href="{% url 'staff_user_services' managed_user.pk %}">利用サービス管理</a>
         </div>
     </div>
-    <form method="get" class="month-form">
+    <form method="get" action="{% url 'staff_user_month_status' managed_user.pk %}#staff-receipt-upload" class="month-form auto-month-form" data-auto-submit-on-change>
         {{ month_form.month.label_tag }}
         {{ month_form.month }}
-        <button class="button" type="submit">表示</button>
+        <span class="muted small auto-month-form-note">月を選ぶと自動で切り替わります。</span>
     </form>
 </div>
 
@@ -198,6 +198,16 @@
     const serviceSelect = form.querySelector("select[name='service']");
     const memoField = form.querySelector("[data-staff-other-memo-field]");
     const memoInput = form.querySelector("textarea[name='memo']");
+    const fileInput = form.querySelector("input[type='file'][name='files']");
+    const dropzone = form.querySelector("[data-file-dropzone]");
+
+    function resetSelectedFiles() {
+        if (!fileInput) return;
+        fileInput.value = "";
+        if (dropzone && typeof CustomEvent === "function") {
+            dropzone.dispatchEvent(new CustomEvent("filedropzone:reset"));
+        }
+    }
 
     function refreshMemoField() {
         const isOther = serviceSelect && serviceSelect.value === "other";
@@ -205,7 +215,12 @@
         if (!isOther && memoInput) memoInput.value = "";
     }
 
-    if (serviceSelect) serviceSelect.addEventListener("change", refreshMemoField);
+    if (serviceSelect) {
+        serviceSelect.addEventListener("change", function () {
+            resetSelectedFiles();
+            refreshMemoField();
+        });
+    }
     refreshMemoField();
 
     const userSwitcher = document.querySelector("[data-proxy-upload-switcher]");

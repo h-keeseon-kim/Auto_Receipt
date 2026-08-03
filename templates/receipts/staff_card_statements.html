@@ -7,10 +7,10 @@
         <h1>ご利用代金明細</h1>
         <p class="muted">会社全体のカード明細を、明細月と同じ提出サイクルに登録された前月分の全ユーザー領収書と一括照合します。</p>
     </div>
-    <form method="get" class="month-form">
+    <form method="get" class="month-form auto-month-form" data-auto-submit-on-change>
         {{ month_form.month.label_tag }}
         {{ month_form.month }}
-        <button class="button" type="submit">表示</button>
+        <span class="muted small auto-month-form-note">月を選ぶと自動で切り替わります。</span>
     </form>
 </div>
 

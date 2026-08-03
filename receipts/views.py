@@ -270,7 +270,9 @@ def save_receipt_batch(*, submission: Submission, form: ReceiptBatchUploadForm, 
                 )
                 receipt.full_clean()
                 created_receipts.append(receipt)
-                receipt.save()
+                # 同じサービスへ後から1件ずつ追加した場合も、既存レコードを更新せず
+                # 必ず新しい領収書レコードとして追記する。
+                receipt.save(force_insert=True)
 
             if service is not None:
                 MonthlyServiceDeclaration.objects.filter(
@@ -444,14 +446,24 @@ def dashboard(request):
                             "領収書を追加したため、状態を『未提出領収書あり』に戻しました。内容を確認して再度提出してください。",
                         )
                     if upload_form.is_extra:
+                        total_for_selection = Receipt.objects.filter(
+                            submission=submission,
+                            is_extra=True,
+                            file_deleted_at__isnull=True,
+                        ).exclude(file="").count()
                         messages.success(
                             request,
-                            f"その他の領収書を{count}件追加しました。メモはAIの参考情報として使われますが、領収書ファイル内の情報を優先して確認します。",
+                            f"その他の領収書を新しく{count}件追加しました。現在の登録件数は計{total_for_selection}件です。メモはAIの参考情報として使われますが、領収書ファイル内の情報を優先して確認します。",
                         )
                     else:
+                        total_for_selection = Receipt.objects.filter(
+                            submission=submission,
+                            service=upload_form.selected_service,
+                            file_deleted_at__isnull=True,
+                        ).exclude(file="").count()
                         messages.success(
                             request,
-                            f"{selected_label} の領収書を{count}件追加しました。AIによるファイル名修正・検査は、管理者が実行した後に反映されます。",
+                            f"{selected_label} の領収書を新しく{count}件追加しました。現在このサービスには計{total_for_selection}件登録されています。AIによるファイル名修正・検査は、管理者が実行した後に反映されます。",
                         )
                     selected_value = ReceiptBatchUploadForm.OTHER_VALUE if upload_form.is_extra else str(upload_form.selected_service.pk)
                     return redirect(
@@ -1779,9 +1791,21 @@ def staff_user_month_status(request, user_id: int):
                     if staff_upload_form.is_extra
                     else staff_upload_form.selected_service.display_name
                 )
+                if staff_upload_form.is_extra:
+                    total_for_selection = Receipt.objects.filter(
+                        submission=submission,
+                        is_extra=True,
+                        file_deleted_at__isnull=True,
+                    ).exclude(file="").count()
+                else:
+                    total_for_selection = Receipt.objects.filter(
+                        submission=submission,
+                        service=staff_upload_form.selected_service,
+                        file_deleted_at__isnull=True,
+                    ).exclude(file="").count()
                 messages.success(
                     request,
-                    f"{managed_user.username} の {selected_month:%Y年%m月}提出（対象領収書月: {receipt_month_for_submission(selected_month):%Y年%m月}）へ、{selected_label} の領収書を{count}件代理アップロードしました。",
+                    f"{managed_user.username} の {selected_month:%Y年%m月}提出（対象領収書月: {receipt_month_for_submission(selected_month):%Y年%m月}）へ、{selected_label} の領収書を新しく{count}件代理アップロードしました。現在の登録件数は計{total_for_selection}件です。",
                 )
                 if resolved_count:
                     messages.success(request, f"再提出依頼を{resolved_count}件、対応済みにしました。")
