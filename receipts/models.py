@@ -170,11 +170,9 @@ class StatementCandidateGateStatus(models.TextChoices):
 
 
 class StatementCandidatePriorityTier(models.TextChoices):
-    EXACT_IDENTITY = "exact_identity", "優先度1: 金額・通貨＋サービス/払先一致"
-    EXACT_AMOUNT_ONLY = "exact_amount_only", "優先度2: 金額・通貨一意"
-    NEAR_IDENTITY = "near_identity", "優先度3: 金額近似＋サービス/払先一致"
-    IDENTITY_ONLY = "identity_only", "優先度4: サービス/払先一致・金額不足"
-    REJECTED = "rejected", "除外: 必須条件不一致"
+    EXACT_IDENTITY = "exact_identity", "優先度1: 金額・通貨完全一致＋サービス/払先一致"
+    EXACT_AMOUNT_ONLY = "exact_amount_only", "優先度2: 金額・通貨完全一致・関係要確認"
+    REJECTED = "rejected", "除外: 金額未確認または必須条件不一致"
 
 
 class StatementMatchReason(models.TextChoices):
@@ -1552,7 +1550,7 @@ class CardStatementMatchCandidate(models.Model):
         "優先順位",
         max_length=30,
         choices=StatementCandidatePriorityTier.choices,
-        default=StatementCandidatePriorityTier.IDENTITY_ONLY,
+        default=StatementCandidatePriorityTier.REJECTED,
     )
     gate_memo = models.TextField("必須条件メモ", blank=True)
     amount_match = models.BooleanField("金額一致", default=False)
@@ -1592,11 +1590,11 @@ class CardStatementMatchCandidate(models.Model):
             labels.append("カード末尾記載なし（中立）")
         if self.amount_match:
             if self.amount_match_basis == "original":
-                labels.append("外貨金額一致")
+                labels.append("外貨金額完全一致")
             elif self.amount_match_basis == "jpy":
-                labels.append("円金額一致")
+                labels.append("円金額完全一致")
             else:
-                labels.append("金額近似")
+                labels.append("金額完全一致")
         if self.currency_match:
             labels.append("通貨一致")
         if self.merchant_match:

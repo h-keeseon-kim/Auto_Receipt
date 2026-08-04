@@ -48,6 +48,9 @@ CARD_STATEMENT_MATCHING_RULES_RECONCILE_MARKER = (
 CARD_LAST4_EVIDENCE_RECONCILE_MARKER = (
     "【照合ルール更新】領収書のカード末尾を必須条件から補助加点へ変更したため、最新の領収書と再照合します。"
 )
+EXACT_AMOUNT_MATCHING_RECONCILE_MARKER = (
+    "【照合ルール更新】金額照合を許容差なしの完全一致へ変更したため、最新の領収書と再照合します。"
+)
 
 
 # v1.10.0: 候補は「必須条件ゲート → 優先順位 → 同順位内スコア」の順で評価する。
@@ -64,7 +67,6 @@ CARD_LAST4_STATUS_MISMATCHED = "mismatched"
 CARD_LAST4_STATUS_ADMIN_CONFIRMED = "admin_confirmed"
 
 AMOUNT_EXACT = "exact"
-AMOUNT_NEAR = "near"
 AMOUNT_MISSING = "missing"
 AMOUNT_CONFLICT = "conflict"
 
@@ -102,6 +104,7 @@ def reconcile_pending_card_statement_month_semantics(*, period_month=None, state
         Q(ai_admin_memo__contains=CARD_STATEMENT_MONTH_SEMANTICS_RECONCILE_MARKER)
         | Q(ai_admin_memo__contains=CARD_STATEMENT_MATCHING_RULES_RECONCILE_MARKER)
         | Q(ai_admin_memo__contains=CARD_LAST4_EVIDENCE_RECONCILE_MARKER)
+        | Q(ai_admin_memo__contains=EXACT_AMOUNT_MATCHING_RECONCILE_MARKER)
     ).exclude(status__in=[CardStatementStatus.PROCESSING, CardStatementStatus.FAILED])
     if period_month is not None:
         queryset = queryset.filter(period_month=period_month)
@@ -281,17 +284,17 @@ def _statement_gate_errors(statement: CardStatement) -> list[str]:
     return errors
 
 
-def _amounts_equal(left: Decimal | None, right: Decimal | None, tolerance: Decimal) -> bool:
+def _amounts_equal(left: Decimal | None, right: Decimal | None) -> bool:
+    """通貨単位を含む金額を、許容差なしで比較する。
+
+    Decimalでは ``22.00 == 22.000`` はTrueになる一方、``22.00`` と
+    ``22.01``、``3595`` と ``3596`` は不一致になる。為替差・丸め差・
+    手数料差をReceiptHub側で推測して吸収しない。
+    """
+
     if left is None or right is None:
         return False
-    return abs(left - right) <= tolerance
-
-
-def _amounts_close(left: Decimal | None, right: Decimal | None, *, minimum_tolerance: Decimal) -> bool:
-    if left is None or right is None:
-        return False
-    tolerance = max(minimum_tolerance, abs(right) * Decimal("0.005"))
-    return abs(left - right) <= tolerance
+    return left == right
 
 
 @dataclass(frozen=True)
@@ -306,12 +309,8 @@ class AmountAssessment:
         return self.status == AMOUNT_EXACT
 
     @property
-    def near(self) -> bool:
-        return self.status == AMOUNT_NEAR
-
-    @property
     def matched(self) -> bool:
-        return self.status in {AMOUNT_EXACT, AMOUNT_NEAR}
+        return self.status == AMOUNT_EXACT
 
 
 @dataclass(frozen=True)
@@ -360,10 +359,8 @@ class ReceiptCandidateEvaluation:
     @property
     def auto_priority(self) -> int:
         priorities = {
-            StatementCandidatePriorityTier.EXACT_IDENTITY: 4,
-            StatementCandidatePriorityTier.EXACT_AMOUNT_ONLY: 3,
-            StatementCandidatePriorityTier.NEAR_IDENTITY: 2,
-            StatementCandidatePriorityTier.IDENTITY_ONLY: 1,
+            StatementCandidatePriorityTier.EXACT_IDENTITY: 2,
+            StatementCandidatePriorityTier.EXACT_AMOUNT_ONLY: 1,
             StatementCandidatePriorityTier.REJECTED: 0,
         }
         return priorities.get(self.priority_tier, 0)
@@ -384,29 +381,34 @@ class ReceiptCandidateEvaluation:
 
 
 def _assess_amount(item: CardStatementItem, receipt: Receipt) -> AmountAssessment:
+    """明細行と領収書の金額を完全一致だけで評価する。
+
+    - 外貨は、明細の外貨金額と同一通貨の領収書金額を比較する。
+    - 領収書がJPYの場合は明細の円金額と比較する。
+    - 1セント、1円でも異なれば不一致。近似・丸め・為替差の許容はしない。
+    - 金額または通貨を抽出できない領収書は、自動・曖昧候補にしない。
+    """
+
     receipt_amount = receipt.amount
     receipt_currency = (receipt.currency or "").upper()
     statement_currency = (item.original_currency or "").upper()
 
     if receipt_amount is None or not receipt_currency:
-        return AmountAssessment(AMOUNT_MISSING, memo="領収書の金額または通貨を確認できません。")
+        return AmountAssessment(
+            AMOUNT_MISSING,
+            memo="領収書の金額または通貨を確認できないため、照合候補にできません。",
+        )
 
     comparison_amount: Decimal | None = None
     basis = ""
-    exact_tolerance = Decimal("0")
-    near_minimum = Decimal("0")
 
     if item.original_amount is not None and statement_currency:
         if receipt_currency == statement_currency:
             comparison_amount = item.original_amount
             basis = "original"
-            exact_tolerance = Decimal("0.02")
-            near_minimum = Decimal("0.10")
         elif receipt_currency == "JPY" and item.amount_jpy is not None:
             comparison_amount = item.amount_jpy
             basis = "jpy"
-            exact_tolerance = Decimal("1")
-            near_minimum = Decimal("5")
         else:
             return AmountAssessment(
                 AMOUNT_CONFLICT,
@@ -418,31 +420,27 @@ def _assess_amount(item: CardStatementItem, receipt: Receipt) -> AmountAssessmen
     elif item.amount_jpy is not None and receipt_currency == "JPY":
         comparison_amount = item.amount_jpy
         basis = "jpy"
-        exact_tolerance = Decimal("1")
-        near_minimum = Decimal("5")
     else:
-        # 明細側に外貨金額がなく、領収書が外貨の場合などは比較不能。サービス一致候補としてのみ残す。
-        return AmountAssessment(AMOUNT_MISSING, memo="明細と領収書で比較可能な金額・通貨の組み合わせがありません。")
+        return AmountAssessment(
+            AMOUNT_MISSING,
+            memo="明細と領収書で比較可能な金額・通貨の組み合わせがないため、照合候補にできません。",
+        )
 
-    if _amounts_equal(receipt_amount, comparison_amount, exact_tolerance):
+    if _amounts_equal(receipt_amount, comparison_amount):
         label = (
-            f"外貨金額 {comparison_amount} {receipt_currency} が一致"
+            f"外貨金額 {comparison_amount} {receipt_currency} が完全一致"
             if basis == "original"
-            else f"円金額 {comparison_amount}円が一致"
+            else f"円金額 {comparison_amount}円が完全一致"
         )
         return AmountAssessment(AMOUNT_EXACT, basis=basis, currency_match=True, memo=label)
-
-    if _amounts_close(receipt_amount, comparison_amount, minimum_tolerance=near_minimum):
-        label = "外貨金額が近似" if basis == "original" else "円金額が近似"
-        return AmountAssessment(AMOUNT_NEAR, basis=f"near_{basis}", currency_match=True, memo=label)
 
     return AmountAssessment(
         AMOUNT_CONFLICT,
         basis=basis,
         currency_match=True,
         memo=(
-            f"金額が一致しません（明細: {comparison_amount} {receipt_currency} / "
-            f"領収書: {receipt_amount} {receipt_currency}）。"
+            f"金額が完全一致しません（明細: {comparison_amount} {receipt_currency} / "
+            f"領収書: {receipt_amount} {receipt_currency}）。許容差は設定していません。"
         ),
     )
 
@@ -556,7 +554,7 @@ def _evaluate_receipt_candidate(
             f"領収書日付が対象領収書月 {target_receipt_month:%Y-%m} ではありません。"
         )
 
-    if amount.status == AMOUNT_CONFLICT:
+    if amount.status in {AMOUNT_CONFLICT, AMOUNT_MISSING}:
         hard_conflicts.append(amount.memo)
 
     # 領収書上の払先と、ユーザーが選択した登録サービスを双方で特定できる場合の内部矛盾。
@@ -598,9 +596,6 @@ def _evaluate_receipt_candidate(
     reasons: list[str] = [card_last4.label]
     if amount.status == AMOUNT_EXACT:
         score += 100
-        reasons.append(amount.memo)
-    elif amount.status == AMOUNT_NEAR:
-        score += 40
         reasons.append(amount.memo)
     if amount.currency_match:
         score += 10
@@ -673,27 +668,15 @@ def _evaluate_receipt_candidate(
         strength = StatementCandidateStrength.STRONG
         confidence = 0.98 if merchant_match and service_match else 0.95
         gate_status = StatementCandidateGateStatus.AUTO_ELIGIBLE
-        gate_memo = "必須条件の金額・通貨が一致し、サービスまたは払先の関連も確認できました。"
+        gate_memo = "金額・通貨が完全一致し、サービスまたは払先の関連も確認できました。"
     elif amount.status == AMOUNT_EXACT:
         priority_tier = StatementCandidatePriorityTier.EXACT_AMOUNT_ONLY
         strength = StatementCandidateStrength.AMOUNT_ONLY
         confidence = 0.78 if date_match else 0.72
         gate_status = StatementCandidateGateStatus.AUTO_ELIGIBLE
-        gate_memo = "金額・通貨は一致していますが、ご利用先・払先・サービスの関連は未確認です。"
-    elif amount.status == AMOUNT_NEAR and identity_match:
-        priority_tier = StatementCandidatePriorityTier.NEAR_IDENTITY
-        strength = StatementCandidateStrength.POSSIBLE
-        confidence = 0.68
-        gate_status = StatementCandidateGateStatus.MANUAL_ONLY
-        gate_memo = "サービス・払先は関連していますが、金額は近似のため自動確定しません。"
-    elif amount.status == AMOUNT_MISSING and identity_match:
-        priority_tier = StatementCandidatePriorityTier.IDENTITY_ONLY
-        strength = StatementCandidateStrength.POSSIBLE
-        confidence = 0.58
-        gate_status = StatementCandidateGateStatus.MANUAL_ONLY
-        gate_memo = "サービス・払先は関連していますが、比較可能な金額がないため自動確定しません。"
+        gate_memo = "金額・通貨は完全一致していますが、ご利用先・払先・サービスの関連は未確認です。"
     else:
-        # 金額近似だけ、またはサービスも金額も不足する候補は曖昧候補へ入れない。
+        # 金額・通貨の完全一致を確認できない領収書は、曖昧候補へ入れない。
         return None
 
     if manual_constraints:
@@ -803,7 +786,7 @@ def _base_match_memo(value: str) -> str:
 def _candidate_note(evaluation: ReceiptCandidateEvaluation) -> str:
     if evaluation.priority_tier == StatementCandidatePriorityTier.EXACT_AMOUNT_ONLY:
         return (
-            f"【領収書照合】金額と通貨が一意に一致した候補「{evaluation.receipt.display_filename}」を"
+            f"【領収書照合】金額と通貨が完全かつ一意に一致した候補「{evaluation.receipt.display_filename}」を"
             "提出済み領収書として割り当てました。ご利用先・払先・サービスの関連は未確認のため、管理者確認対象です。"
         )
     return (
@@ -1173,12 +1156,16 @@ def reconcile_card_statement_items(statement_id: int, *, preserve_manual: bool =
         ).replace(
             CARD_LAST4_EVIDENCE_RECONCILE_MARKER,
             "",
+        ).replace(
+            EXACT_AMOUNT_MATCHING_RECONCILE_MARKER,
+            "",
         ).strip()
         reconciliation_memo = (
             f"【照合結果】明細月 {statement.period_month:%Y-%m} "
             f"（対象領収書月 {target_receipt_month:%Y-%m} / 提出月 {statement.period_month:%Y-%m}）の"
-            f"全ユーザー領収書{len(receipts)}件を、必須条件ゲート→優先順位→同順位内スコアの順で照合し、"
-            f"領収書のカード末尾は一致時のみ補助+{CARD_LAST4_MATCH_SCORE}点（記載なしは中立）として、"
+            f"全ユーザー領収書{len(receipts)}件を、金額・通貨の完全一致（許容差なし）→必須条件ゲート→"
+            f"優先順位→同順位内スコアの順で照合し、領収書のカード末尾は一致時のみ補助+"
+            f"{CARD_LAST4_MATCH_SCORE}点（記載なしは中立）として、"
             f"適合候補{compatible_count}件、必須条件不一致で除外{rejected_count}件、"
             f"領収書未提出{missing_count}件、手動確認{manual_review_count}件です。"
         )

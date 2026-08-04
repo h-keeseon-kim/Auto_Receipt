@@ -212,7 +212,10 @@ def build_openai_content(
                 + "メールアドレスのローカル部（例: keeseon.kim）と Keeseon Kim のような表記揺れは関連ありとしてよい。"
                 + "会社名や部署名だけで個人との対応を断定できない場合は null にする。\n"
                 + relation_instruction.replace("3. ", "4. ", 1)
-                + "5. 支払日または領収書日付、合計金額、通貨を確認する。\n"
+                + "5. 支払日または領収書日付、実際に支払った最終合計金額、通貨を確認する。"
+                + "金額は Amount paid、Total、Paid、支払額、領収金額などの最終支払額を優先し、"
+                + "Subtotal、税抜額、税額、換算レート、参考表示だけを合計金額として返さない。"
+                + "同じ金額が本文とPayment historyに重複していても1回の支払額として返す。\n"
                 + filename_instruction.replace("5. ", "6. ", 1)
                 + "7. ファイル名はアプリ側で YYMMDD_ユーザー名_filename_label_金額_通貨 の形式に整形する。\n"
                 + "8. can_create_filename は、払先・filename_label・日付・金額・通貨を高い確度で読め、"

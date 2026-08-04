@@ -47,13 +47,14 @@
         <div class="message notice processing-text">AIで全社明細の情報を抽出中です。完了した解析結果はこの画面へ自動反映されます。</div>
     {% elif statement.items.all %}
         <div class="message notice statement-match-rule-notice">
-            <strong>照合順序：</strong> ①必須条件（対象月・金額/通貨・サービス/払先・利用者名の明確な矛盾）を確認し、
-            ②適合候補を優先度別に分け、③同じ優先度の候補だけを補助スコアで順位付けします。
+            <strong>照合順序：</strong> ①金額・通貨の完全一致、②対象月・サービス/払先・利用者名などの必須条件、
+            ③候補の優先順位、④同じ優先順位内の補助スコアの順で確認します。
+            <strong>金額に許容差はありません。</strong>外貨は同一通貨の外貨金額、円領収書は円請求額が完全一致する場合だけ候補になります。
+            1セント・1円でも異なる場合、または領収書の金額・通貨を抽出できない場合は「曖昧」候補へ含めず除外します。
             <strong>領収書のカード末尾は必須条件ではありません。</strong>
             末尾{{ target_card_last4 }}が記載されていれば補助スコア+40点、記載がなければ0点の中立です。
             別番号が明記されている場合も候補から除外せず、自動確定だけを止めて管理者確認へ送ります。
             明細書本体のカード末尾{{ target_card_last4 }}確認は、対象Pカードの明細かを確認するため別途維持します。
-            <strong>情報不明</strong>と<strong>明確な不一致</strong>を区別し、明確な不一致候補は点数に関係なく「曖昧」へ含めず除外します。
         </div>
         <div class="table-wrap scroll-box xlarge table-scroll-wide">
             <table class="statement-items-table global-statement-table">
@@ -145,7 +146,7 @@
                 </tbody>
             </table>
         </div>
-        <p class="muted small statement-highlight-legend"><span class="legend-swatch missing"></span> 黄色は必須条件を満たす提出済み領収書を確定できていない行、<span class="legend-swatch review"></span> 薄橙色は金額・通貨が一意に一致して領収書の提出は確認できたものの、ご利用先・サービスとの対応を手動確認する行です。明確な矛盾候補は曖昧判定に含めません。</p>
+        <p class="muted small statement-highlight-legend"><span class="legend-swatch missing"></span> 黄色は金額・通貨が完全一致する提出済み領収書を確定できていない行、<span class="legend-swatch review"></span> 薄橙色は金額・通貨が完全かつ一意に一致し、領収書の提出は確認できたものの、ご利用先・サービスとの対応を手動確認する行です。金額不一致・金額未抽出・通貨不一致は曖昧判定に含めません。</p>
     {% else %}
         <p class="muted center">解析結果はありません。</p>
     {% endif %}
