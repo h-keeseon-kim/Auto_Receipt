@@ -129,7 +129,7 @@ class ReceiptFlowTests(TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertContains(response, "data-auto-month-form")
         self.assertContains(response, "data-auto-submit-on-change")
-        self.assertContains(response, "月を選ぶと自動で切り替わります。")
+        self.assertNotContains(response, "月を選ぶと自動で切り替わります。")
         self.assertNotContains(response, ">表示</button>")
 
 
@@ -5396,7 +5396,7 @@ class FinalWorkflowAcceptanceTests(TestCase):
         self.assertEqual(response.status_code, 404)
 
     def test_version_file_is_present_without_web_display_requirement(self):
-        self.assertEqual(Path("VERSION").read_text(encoding="utf-8").strip(), "1.10.2")
+        self.assertEqual(Path("VERSION").read_text(encoding="utf-8").strip(), "1.10.3")
 
 
 @override_settings(PASSWORD_HASHERS=FAST_PASSWORD_HASHERS)
