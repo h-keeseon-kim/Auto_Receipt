@@ -61,6 +61,7 @@ from .models import (
     BillingType,
     CardStatement,
     CardStatementItem,
+    CardStatementReceiptEvidence,
     CardStatementStatus,
     MonthlyServiceDeclaration,
     Receipt,
@@ -2010,6 +2011,11 @@ def staff_user_month_status(request, user_id: int):
 
 
 def global_statement_queryset(period_month):
+    evidence_queryset = CardStatementReceiptEvidence.objects.select_related(
+        "receipt",
+        "receipt__submission__user",
+        "receipt__service__catalog_service",
+    ).order_by("sequence", "pk")
     item_queryset = (
         CardStatementItem.objects.select_related(
             "matched_user",
@@ -2019,6 +2025,7 @@ def global_statement_queryset(period_month):
             "matched_receipt__submission__user",
             "matched_receipt__service__catalog_service",
         )
+        .prefetch_related(Prefetch("receipt_evidences", queryset=evidence_queryset))
         .order_by("sequence", "pk")
     )
     return (
@@ -2042,6 +2049,7 @@ def staff_card_statements(request):
         "statement_count": statements.count(),
         "processing_count": statements.filter(status=CardStatementStatus.PROCESSING).count(),
         "missing_count": sum(statement.missing_receipt_count for statement in statements),
+        "review_count": sum(statement.manual_review_count for statement in statements),
     }
     return render(
         request,
@@ -2202,6 +2210,8 @@ def staff_update_statement_item(request, pk: int):
                 "match_memo",
             ]
         )
+        CardStatementReceiptEvidence.objects.filter(statement_item=item).delete()
+        reconcile_card_statement_items(item.statement_id, preserve_manual=True)
         messages.success(request, f"明細 {item.line_reference or item.pk} を領収書管理対象外にしました。")
     elif action == "required":
         item.receipt_required = True
@@ -2218,6 +2228,7 @@ def staff_update_statement_item(request, pk: int):
                 "match_memo",
             ]
         )
+        CardStatementReceiptEvidence.objects.filter(statement_item=item).delete()
         reconcile_card_statement_items(item.statement_id, preserve_manual=True)
         messages.success(request, f"明細 {item.line_reference or item.pk} を領収書照合対象へ戻しました。")
     else:

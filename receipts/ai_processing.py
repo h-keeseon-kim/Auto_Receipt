@@ -20,6 +20,7 @@ from .models import (
     Receipt,
     ReceiptAdminReviewStatus,
     ReceiptFilenameStatus,
+    ReceiptFinancialDocumentKind,
     ReceiptPeriodCheckStatus,
     receipt_month_for_submission,
 )
@@ -47,6 +48,11 @@ AI_RESET_FIELDS = [
     "ai_extracted_payee",
     "ai_extracted_recipient_name",
     "ai_extracted_card_last4",
+    "financial_document_kind",
+    "financial_transaction_reference",
+    "financial_related_reference",
+    "financial_transaction_components",
+    "financial_metadata_checked_at",
     "ai_receipt_month",
     "ai_period_check_status",
     "ai_period_check_memo",
@@ -120,6 +126,11 @@ def reset_ai_processing_state(receipt: Receipt, *, save: bool = False, clear_ext
     receipt.ai_extracted_payee = ""
     receipt.ai_extracted_recipient_name = ""
     receipt.ai_extracted_card_last4 = ""
+    receipt.financial_document_kind = ReceiptFinancialDocumentKind.UNKNOWN
+    receipt.financial_transaction_reference = ""
+    receipt.financial_related_reference = ""
+    receipt.financial_transaction_components = []
+    receipt.financial_metadata_checked_at = None
     receipt.ai_receipt_month = ""
     receipt.ai_period_check_status = ReceiptPeriodCheckStatus.NOT_CHECKED
     receipt.ai_period_check_memo = ""
@@ -329,6 +340,11 @@ def apply_ai_filename_to_receipt(receipt: Receipt):
     receipt.ai_extracted_payee = result.payee[:160] if result.payee else ""
     receipt.ai_extracted_recipient_name = result.recipient_name[:160] if result.recipient_name else ""
     receipt.ai_extracted_card_last4 = result.card_last4[-4:] if result.card_last4 else ""
+    receipt.financial_document_kind = result.financial_document_kind or ReceiptFinancialDocumentKind.UNKNOWN
+    receipt.financial_transaction_reference = (result.transaction_reference or "")[:160]
+    receipt.financial_related_reference = (result.related_transaction_reference or "")[:160]
+    receipt.financial_transaction_components = [dict(component) for component in (result.transaction_components or ())]
+    receipt.financial_metadata_checked_at = timezone.now()
 
     update_fields = [
         "generated_filename",
@@ -338,6 +354,11 @@ def apply_ai_filename_to_receipt(receipt: Receipt):
         "ai_extracted_payee",
         "ai_extracted_recipient_name",
         "ai_extracted_card_last4",
+        "financial_document_kind",
+        "financial_transaction_reference",
+        "financial_related_reference",
+        "financial_transaction_components",
+        "financial_metadata_checked_at",
         *apply_ai_checklist_to_receipt(receipt, result),
         *apply_period_check_to_receipt(receipt, result),
         "updated_at",
@@ -429,6 +450,11 @@ def claim_pending_receipts_for_ai_processing(queryset: QuerySet, *, limit: int |
             ai_extracted_payee="",
             ai_extracted_recipient_name="",
             ai_extracted_card_last4="",
+            financial_document_kind=ReceiptFinancialDocumentKind.UNKNOWN,
+            financial_transaction_reference="",
+            financial_related_reference="",
+            financial_transaction_components=[],
+            financial_metadata_checked_at=None,
             ai_receipt_month="",
             ai_period_check_status=ReceiptPeriodCheckStatus.NOT_CHECKED,
             ai_period_check_memo="",

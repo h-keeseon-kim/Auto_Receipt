@@ -16,6 +16,7 @@
 <section class="status-grid">
     <div class="card"><span class="label">明細書</span><strong>{{ stats.statement_count }}</strong></div>
     <div class="card"><span class="label">AI解析中</span><strong class="{% if stats.processing_count %}danger{% endif %}">{{ stats.processing_count }}</strong></div>
+    <div class="card"><span class="label">解析要確認</span><strong class="{% if stats.review_count %}warning{% endif %}">{{ stats.review_count }}</strong></div>
     <div class="card"><span class="label">未一致</span><strong class="{% if stats.missing_count %}danger{% endif %}">{{ stats.missing_count }}</strong></div>
 </section>
 
@@ -23,7 +24,7 @@
     <div class="section-header">
         <div>
             <h2>{{ selected_month|date:"Y年m月" }}分の全社明細書をアップロード</h2>
-            <p class="muted">ユーザーは選択しません。AIが全明細行を抽出した後、対象領収書月 {{ target_receipt_month|date:"Y年m月" }}の全ユーザー領収書と一対一で照合します。金額・通貨完全一致、利用日±1日、ご利用先・払先関連の3条件に一致しない明細行は赤色で表示します。</p>
+            <p class="muted">ユーザーは選択しません。AIが全明細行を抽出した後、対象領収書月 {{ target_receipt_month|date:"Y年m月" }}の全ユーザー領収書を全体一対一で照合します。通常取引に加え、請求・支払額から返金額を差し引いた純額も確認します。未一致は赤色、領収書は存在するものの解析項目が不足する場合は黄色で表示します。</p>
         </div>
     </div>
     <form method="post" enctype="multipart/form-data" action="{% url 'staff_upload_card_statement' %}" class="statement-upload-form">

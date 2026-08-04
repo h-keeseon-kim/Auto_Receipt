@@ -3843,7 +3843,7 @@ class FinalWorkflowAcceptanceTests(TestCase):
         )
         self.assertTrue(item.needs_highlight)
         self.assertEqual(item.receipt_status_label, "未提出")
-        self.assertIn("3条件をすべて満たす", item.match_memo)
+        self.assertIn("対応する提出書類", item.match_memo)
         self.assertIn("未一致1件", statement.ai_admin_memo)
 
     @mock.patch("receipts.statement_processing.generate_card_statement_analysis")
@@ -4725,7 +4725,7 @@ class FinalWorkflowAcceptanceTests(TestCase):
         self.assertTrue(payload.startswith(b"%PDF-"))
         rendered_text = "\n".join(captured_text)
         self.assertIn("2026年07月明細 / 対象領収書月 2026年06月", rendered_text)
-        self.assertIn("未一致（領収書未提出）", rendered_text)
+        self.assertIn("未一致・解析要確認", rendered_text)
         self.assertNotIn("未提出・手動確認対象", rendered_text)
         self.assertNotIn("未提出・確認対象", rendered_text)
         self.assertNotIn("ユーザー別 要対応サマリー", rendered_text)
@@ -4761,7 +4761,7 @@ class FinalWorkflowAcceptanceTests(TestCase):
         self.assertEqual(response.status_code, 404)
 
     def test_version_file_is_present_without_web_display_requirement(self):
-        self.assertEqual(Path("VERSION").read_text(encoding="utf-8").strip(), "1.11.0")
+        self.assertEqual(Path("VERSION").read_text(encoding="utf-8").strip(), "1.12.0")
 
 
 @override_settings(PASSWORD_HASHERS=FAST_PASSWORD_HASHERS)

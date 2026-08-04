@@ -120,6 +120,18 @@ class ReceiptAdminReviewStatus(models.TextChoices):
     CONFIRMED = "confirmed", "管理者確認済み"
 
 
+class ReceiptFinancialDocumentKind(models.TextChoices):
+    UNKNOWN = "unknown", "未判定"
+    CHARGE = "charge", "支払済み領収書"
+    INVOICE = "invoice", "請求書"
+    REFUND = "refund", "返金書類"
+
+
+class StatementReceiptEvidenceRole(models.TextChoices):
+    CHARGE = "charge", "請求・支払"
+    REFUND = "refund", "返金"
+
+
 class ResubmissionRequestStatus(models.TextChoices):
     OPEN = "open", "再提出待ち"
     RESOLVED = "resolved", "対応済み"
@@ -152,13 +164,19 @@ class CardStatementStatus(models.TextChoices):
 
 class StatementMatchStatus(models.TextChoices):
     MATCHED = "matched", "一致"
+    NEEDS_REVIEW = "needs_review", "解析要確認"
     AMBIGUOUS = "ambiguous", "旧曖昧（再照合対象）"
     UNMATCHED = "unmatched", "未一致"
     IGNORED = "ignored", "対象外"
 
 
 class StatementMatchReason(models.TextChoices):
-    AUTO_STRONG = "auto_strong", "日付・金額・請求先一致"
+    AUTO_STRONG = "auto_strong", "直接一致"
+    ORIGINAL_CHARGE = "original_charge", "返金書内の元決済確認"
+    LINKED_REFUND_NET = "linked_refund_net", "紐付返金相殺"
+    MERCHANT_REFUND_NET = "merchant_refund_net", "同一請求元内の近接返金相殺"
+    REFUND_ADJUSTED = "refund_adjusted", "旧返金調整（再照合対象）"
+    PARSE_REVIEW = "parse_review", "解析要確認"
     AUTO_AMOUNT_ONLY = "auto_amount_only", "旧金額一致（再照合対象）"
     MULTIPLE_COMPATIBLE = "multiple_compatible", "旧候補複数（再照合対象）"
     RECEIPT_COMPETITION = "receipt_competition", "旧領収書競合（再照合対象）"
@@ -769,6 +787,31 @@ class Receipt(models.Model):
     ai_extracted_payee = models.CharField("AI抽出払先", max_length=160, blank=True)
     ai_extracted_recipient_name = models.CharField("AI抽出利用者名（宛名）", max_length=160, blank=True)
     ai_extracted_card_last4 = models.CharField("AI抽出カード下4桁", max_length=4, blank=True)
+    financial_document_kind = models.CharField(
+        "金融書類区分",
+        max_length=20,
+        choices=ReceiptFinancialDocumentKind.choices,
+        default=ReceiptFinancialDocumentKind.UNKNOWN,
+        help_text="領収書・請求書・返金書類を区別し、カード明細との純額照合に利用します。",
+    )
+    financial_transaction_reference = models.CharField(
+        "取引参照番号", max_length=160, blank=True,
+        help_text="請求番号、Invoice番号、決済Transaction IDなど、同一取引を識別する参照番号です。",
+    )
+    financial_related_reference = models.CharField(
+        "関連取引参照番号", max_length=160, blank=True,
+        help_text="返金元のSale Transaction IDなど、元取引との関連を示す参照番号です。",
+    )
+    financial_transaction_components = models.JSONField(
+        "取引構成要素",
+        default=list,
+        blank=True,
+        help_text=(
+            "1つのPDFに含まれる元決済・返金・支払履歴を構造化して保存します。"
+            "カード明細照合ではファイル単位ではなく、この構成要素を一対一で使用します。"
+        ),
+    )
+    financial_metadata_checked_at = models.DateTimeField("金融メタデータ確認日時", null=True, blank=True)
     ai_receipt_month = models.CharField("AI判定領収書月", max_length=7, blank=True)
     ai_period_check_status = models.CharField(
         "AI対象領収書月確認ステータス",
@@ -1355,17 +1398,17 @@ class CardStatement(models.Model):
 
     @property
     def missing_receipt_count(self) -> int:
-        return self.items.filter(receipt_required=True).filter(
-            Q(matched_receipt__isnull=True)
-            | Q(matched_receipt__file_deleted_at__isnull=False)
-            | Q(matched_receipt__file="")
+        return self.items.filter(
+            receipt_required=True,
+            match_status=StatementMatchStatus.UNMATCHED,
         ).count()
 
     @property
     def manual_review_count(self) -> int:
-        """後方互換用。v1.11.0では未一致件数と同じ意味です。"""
-
-        return self.missing_receipt_count
+        return self.items.filter(
+            receipt_required=True,
+            match_status=StatementMatchStatus.NEEDS_REVIEW,
+        ).count()
 
     def purge_file(self, reason: str = "expired") -> bool:
         if not self.file_available:
@@ -1455,9 +1498,34 @@ class CardStatementItem(models.Model):
     def receipt_status_label(self) -> str:
         if not self.receipt_required:
             return "対象外"
-        if self.matched_receipt_id and self.matched_receipt and self.matched_receipt.file_available:
+        if self.match_status == StatementMatchStatus.MATCHED:
             return "提出済み"
+        if self.match_status == StatementMatchStatus.NEEDS_REVIEW:
+            return "解析要確認"
         return "未提出"
+
+    @property
+    def evidence_count(self) -> int:
+        if hasattr(self, "_prefetched_objects_cache") and "receipt_evidences" in self._prefetched_objects_cache:
+            return len(self.receipt_evidences.all())
+        return self.receipt_evidences.count()
+
+    @property
+    def evidence_calculation(self) -> str:
+        evidences = list(self.receipt_evidences.all())
+        if not evidences:
+            return ""
+        parts = []
+        for evidence in evidences:
+            sign = "-" if evidence.role == StatementReceiptEvidenceRole.REFUND else ("+" if parts else "")
+            amount = abs(evidence.signed_amount)
+            text = format(amount, "f").rstrip("0").rstrip(".") or "0"
+            role_label = "返金" if evidence.role == StatementReceiptEvidenceRole.REFUND else "決済"
+            parts.append(f"{sign}{text} {evidence.currency}（{role_label}）")
+        statement_amount = self.original_amount if self.original_amount is not None else self.amount_jpy
+        currency = self.original_currency or "JPY"
+        total_text = format(statement_amount, "f").rstrip("0").rstrip(".") if statement_amount is not None else "-"
+        return " ".join(parts) + f" = {total_text} {currency}"
 
     @property
     def matched_user_label(self) -> str:
@@ -1479,12 +1547,14 @@ class CardStatementItem(models.Model):
 
     @property
     def needs_highlight(self) -> bool:
-        return self.receipt_required and not (self.matched_receipt_id and self.matched_receipt and self.matched_receipt.file_available)
+        return self.receipt_required and self.match_status == StatementMatchStatus.UNMATCHED
 
     @property
     def row_class(self) -> str:
-        if self.needs_highlight:
+        if self.match_status == StatementMatchStatus.UNMATCHED and self.receipt_required:
             return "statement-unmatched-row"
+        if self.match_status == StatementMatchStatus.NEEDS_REVIEW:
+            return "statement-review-row"
         if self.match_status == StatementMatchStatus.IGNORED:
             return "statement-ignored-row"
         return "statement-matched-row"
@@ -1493,6 +1563,72 @@ class CardStatementItem(models.Model):
         return f"{self.statement} / {self.line_reference or self.sequence} / {self.merchant_name}"
 
 
+class CardStatementReceiptEvidence(models.Model):
+    statement_item = models.ForeignKey(
+        CardStatementItem,
+        on_delete=models.CASCADE,
+        related_name="receipt_evidences",
+        verbose_name="カード明細項目",
+    )
+    receipt = models.ForeignKey(
+        Receipt,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="statement_evidences",
+        verbose_name="証拠領収書",
+    )
+    component_key = models.CharField(
+        "構成要素キー",
+        max_length=160,
+        help_text="同じPDF内の元決済と返金を別々に識別するキーです。",
+    )
+    role = models.CharField(
+        "役割",
+        max_length=20,
+        choices=StatementReceiptEvidenceRole.choices,
+        default=StatementReceiptEvidenceRole.CHARGE,
+    )
+    sequence = models.PositiveIntegerField("並び順", default=0)
+    signed_amount = models.DecimalField("符号付き金額", max_digits=14, decimal_places=2)
+    currency = models.CharField("通貨", max_length=3)
+    event_date = models.DateField("取引日", null=True, blank=True)
+    document_kind_snapshot = models.CharField("書類区分", max_length=20, blank=True)
+    filename_snapshot = models.CharField("ファイル名", max_length=255)
+    payee_snapshot = models.CharField("払先", max_length=160, blank=True)
+    invoice_number_snapshot = models.CharField("請求書番号", max_length=160, blank=True)
+    transaction_reference_snapshot = models.CharField("取引参照番号", max_length=160, blank=True)
+    related_transaction_reference_snapshot = models.CharField("関連取引参照番号", max_length=160, blank=True)
+    source_label = models.CharField("抽出元", max_length=120, blank=True)
+    created_at = models.DateTimeField("作成日時", auto_now_add=True)
+
+    class Meta:
+        ordering = ["sequence", "id"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["statement_item", "receipt", "component_key"],
+                name="unique_statement_receipt_component_evidence",
+            )
+        ]
+        indexes = [
+            models.Index(fields=["statement_item", "role"], name="stmt_ev_item_role_idx"),
+            models.Index(fields=["receipt", "component_key"], name="stmt_ev_receipt_comp_idx"),
+        ]
+        verbose_name = "カード明細照合証拠"
+        verbose_name_plural = "カード明細照合証拠"
+
+    @property
+    def amount_display(self) -> str:
+        sign = "-" if self.signed_amount < 0 else "+"
+        text = format(abs(self.signed_amount), "f").rstrip("0").rstrip(".") or "0"
+        return f"{sign}{text} {self.currency}"
+
+    @property
+    def file_available(self) -> bool:
+        return bool(self.receipt_id and self.receipt and self.receipt.file_available)
+
+    def __str__(self) -> str:
+        return f"{self.statement_item} / {self.get_role_display()} / {self.filename_snapshot}"
 
 
 DEFAULT_INITIAL_SUBJECT = "{app_name}: {receipt_month}分の領収書アップロードをお願いします"

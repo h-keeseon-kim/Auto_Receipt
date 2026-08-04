@@ -27,6 +27,8 @@ BRAND = colors.HexColor("#2457D6")
 BORDER = colors.HexColor("#D7DFEA")
 HEADER_BG = colors.HexColor("#EEF3FF")
 UNMATCHED_BG = colors.HexColor("#FFD8D4")
+REVIEW_BG = colors.HexColor("#FFF0C7")
+MATCHED_BG = colors.HexColor("#F0FAF2")
 NEUTRAL_BG = colors.HexColor("#F5F7FA")
 WHITE = colors.white
 
@@ -77,17 +79,32 @@ def _amount_text(item: CardStatementItem) -> str:
     return "\n".join(values) if values else "-"
 
 
-def _receipt_available(item: CardStatementItem) -> bool:
-    return bool(item.matched_receipt_id and item.matched_receipt and item.matched_receipt.file_available)
-
-
 def _is_unmatched(item: CardStatementItem) -> bool:
-    return bool(item.receipt_required and not _receipt_available(item))
+    return bool(item.receipt_required and item.match_status == StatementMatchStatus.UNMATCHED)
+
+
+def _is_review(item: CardStatementItem) -> bool:
+    return bool(item.receipt_required and item.match_status == StatementMatchStatus.NEEDS_REVIEW)
+
+
+def _evidence_text(item: CardStatementItem) -> str:
+    evidences = list(item.receipt_evidences.all())
+    if not evidences:
+        return "-"
+    filenames = list(dict.fromkeys(evidence.filename_snapshot for evidence in evidences if evidence.filename_snapshot))
+    text = " / ".join(filenames) or "-"
+    if len(evidences) > 1 and item.evidence_calculation:
+        text += f"\n純額: {item.evidence_calculation}"
+    return text
 
 
 def _row_background(item: CardStatementItem):
     if _is_unmatched(item):
         return UNMATCHED_BG
+    if _is_review(item):
+        return REVIEW_BG
+    if item.match_status == StatementMatchStatus.MATCHED:
+        return MATCHED_BG
     if item.match_status == StatementMatchStatus.IGNORED:
         return NEUTRAL_BG
     return WHITE
@@ -221,9 +238,9 @@ def _metadata_table(statement: CardStatement, styles: dict[str, ParagraphStyle])
     return table
 
 
-def _unmatched_items_table(items: list[CardStatementItem], styles: dict[str, ParagraphStyle]) -> Table | Paragraph:
+def _action_items_table(items: list[CardStatementItem], styles: dict[str, ParagraphStyle]) -> Table | Paragraph:
     if not items:
-        return Paragraph("未一致の明細行はありません。", styles["notice"])
+        return Paragraph("未一致・解析要確認の明細行はありません。", styles["notice"])
 
     rows = [[
         _paragraph("No.", styles["header"]),
@@ -231,20 +248,23 @@ def _unmatched_items_table(items: list[CardStatementItem], styles: dict[str, Par
         _paragraph("ご利用先", styles["header"]),
         _paragraph("金額", styles["header"]),
         _paragraph("状態", styles["header"]),
-        _paragraph("判定メモ", styles["header"]),
+        _paragraph("提出証拠 / 判定メモ", styles["header"]),
     ]]
     for item in items:
+        evidence_and_memo = _evidence_text(item)
+        if item.match_memo:
+            evidence_and_memo += "\n" + _short_text(item.match_memo)
         rows.append([
             _paragraph(item.line_reference or item.sequence, styles["small"]),
             _paragraph(item.transaction_date.strftime("%Y-%m-%d") if item.transaction_date else "-", styles["small"]),
             _paragraph(item.merchant_name, styles["small"]),
             _paragraph(_amount_text(item), styles["small"]),
-            _paragraph("未一致", styles["small"]),
-            _paragraph(_short_text(item.match_memo or "-"), styles["tiny"]),
+            _paragraph(item.get_match_status_display(), styles["small"]),
+            _paragraph(evidence_and_memo, styles["tiny"]),
         ])
     table = Table(
         rows,
-        colWidths=[14 * mm, 23 * mm, 66 * mm, 30 * mm, 24 * mm, 101 * mm],
+        colWidths=[14 * mm, 23 * mm, 62 * mm, 30 * mm, 27 * mm, 102 * mm],
         repeatRows=1,
         splitByRow=1,
     )
@@ -257,8 +277,8 @@ def _unmatched_items_table(items: list[CardStatementItem], styles: dict[str, Par
         ("TOPPADDING", (0, 0), (-1, -1), 3),
         ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
     ]
-    for row_index in range(1, len(rows)):
-        commands.append(("BACKGROUND", (0, row_index), (-1, row_index), UNMATCHED_BG))
+    for row_index, item in enumerate(items, start=1):
+        commands.append(("BACKGROUND", (0, row_index), (-1, row_index), _row_background(item)))
     table.setStyle(TableStyle(commands))
     return table
 
@@ -274,11 +294,7 @@ def _all_items_table(items: list[CardStatementItem], styles: dict[str, Paragraph
         _paragraph("判定メモ", styles["header"]),
     ]]
     for item in items:
-        receipt_name = (
-            item.matched_receipt.display_filename
-            if item.matched_receipt_id and item.matched_receipt and item.matched_receipt.file_available
-            else "-"
-        )
+        receipt_name = _evidence_text(item)
         rows.append([
             _paragraph(item.line_reference or item.sequence, styles["small"]),
             _paragraph(item.transaction_date.strftime("%Y-%m-%d") if item.transaction_date else "-", styles["small"]),
@@ -329,7 +345,7 @@ def build_card_statement_reconciliation_pdf(statement: CardStatement) -> bytes:
     _register_fonts()
     styles = _styles()
     items = list(statement.items.all())
-    unmatched_items = [item for item in items if _is_unmatched(item)]
+    action_items = [item for item in items if _is_unmatched(item) or _is_review(item)]
 
     buffer = BytesIO()
     document = SimpleDocTemplate(
@@ -352,8 +368,8 @@ def build_card_statement_reconciliation_pdf(statement: CardStatement) -> bytes:
         ),
         _metadata_table(statement, styles),
         Spacer(1, 3 * mm),
-        Paragraph("未一致（領収書未提出）", styles["section"]),
-        _unmatched_items_table(unmatched_items, styles),
+        Paragraph("未一致・解析要確認", styles["section"]),
+        _action_items_table(action_items, styles),
         PageBreak(),
         Paragraph("全明細照合結果", styles["section"]),
         _all_items_table(items, styles),

@@ -1862,3 +1862,49 @@ body.tutorial-open { overflow-x: hidden; }
         grid-column: auto;
     }
 }
+
+/* v1.12.0: empirical statement reconciliation evidence and review states */
+.statement-result-card.statement-review-row {
+    background: #fff8df;
+    border-color: #e6c75f;
+    box-shadow: inset 4px 0 0 #c28a00;
+}
+
+.statement-evidence-list {
+    display: grid;
+    gap: 0.55rem;
+    margin: 0;
+    padding: 0;
+    list-style: none;
+}
+
+.statement-evidence-list li {
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr);
+    align-items: start;
+    gap: 0.35rem 0.55rem;
+    min-width: 0;
+    padding-bottom: 0.45rem;
+    border-bottom: 1px solid #e7ecf4;
+}
+
+.statement-evidence-list li:last-child {
+    padding-bottom: 0;
+    border-bottom: 0;
+}
+
+.statement-evidence-list li > .muted {
+    grid-column: 2;
+}
+
+.statement-evidence-list a,
+.statement-evidence-list span {
+    min-width: 0;
+    overflow-wrap: anywhere;
+    word-break: break-word;
+}
+
+.legend-swatch.review {
+    background: #fff0a8;
+    border-color: #c28a00;
+}
