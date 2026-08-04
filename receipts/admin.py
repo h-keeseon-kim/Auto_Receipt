@@ -3,7 +3,6 @@ from django.contrib import admin
 from .models import (
     CardStatement,
     CardStatementItem,
-    CardStatementMatchCandidate,
     EmailDeliveryLog,
     EmailReminderSchedule,
     MonthlyServiceDeclaration,
@@ -313,7 +312,6 @@ class CardStatementAdmin(admin.ModelAdmin):
         "card_last4",
         "statement_period",
         "missing_receipt_count",
-        "manual_review_count",
         "uploaded_at",
         "file_deleted_at",
     )
@@ -340,55 +338,3 @@ class CardStatementItemAdmin(admin.ModelAdmin):
     )
     list_filter = ("match_status", "receipt_required", "statement__period_month")
     search_fields = ("merchant_name", "line_reference", "matched_user__username", "matched_service__name", "match_memo")
-
-
-@admin.register(CardStatementMatchCandidate)
-class CardStatementMatchCandidateAdmin(admin.ModelAdmin):
-    list_display = (
-        "item",
-        "rank",
-        "receipt",
-        "gate_status",
-        "priority_tier",
-        "strength",
-        "score",
-        "confidence",
-        "amount_match",
-        "merchant_match",
-        "service_match",
-        "date_match",
-    )
-    list_filter = ("gate_status", "priority_tier", "strength", "amount_match", "currency_match", "merchant_match", "service_match", "date_match")
-    search_fields = (
-        "item__merchant_name",
-        "item__line_reference",
-        "receipt__original_filename",
-        "receipt__generated_filename",
-        "receipt__submission__user__username",
-        "rationale",
-    )
-    readonly_fields = (
-        "item",
-        "receipt",
-        "rank",
-        "score",
-        "confidence",
-        "strength",
-        "gate_status",
-        "priority_tier",
-        "gate_memo",
-        "amount_match",
-        "amount_match_basis",
-        "currency_match",
-        "merchant_match",
-        "service_match",
-        "date_match",
-        "rationale",
-        "created_at",
-    )
-
-    def has_add_permission(self, request):
-        return False
-
-    def has_change_permission(self, request, obj=None):
-        return False

@@ -342,16 +342,18 @@ def apply_ai_filename_to_receipt(receipt: Receipt):
         *apply_period_check_to_receipt(receipt, result),
         "updated_at",
     ]
-    if result.status == ReceiptFilenameStatus.GENERATED:
-        if result.payment_date is not None:
-            receipt.issued_on = result.payment_date
-            update_fields.append("issued_on")
-        if result.amount is not None:
-            receipt.amount = result.amount
-            update_fields.append("amount")
-        if result.currency:
-            receipt.currency = result.currency
-            update_fields.append("currency")
+    # ファイル名を確定できない「要確認」状態でも、AIまたはPDF埋め込みテキストから
+    # 明確に抽出できた日付・金額・通貨は保存する。従来はGENERATEDの場合だけ保存していたため、
+    # 宛名など別項目が未確認な領収書で、明細照合に必要な金額・日付まで失われていた。
+    if result.payment_date is not None:
+        receipt.issued_on = result.payment_date
+        update_fields.append("issued_on")
+    if result.amount is not None:
+        receipt.amount = result.amount
+        update_fields.append("amount")
+    if result.currency:
+        receipt.currency = result.currency
+        update_fields.append("currency")
 
     # AIが明確な不一致を検出しても、領収書は保持し、再提出依頼も自動作成しない。
     # 管理者画面で領収書本体を確認し、「再提出を依頼する」か

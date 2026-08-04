@@ -5,9 +5,10 @@ import json
 import mimetypes
 import re
 import unicodedata
-from dataclasses import dataclass
-from datetime import date
+from dataclasses import dataclass, replace
+from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
+from io import BytesIO
 from pathlib import Path
 from typing import Any
 
@@ -16,6 +17,22 @@ from django.conf import settings
 from .models import ReceiptFilenameStatus
 
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp"}
+PDF_TEXT_MAX_CHARS = 16000
+
+
+@dataclass(frozen=True)
+class ReceiptTextFallback:
+    """PDFの埋め込みテキストから安全に補完できた領収書情報。"""
+
+    text: str = ""
+    payee: str = ""
+    recipient_name: str = ""
+    recipient_name_matches_user: bool | None = None
+    recipient_name_relation_reason: str = ""
+    payment_date: date | None = None
+    amount: Decimal | None = None
+    currency: str = ""
+    confidence: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -54,6 +71,340 @@ def ai_filename_enabled() -> bool:
     )
 
 
+def extract_embedded_pdf_text(
+    *,
+    file_bytes: bytes,
+    original_filename: str,
+    content_type: str,
+) -> str:
+    """テキスト埋め込み型PDFから文字列を取得する。
+
+    OpenAIへは従来どおりPDF本体も渡すが、PDF内に検索可能なテキストがある場合は
+    同じ内容を明示的なテキストとしても渡し、表組みや小さい文字の読み落としを減らす。
+    画像PDFにOCRを実行する処理ではない。
+    """
+
+    suffix = Path(original_filename or "").suffix.lower()
+    normalized_content_type = normalize_content_type(original_filename, content_type)
+    if suffix != ".pdf" and normalized_content_type != "application/pdf":
+        return ""
+
+    try:
+        from pypdf import PdfReader
+    except Exception:
+        return ""
+
+    try:
+        reader = PdfReader(BytesIO(file_bytes))
+        page_texts: list[str] = []
+        for page in reader.pages:
+            extracted = page.extract_text() or ""
+            if extracted.strip():
+                page_texts.append(extracted)
+        text = "\n".join(page_texts)
+    except Exception:
+        return ""
+
+    text = unicodedata.normalize("NFKC", text)
+    text = text.replace("\u00a0", " ")
+    text = re.sub(r"[ \t]+", " ", text)
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    return text.strip()[:PDF_TEXT_MAX_CHARS]
+
+
+def _parse_labeled_date_value(value: str) -> date | None:
+    value = unicodedata.normalize("NFKC", value or "").strip()
+    value = re.sub(r"\s+", " ", value)
+    if not value:
+        return None
+
+    iso_match = re.search(r"\b(20\d{2})[-/.](\d{1,2})[-/.](\d{1,2})\b", value)
+    if iso_match:
+        try:
+            return date(int(iso_match.group(1)), int(iso_match.group(2)), int(iso_match.group(3)))
+        except ValueError:
+            pass
+
+    jp_match = re.search(r"\b(20\d{2})年\s*(\d{1,2})月\s*(\d{1,2})日", value)
+    if jp_match:
+        try:
+            return date(int(jp_match.group(1)), int(jp_match.group(2)), int(jp_match.group(3)))
+        except ValueError:
+            pass
+
+    dmy_match = re.search(r"\b(\d{1,2})[./](\d{1,2})[./](20\d{2})\b", value)
+    if dmy_match:
+        try:
+            return date(int(dmy_match.group(3)), int(dmy_match.group(2)), int(dmy_match.group(1)))
+        except ValueError:
+            pass
+
+    month_name_match = re.search(
+        r"\b(January|February|March|April|May|June|July|August|September|October|November|December)\s+"
+        r"(\d{1,2})(?:st|nd|rd|th)?[,]?\s+(20\d{2})\b",
+        value,
+        flags=re.I,
+    )
+    if month_name_match:
+        try:
+            return datetime.strptime(
+                f"{month_name_match.group(1)} {month_name_match.group(2)} {month_name_match.group(3)}",
+                "%B %d %Y",
+            ).date()
+        except ValueError:
+            pass
+    return None
+
+
+def _extract_labeled_payment_date(text: str) -> date | None:
+    if not text:
+        return None
+    labels = (
+        r"payment\s+date",
+        r"date\s+paid",
+        r"paid\s+on",
+        r"issue\s+date",
+        r"invoice\s+date",
+        r"tax\s+point\s+date",
+        r"支払日",
+        r"決済日",
+        r"領収日",
+        r"発行日",
+    )
+    for label in labels:
+        for match in re.finditer(rf"(?im)^.*?{label}\s*[:：]?\s*(.+)$", text):
+            parsed = _parse_labeled_date_value(match.group(1))
+            if parsed:
+                return parsed
+    return None
+
+
+_CURRENCY_CODES = ("JPY", "USD", "EUR", "GBP", "AUD", "CAD", "CHF", "CNY", "KRW", "SGD", "HKD", "NZD", "INR")
+_CURRENCY_TOKEN_PATTERN = r"(?:" + "|".join(_CURRENCY_CODES) + r"|¥|￥|\$|€|£)"
+_AMOUNT_TOKEN_PATTERN = r"[-+]?\d[\d,]*(?:\.\d+)?"
+
+
+def _normalize_currency_token(value: str) -> str:
+    value = unicodedata.normalize("NFKC", value or "").strip().upper()
+    return {
+        "¥": "JPY",
+        "￥": "JPY",
+        "$": "USD",
+        "€": "EUR",
+        "£": "GBP",
+    }.get(value, value if value in _CURRENCY_CODES else "")
+
+
+def _extract_amount_currency_from_line(line: str) -> tuple[Decimal | None, str]:
+    line = unicodedata.normalize("NFKC", line or "")
+    patterns = (
+        rf"(?P<currency>{_CURRENCY_TOKEN_PATTERN})\s*(?P<amount>{_AMOUNT_TOKEN_PATTERN})",
+        rf"(?P<amount>{_AMOUNT_TOKEN_PATTERN})\s*(?P<currency>{_CURRENCY_TOKEN_PATTERN})",
+    )
+    for pattern in patterns:
+        matches = list(re.finditer(pattern, line, flags=re.I))
+        if not matches:
+            continue
+        # Amount paid / PAIDの行には同じ金額が複数出ない前提だが、出た場合は最後の値を優先する。
+        for match in reversed(matches):
+            amount = parse_amount(match.group("amount"))
+            currency = _normalize_currency_token(match.group("currency"))
+            if amount is not None and currency:
+                return amount, currency
+    return None, ""
+
+
+def _extract_labeled_amount_currency(text: str) -> tuple[Decimal | None, str]:
+    if not text:
+        return None, ""
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    label_patterns = (
+        r"\bamount\s+paid\b",
+        r"^paid\s*[:：]",
+        r"\btotal\s+paid\b",
+        r"^grand\s+total\b",
+        r"^total\s*[:：]",
+        r"^total\s+amount\b",
+        r"^支払(?:済)?額\b",
+        r"^領収金額\b",
+        r"^合計\s*[:：]",
+    )
+    for label_pattern in label_patterns:
+        for line in lines:
+            if not re.search(label_pattern, line, flags=re.I):
+                continue
+            amount, currency = _extract_amount_currency_from_line(line)
+            if amount is not None and currency:
+                return amount, currency
+
+    # "$22.00 paid on ..." のように金額が先に書かれる形式を補完する。
+    for line in lines:
+        if not re.search(r"\bpaid\b", line, flags=re.I):
+            continue
+        amount, currency = _extract_amount_currency_from_line(line)
+        if amount is not None and currency:
+            return amount, currency
+    return None, ""
+
+
+def _extract_probable_payee(text: str) -> str:
+    if not text:
+        return ""
+    corporate_pattern = re.compile(
+        r"\b(?:PBC|INCORPORATED|INC\.?|LLC|LTD\.?|LIMITED|CORPORATION|CORP\.?|GMBH|S\.?R\.?O\.?)\b"
+        r"|株式会社|合同会社|有限会社",
+        flags=re.I,
+    )
+    excluded = re.compile(r"invoice|receipt|bill\s+to|page\s+\d|reference|order|customer|address", flags=re.I)
+    for raw_line in text.splitlines()[:80]:
+        line = normalize_payee(raw_line)
+        if not line or len(line) > 100 or excluded.search(line):
+            continue
+        if corporate_pattern.search(line):
+            return line
+
+    domain_match = re.search(r"(?im)^www\.([a-z0-9-]+)\.[a-z.]+\s*$", text)
+    if domain_match:
+        return domain_match.group(1).replace("-", " ").title()
+    return ""
+
+
+def _extract_expected_email(expected_recipient_context: str) -> str:
+    emails = re.findall(r"[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}", expected_recipient_context or "", flags=re.I)
+    return emails[0].lower() if emails else ""
+
+
+def extract_receipt_text_fallback(
+    text: str,
+    *,
+    expected_recipient_context: str = "",
+) -> ReceiptTextFallback:
+    """埋め込みテキストから、ラベルが明確な項目だけを抽出する。"""
+
+    if not text:
+        return ReceiptTextFallback()
+
+    payee = _extract_probable_payee(text)
+    payment_date = _extract_labeled_payment_date(text)
+    amount, currency = _extract_labeled_amount_currency(text)
+    expected_email = _extract_expected_email(expected_recipient_context)
+    lowered_text = text.lower()
+    recipient_name = ""
+    recipient_match: bool | None = None
+    recipient_reason = ""
+    if expected_email and expected_email in lowered_text:
+        recipient_name = expected_email
+        recipient_match = True
+        recipient_reason = "領収書本文に対象ユーザーのメールアドレスが記載されています。"
+
+    core_count = sum(bool(value) for value in (payee, payment_date, amount is not None, currency))
+    confidence = 0.0
+    if core_count == 4:
+        confidence = 0.96
+    elif core_count >= 3:
+        confidence = 0.88
+    elif core_count >= 2:
+        confidence = 0.74
+
+    return ReceiptTextFallback(
+        text=text,
+        payee=payee,
+        recipient_name=recipient_name,
+        recipient_name_matches_user=recipient_match,
+        recipient_name_relation_reason=recipient_reason,
+        payment_date=payment_date,
+        amount=amount,
+        currency=currency,
+        confidence=confidence,
+    )
+
+
+def _normalized_relation_text(value: str) -> str:
+    value = unicodedata.normalize("NFKC", value or "").lower()
+    value = re.sub(r"\b(?:pbc|incorporated|inc|llc|ltd|limited|corporation|corp|gmbh|s\.?r\.?o)\b", " ", value)
+    value = re.sub(r"[^a-z0-9ぁ-んァ-ヶ一-龠]+", " ", value)
+    return " ".join(value.split())
+
+
+def infer_context_relation(payee: str, context: str) -> bool | None:
+    """払先とサービス名・払先候補・その他メモの明確な文字関連だけを補助判定する。"""
+
+    left = _normalized_relation_text(payee)
+    right = _normalized_relation_text(context)
+    if not left or not right:
+        return None
+    if left in right or right in left:
+        return True
+    left_tokens = {token for token in left.split() if len(token) >= 4}
+    right_tokens = {token for token in right.split() if len(token) >= 4}
+    return True if left_tokens & right_tokens else None
+
+
+def merge_payload_with_text_fallback(
+    payload: dict[str, Any],
+    fallback: ReceiptTextFallback,
+    *,
+    service_context: str,
+) -> tuple[dict[str, Any], bool]:
+    merged = dict(payload)
+    fallback_used = False
+
+    def fill(field: str, value: Any):
+        nonlocal fallback_used
+        if value in (None, ""):
+            return
+        if merged.get(field) in (None, ""):
+            merged[field] = value
+            fallback_used = True
+
+    fill("payee", fallback.payee)
+    fill("filename_label", fallback.payee)
+    fill("recipient_name", fallback.recipient_name)
+    fill("payment_date", fallback.payment_date.isoformat() if fallback.payment_date else None)
+    fill("amount", str(fallback.amount) if fallback.amount is not None else None)
+    fill("currency", fallback.currency)
+
+    if merged.get("recipient_name_matches_user") is None and fallback.recipient_name_matches_user is not None:
+        merged["recipient_name_matches_user"] = fallback.recipient_name_matches_user
+        merged["recipient_name_relation_reason"] = (
+            merged.get("recipient_name_relation_reason") or fallback.recipient_name_relation_reason
+        )
+        fallback_used = True
+
+    if merged.get("service_payee_related") is None:
+        relation = infer_context_relation(str(merged.get("payee") or fallback.payee), service_context)
+        if relation is not None:
+            merged["service_payee_related"] = relation
+            merged["service_payee_relation_reason"] = (
+                merged.get("service_payee_relation_reason")
+                or "PDF埋め込みテキストの払先と、登録サービス・払先候補または入力メモに明確な文字関連があります。"
+            )
+            fallback_used = True
+
+    if fallback_used:
+        try:
+            merged["confidence"] = max(float(merged.get("confidence") or 0), fallback.confidence)
+        except (TypeError, ValueError):
+            merged["confidence"] = fallback.confidence
+
+        core_ready = bool(
+            merged.get("filename_label")
+            and merged.get("payment_date")
+            and merged.get("amount") not in (None, "")
+            and merged.get("currency")
+        )
+        card_mismatch = merged.get("card_last4_matches_target") is False
+        relation_ready = merged.get("service_payee_related") is True
+        if core_ready and relation_ready and not card_mismatch:
+            merged["can_create_filename"] = True
+            if merged.get("reason"):
+                merged["reason"] = str(merged["reason"]) + " PDF埋め込みテキストで不足項目を補完しました。"
+            else:
+                merged["reason"] = "PDF埋め込みテキストで不足項目を補完しました。"
+
+    return merged, fallback_used
+
+
 def generate_ai_receipt_filename(
     *,
     file_bytes: bytes,
@@ -70,6 +421,24 @@ def generate_ai_receipt_filename(
 
     失敗してもアップロード処理を止めないため、呼び出し元が管理者メモとして保存できる結果を返す。
     """
+
+    embedded_text = extract_embedded_pdf_text(
+        file_bytes=file_bytes,
+        original_filename=original_filename,
+        content_type=content_type,
+    )
+    text_fallback = extract_receipt_text_fallback(
+        embedded_text,
+        expected_recipient_context=expected_recipient_context,
+    )
+    service_context = " / ".join(
+        part
+        for part in (
+            receipt_memo if is_extra else service_display_name,
+            service_match_hints,
+        )
+        if part
+    )
 
     if not ai_filename_enabled():
         return ReceiptFilenameResult(
@@ -118,13 +487,19 @@ def generate_ai_receipt_filename(
                         service_match_hints=service_match_hints,
                         receipt_memo=receipt_memo,
                         is_extra=is_extra,
+                        embedded_text=embedded_text,
                     ),
                 },
             ],
             text={"format": receipt_filename_schema()},
-            max_output_tokens=900,
+            max_output_tokens=1400,
         )
         payload = json.loads(extract_response_text(response))
+        payload, _ = merge_payload_with_text_fallback(
+            payload,
+            text_fallback,
+            service_context=service_context,
+        )
         return build_result_from_payload(
             payload,
             original_filename=original_filename,
@@ -132,6 +507,61 @@ def generate_ai_receipt_filename(
             is_extra=is_extra,
         )
     except Exception as exc:
+        fallback_relation = infer_context_relation(text_fallback.payee, service_context)
+        fallback_core_ready = bool(
+            text_fallback.payee
+            and text_fallback.payment_date
+            and text_fallback.amount is not None
+            and text_fallback.currency
+        )
+        fallback_payload = {
+            "card_last4": None,
+            "card_last4_matches_target": None,
+            "payee": text_fallback.payee or None,
+            "recipient_name": text_fallback.recipient_name or None,
+            "recipient_name_matches_user": text_fallback.recipient_name_matches_user,
+            "recipient_name_relation_reason": text_fallback.recipient_name_relation_reason,
+            "filename_label": text_fallback.payee or None,
+            "service_payee_related": fallback_relation,
+            "service_payee_relation_reason": (
+                "PDF埋め込みテキストの払先と、登録サービス・払先候補または入力メモに明確な文字関連があります。"
+                if fallback_relation is True
+                else ""
+            ),
+            "payment_date": text_fallback.payment_date.isoformat() if text_fallback.payment_date else None,
+            "amount": str(text_fallback.amount) if text_fallback.amount is not None else None,
+            "currency": text_fallback.currency or None,
+            "can_create_filename": bool(fallback_core_ready and fallback_relation is True),
+            "confidence": text_fallback.confidence,
+            "reason": f"OpenAI API呼び出しに失敗しました: {exc.__class__.__name__}: {exc}",
+        }
+        fallback_payload, fallback_used = merge_payload_with_text_fallback(
+            fallback_payload,
+            text_fallback,
+            service_context=service_context,
+        )
+        if fallback_used or any(
+            (
+                text_fallback.payment_date,
+                text_fallback.amount is not None,
+                text_fallback.currency,
+                text_fallback.payee,
+            )
+        ):
+            fallback_result = build_result_from_payload(
+                fallback_payload,
+                original_filename=original_filename,
+                user_filename_part=user_filename_part,
+                is_extra=is_extra,
+            )
+            fallback_memo = (
+                f"OpenAI API呼び出しに失敗しましたが、PDF埋め込みテキストから抽出できる項目を補完しました: "
+                f"{exc.__class__.__name__}: {exc}"
+            )
+            if fallback_result.admin_memo:
+                fallback_memo += " " + fallback_result.admin_memo
+            return replace(fallback_result, admin_memo=fallback_memo[:2000])
+
         return ReceiptFilenameResult(
             status=ReceiptFilenameStatus.FAILED,
             admin_memo=f"OpenAI APIによるファイル名修正に失敗しました: {exc.__class__.__name__}: {exc}",
@@ -149,6 +579,7 @@ def build_openai_content(
     service_match_hints: str = "",
     receipt_memo: str = "",
     is_extra: bool = False,
+    embedded_text: str = "",
 ) -> list[dict[str, Any]]:
     target = target_card_last4()
     if is_extra:
@@ -189,6 +620,17 @@ def build_openai_content(
         )
         relation_name = "登録サービス名と払先"
 
+    embedded_text_instruction = ""
+    if embedded_text:
+        embedded_text_instruction = (
+            "\nこのPDFには検索可能な埋め込みテキストがあります。画像表示と同じ領収書内容です。"
+            "表組みや小さい文字を読み落とさないため、次のテキストも必ず確認してください。"
+            "画像とテキストが矛盾する場合は、最終支払額・支払日・払先が明確にラベル付けされた記載を優先してください。\n"
+            "--- PDF埋め込みテキスト開始 ---\n"
+            + embedded_text[:PDF_TEXT_MAX_CHARS]
+            + "\n--- PDF埋め込みテキスト終了 ---\n"
+        )
+
     return [
         build_file_input_item(file_bytes=file_bytes, filename=original_filename, content_type=content_type),
         {
@@ -224,6 +666,7 @@ def build_openai_content(
                 + "別のカード末尾が明記された場合は reason に記載し、管理者確認対象とする。"
                 + "利用者名・宛名の一致はファイル名作成可否には含めず、独立した管理者確認項目として返す。"
                 + "作成が難しい場合は false にし、reason に管理者が確認すべき理由を日本語で短く書く。"
+                + embedded_text_instruction
             ),
         },
     ]
@@ -573,7 +1016,12 @@ def normalize_filename_label(value: str) -> str:
 
 def sanitize_company_name_for_filename(value: str, fallback: str = "Unknown") -> str:
     value = unicodedata.normalize("NFKC", value or "").strip()
-    value = re.sub(r"\b(PBC|INCORPORATED|INC|LLC|L\.?L\.?C|LTD|LIMITED|CORPORATION|CORP|COMPANY|CO|GMBH|S\.?A\.?|K\.?K\.?|G\.?K\.?)\b\.?", "", value, flags=re.I)
+    value = re.sub(
+        r"\b(PBC|INCORPORATED|INC|LLC|L\.?L\.?C|LTD|LIMITED|CORPORATION|CORP|COMPANY|CO|GMBH|S\.?R\.?O\.?|S\.?A\.?|K\.?K\.?|G\.?K\.?)\b\.?",
+        "",
+        value,
+        flags=re.I,
+    )
     value = re.sub(r"[,、，]+", " ", value)
     return sanitize_filename_part(value, fallback=fallback)
 

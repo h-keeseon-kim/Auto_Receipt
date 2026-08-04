@@ -83,10 +83,10 @@ def generate_card_statement_analysis(
     period_month: date,
     service_catalogs: Iterable[Any],
 ) -> StatementAnalysisResult:
-    """明細書の全行を抽出し、サービスマスター候補までAIで判定する。
+    """明細書の全行と領収書要否を抽出する。
 
-    明細書はユーザー単位ではなく会社全体のものとして扱う。ユーザーの特定と
-    領収書の一対一照合は、抽出後にサーバー側で全ユーザーの領収書を使って行う。
+    明細書はユーザー単位ではなく会社全体のものとして扱う。利用者は特定せず、
+    領収書との最終照合は抽出後にサーバー側で金額・日付・払先の3条件を使って行う。
     """
 
     if not statement_ai_enabled():
@@ -118,7 +118,7 @@ def generate_card_statement_analysis(
         "この場合、領収書照合の対象月は前月の2026-06で、ユーザー提出月は2026-07です。\n"
         "各明細について、明細番号、ご利用先、利用日、当月請求金額（円）、外貨金額・通貨を抽出してください。\n"
         "service_catalog_id は次のサービスマスター一覧の id からだけ選びます。"
-        "ユーザーはここでは特定しません。サービス名とカード明細の請求名義は完全一致しない場合があります。"
+        "ユーザーはここでも最終照合でも特定しません。service_catalog_idは領収書要否の分類補助であり、最終照合の候補作成には使いません。サービス名とカード明細の請求名義は完全一致しない場合があります。"
         "ChatGPT と OPENAI *CHATGPT / OPENAI.COM、Claude と CLAUDE.AI / ANTHROPIC.COM のような"
         "運営会社・請求名義の関連も考慮してください。\n"
         f"サービスマスター一覧: {json.dumps(catalogs, ensure_ascii=False)}\n"
@@ -146,8 +146,9 @@ def generate_card_statement_analysis(
                         {
                             "type": "input_text",
                             "text": (
-                                "あなたは法人カード明細と、複数ユーザーが提出した前月分領収書を照合する監査補助AIです。"
-                                "まず明細表の全行を正確に抽出し、確信できない関係は曖昧として残してください。"
+                                "あなたは法人カード明細の全行を正確に抽出する監査補助AIです。"
+                                "利用者は特定しません。最終的な領収書照合はサーバー側で金額・日付・払先を比較して行います。"
+                                "ここでは明細番号、利用日、ご利用先、円額、外貨額・通貨、領収書要否を正確に抽出してください。"
                             ),
                         }
                     ],
@@ -306,11 +307,6 @@ def build_statement_result_from_payload(
             reason=str(raw.get("reason") or "").strip()[:2000],
         )
         items.append(item)
-        if item.receipt_required and item.match_status in {
-            StatementMatchStatus.AMBIGUOUS,
-            StatementMatchStatus.UNMATCHED,
-        }:
-            issues.append(f"明細{item.line_reference}「{item.merchant_name}」はサービス対応を要確認です。")
 
     if not items:
         issues.append("利用明細行を抽出できませんでした。")

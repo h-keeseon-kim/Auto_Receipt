@@ -151,39 +151,21 @@ class CardStatementStatus(models.TextChoices):
 
 
 class StatementMatchStatus(models.TextChoices):
-    MATCHED = "matched", "サービス一致"
-    AMBIGUOUS = "ambiguous", "曖昧"
+    MATCHED = "matched", "一致"
+    AMBIGUOUS = "ambiguous", "旧曖昧（再照合対象）"
     UNMATCHED = "unmatched", "未一致"
     IGNORED = "ignored", "対象外"
 
 
-class StatementCandidateStrength(models.TextChoices):
-    STRONG = "strong", "強い候補"
-    AMOUNT_ONLY = "amount_only", "金額候補"
-    POSSIBLE = "possible", "参考候補"
-
-
-class StatementCandidateGateStatus(models.TextChoices):
-    AUTO_ELIGIBLE = "auto_eligible", "自動照合対象"
-    MANUAL_ONLY = "manual_only", "手動確認のみ"
-    REJECTED = "rejected", "必須条件不一致"
-
-
-class StatementCandidatePriorityTier(models.TextChoices):
-    EXACT_IDENTITY = "exact_identity", "優先度1: 金額・通貨完全一致＋サービス/払先一致"
-    EXACT_AMOUNT_ONLY = "exact_amount_only", "優先度2: 金額・通貨完全一致・関係要確認"
-    REJECTED = "rejected", "除外: 金額未確認または必須条件不一致"
-
-
 class StatementMatchReason(models.TextChoices):
-    AUTO_STRONG = "auto_strong", "必須条件一致"
-    AUTO_AMOUNT_ONLY = "auto_amount_only", "金額一致・関係要確認"
-    MULTIPLE_COMPATIBLE = "multiple_compatible", "適合候補複数"
-    RECEIPT_COMPETITION = "receipt_competition", "同一領収書が複数明細で競合"
-    USER_AMBIGUOUS = "user_ambiguous", "利用者未特定"
-    INSUFFICIENT_EVIDENCE = "insufficient_evidence", "情報不足・手動確認"
-    SERVICE_ONLY = "service_only", "サービス特定・領収書未提出"
-    NO_COMPATIBLE_RECEIPT = "no_compatible_receipt", "適合する領収書なし"
+    AUTO_STRONG = "auto_strong", "日付・金額・請求先一致"
+    AUTO_AMOUNT_ONLY = "auto_amount_only", "旧金額一致（再照合対象）"
+    MULTIPLE_COMPATIBLE = "multiple_compatible", "旧候補複数（再照合対象）"
+    RECEIPT_COMPETITION = "receipt_competition", "旧領収書競合（再照合対象）"
+    USER_AMBIGUOUS = "user_ambiguous", "旧利用者未特定（再照合対象）"
+    INSUFFICIENT_EVIDENCE = "insufficient_evidence", "旧情報不足（再照合対象）"
+    SERVICE_ONLY = "service_only", "旧サービス特定（再照合対象）"
+    NO_COMPATIBLE_RECEIPT = "no_compatible_receipt", "領収書未提出"
     MANUAL_CONFIRMED = "manual_confirmed", "管理者確定"
     IGNORED = "ignored", "対象外"
 
@@ -1156,8 +1138,6 @@ class Receipt(models.Model):
     def purge_file(self, reason: str = "expired") -> bool:
         if not self.file_available:
             return False
-        # ファイルが存在しない領収書を、明細照合候補として残さない。
-        self.statement_match_candidates.all().delete()
         storage = self.file.storage
         name = self.file.name
         if name and storage.exists(name):
@@ -1383,10 +1363,9 @@ class CardStatement(models.Model):
 
     @property
     def manual_review_count(self) -> int:
-        return self.items.filter(
-            Q(match_status__in=[StatementMatchStatus.AMBIGUOUS, StatementMatchStatus.UNMATCHED])
-            | Q(receipt_required=True, matched_user__isnull=True)
-        ).distinct().count()
+        """後方互換用。v1.11.0では未一致件数と同じ意味です。"""
+
+        return self.missing_receipt_count
 
     def purge_file(self, reason: str = "expired") -> bool:
         if not self.file_available:
@@ -1477,10 +1456,8 @@ class CardStatementItem(models.Model):
         if not self.receipt_required:
             return "対象外"
         if self.matched_receipt_id and self.matched_receipt and self.matched_receipt.file_available:
-            return "領収書あり"
-        if self.matched_service_id or self.matched_catalog_service_id:
-            return "領収書未提出"
-        return "要確認"
+            return "提出済み"
+        return "未提出"
 
     @property
     def matched_user_label(self) -> str:
@@ -1507,126 +1484,15 @@ class CardStatementItem(models.Model):
     @property
     def row_class(self) -> str:
         if self.needs_highlight:
-            return "statement-missing-row"
-        if self.match_status in {StatementMatchStatus.AMBIGUOUS, StatementMatchStatus.UNMATCHED}:
-            return "manual-review-row"
-        return ""
+            return "statement-unmatched-row"
+        if self.match_status == StatementMatchStatus.IGNORED:
+            return "statement-ignored-row"
+        return "statement-matched-row"
 
     def __str__(self) -> str:
         return f"{self.statement} / {self.line_reference or self.sequence} / {self.merchant_name}"
 
 
-class CardStatementMatchCandidate(models.Model):
-    """カード明細行と提出済み領収書の照合候補。"""
-
-    item = models.ForeignKey(
-        CardStatementItem,
-        on_delete=models.CASCADE,
-        related_name="match_candidates",
-        verbose_name="明細行",
-    )
-    receipt = models.ForeignKey(
-        Receipt,
-        on_delete=models.CASCADE,
-        related_name="statement_match_candidates",
-        verbose_name="候補領収書",
-    )
-    rank = models.PositiveSmallIntegerField("候補順位")
-    score = models.IntegerField("照合スコア", default=0)
-    confidence = models.FloatField("候補信頼度", default=0)
-    strength = models.CharField(
-        "候補種別",
-        max_length=20,
-        choices=StatementCandidateStrength.choices,
-        default=StatementCandidateStrength.POSSIBLE,
-    )
-    gate_status = models.CharField(
-        "必須条件判定",
-        max_length=20,
-        choices=StatementCandidateGateStatus.choices,
-        default=StatementCandidateGateStatus.MANUAL_ONLY,
-    )
-    priority_tier = models.CharField(
-        "優先順位",
-        max_length=30,
-        choices=StatementCandidatePriorityTier.choices,
-        default=StatementCandidatePriorityTier.REJECTED,
-    )
-    gate_memo = models.TextField("必須条件メモ", blank=True)
-    amount_match = models.BooleanField("金額一致", default=False)
-    amount_match_basis = models.CharField("金額一致基準", max_length=20, blank=True)
-    currency_match = models.BooleanField("通貨一致", default=False)
-    merchant_match = models.BooleanField("ご利用先・払先関連", default=False)
-    service_match = models.BooleanField("サービス関連", default=False)
-    date_match = models.BooleanField("日付一致・近接", default=False)
-    rationale = models.TextField("候補理由", blank=True)
-    created_at = models.DateTimeField("作成日時", auto_now_add=True)
-
-    class Meta:
-        ordering = ["item", "rank", "-score", "receipt"]
-        constraints = [
-            models.UniqueConstraint(fields=["item", "receipt"], name="unique_statement_item_receipt_candidate"),
-            models.UniqueConstraint(fields=["item", "rank"], name="unique_statement_item_candidate_rank"),
-        ]
-        indexes = [
-            models.Index(fields=["item", "rank"]),
-            models.Index(fields=["receipt", "score"]),
-        ]
-        verbose_name = "カード明細照合候補"
-        verbose_name_plural = "カード明細照合候補"
-
-    @property
-    def evidence_labels(self) -> list[str]:
-        labels: list[str] = []
-        expected_last4 = str(getattr(settings, "RECEIPT_CARD_LAST4", "7210"))[-4:]
-        extracted_last4 = "".join(
-            char for char in (self.receipt.ai_extracted_card_last4 or "") if char.isdigit()
-        )[-4:]
-        if extracted_last4 == expected_last4:
-            labels.append(f"カード末尾{expected_last4}一致（補助加点）")
-        elif extracted_last4:
-            labels.append(f"カード末尾要確認（{extracted_last4}）")
-        else:
-            labels.append("カード末尾記載なし（中立）")
-        if self.amount_match:
-            if self.amount_match_basis == "original":
-                labels.append("外貨金額完全一致")
-            elif self.amount_match_basis == "jpy":
-                labels.append("円金額完全一致")
-            else:
-                labels.append("金額完全一致")
-        if self.currency_match:
-            labels.append("通貨一致")
-        if self.merchant_match:
-            labels.append("ご利用先・払先関連")
-        if self.service_match:
-            labels.append("サービス関連")
-        if self.date_match:
-            labels.append("日付一致・近接")
-        return labels
-
-    @property
-    def confidence_percent(self) -> int:
-        return max(0, min(100, round(float(self.confidence or 0) * 100)))
-
-    @property
-    def badge_class(self) -> str:
-        if self.gate_status == StatementCandidateGateStatus.REJECTED:
-            return "danger"
-        if self.gate_status == StatementCandidateGateStatus.AUTO_ELIGIBLE:
-            return "submitted"
-        return "draft"
-
-    @property
-    def gate_badge_class(self) -> str:
-        return self.badge_class
-
-    @property
-    def can_auto_match(self) -> bool:
-        return self.gate_status == StatementCandidateGateStatus.AUTO_ELIGIBLE
-
-    def __str__(self) -> str:
-        return f"{self.item} / 候補{self.rank}: {self.receipt.display_filename}"
 
 
 DEFAULT_INITIAL_SUBJECT = "{app_name}: {receipt_month}分の領収書アップロードをお願いします"

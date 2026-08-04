@@ -61,7 +61,6 @@ from .models import (
     BillingType,
     CardStatement,
     CardStatementItem,
-    CardStatementMatchCandidate,
     CardStatementStatus,
     MonthlyServiceDeclaration,
     Receipt,
@@ -2010,22 +2009,7 @@ def staff_user_month_status(request, user_id: int):
     )
 
 
-def global_statement_services(statement_month):
-    target_receipt_month = receipt_month_for_statement(statement_month)
-    return (
-        RegisteredService.objects.filter(user__is_active=True, user__is_staff=False, user__is_superuser=False)
-        .filter(uses_p_card=True)
-        .filter(Q(is_active=True) | Q(is_active=False, final_receipt_month__gte=target_receipt_month))
-        .select_related("user", "catalog_service")
-        .order_by("user__username", "name", "billing_type")
-    )
-
-
 def global_statement_queryset(period_month):
-    candidate_queryset = CardStatementMatchCandidate.objects.select_related(
-        "receipt__submission__user",
-        "receipt__service__catalog_service",
-    ).order_by("rank", "-score", "receipt_id")
     item_queryset = (
         CardStatementItem.objects.select_related(
             "matched_user",
@@ -2035,7 +2019,6 @@ def global_statement_queryset(period_month):
             "matched_receipt__submission__user",
             "matched_receipt__service__catalog_service",
         )
-        .prefetch_related(Prefetch("match_candidates", queryset=candidate_queryset))
         .order_by("sequence", "pk")
     )
     return (
@@ -2055,12 +2038,10 @@ def staff_card_statements(request):
     reconcile_pending_card_statement_month_semantics(period_month=selected_month)
     # 明細月とユーザー提出月は同じ月。照合対象の領収書はその前月分。
     statements = global_statement_queryset(selected_month)
-    available_services = global_statement_services(selected_month)
     stats = {
         "statement_count": statements.count(),
         "processing_count": statements.filter(status=CardStatementStatus.PROCESSING).count(),
         "missing_count": sum(statement.missing_receipt_count for statement in statements),
-        "manual_review_count": sum(statement.manual_review_count for statement in statements),
     }
     return render(
         request,
@@ -2071,7 +2052,6 @@ def staff_card_statements(request):
             "month_form": month_form,
             "statements": statements,
             "statement_form": CardStatementUploadForm(),
-            "available_services": available_services,
             "target_card_last4": target_card_last4(),
             "stats": stats,
         },
@@ -2109,7 +2089,7 @@ def staff_upload_card_statement(request):
             request,
             f"全ユーザー共通のご利用代金明細書をアップロードしました。AIで全明細行を抽出し、"
             f"明細月・提出月 {selected_month:%Y年%m月} の対象領収書月 "
-            f"{receipt_month_for_statement(selected_month):%Y年%m月} に属する全ユーザー領収書と照合しています。",
+            f"{receipt_month_for_statement(selected_month):%Y年%m月} に提出された領収書と照合しています。",
         )
     return redirect(f"{reverse('staff_card_statements')}?month={month_query(selected_month)}")
 
@@ -2125,7 +2105,6 @@ def staff_card_statement_status(request):
             "selected_month": selected_month,
             "target_receipt_month": receipt_month_for_statement(selected_month),
             "statements": statements,
-            "available_services": global_statement_services(selected_month),
             "target_card_last4": target_card_last4(),
         },
         request=request,
@@ -2183,7 +2162,7 @@ def staff_reconcile_card_statement(request, pk: int):
         messages.error(request, "AI解析に失敗した明細書は再照合できません。明細書を削除して再アップロードしてください。")
     else:
         reconcile_card_statement_items(statement.pk)
-        messages.success(request, "この明細月と同じ提出月にある前月分の全ユーザー領収書と再照合しました。")
+        messages.success(request, "対象領収書月に提出された領収書と再照合しました。")
     return redirect(f"{reverse('staff_card_statements')}?month={month_query(statement.period_month)}#statement-{statement.pk}")
 
 
@@ -2191,14 +2170,15 @@ def staff_reconcile_card_statement(request, pk: int):
 @require_POST
 def staff_update_statement_item(request, pk: int):
     item = get_object_or_404(
-        CardStatementItem.objects.select_related("statement", "matched_service", "matched_catalog_service"),
+        CardStatementItem.objects.select_related("statement", "matched_receipt"),
         pk=pk,
     )
-    action = request.POST.get("item_action") or "match"
+    action = request.POST.get("item_action") or "required"
     redirect_url = (
         f"{reverse('staff_card_statements')}?month={month_query(item.statement.period_month)}"
         f"#statement-{item.statement_id}"
     )
+
     if action == "ignore":
         item.matched_user = None
         item.matched_catalog_service = None
@@ -2209,81 +2189,40 @@ def staff_update_statement_item(request, pk: int):
         item.receipt_required = False
         item.match_confidence = 1.0
         item.match_memo = "管理者確認により領収書管理対象外としました。"
-    elif action == "receipt":
-        receipt_id = request.POST.get("receipt_id")
-        candidate = get_object_or_404(
-            CardStatementMatchCandidate.objects.select_related(
-                "receipt__submission__user",
-                "receipt__service__catalog_service",
-            ),
-            item=item,
-            receipt_id=receipt_id,
+        item.save(
+            update_fields=[
+                "matched_user",
+                "matched_catalog_service",
+                "matched_service",
+                "matched_receipt",
+                "match_status",
+                "match_reason_code",
+                "receipt_required",
+                "match_confidence",
+                "match_memo",
+            ]
         )
-        receipt = candidate.receipt
-        if not receipt.file_available or receipt.submission.period_month != item.statement.period_month:
-            messages.error(request, "この候補領収書は現在の明細月では利用できません。最新の領収書と再照合してください。")
-            return redirect(redirect_url)
-        conflict = (
-            CardStatementItem.objects.filter(
-                statement=item.statement,
-                matched_receipt=receipt,
-            )
-            .exclude(pk=item.pk)
-            .first()
-        )
-        if conflict:
-            messages.error(
-                request,
-                f"この領収書は明細 {conflict.line_reference or conflict.sequence} ですでに使用されています。",
-            )
-            return redirect(redirect_url)
-        item.matched_receipt = receipt
-        item.matched_user = receipt.submission.user
-        item.matched_service = receipt.service
-        item.matched_catalog_service = receipt.service.catalog_service if receipt.service_id else item.matched_catalog_service
-        item.match_status = StatementMatchStatus.MATCHED
-        item.match_reason_code = StatementMatchReason.MANUAL_CONFIRMED
+        messages.success(request, f"明細 {item.line_reference or item.pk} を領収書管理対象外にしました。")
+    elif action == "required":
         item.receipt_required = True
-        item.match_confidence = 1.0
-        item.match_memo = (
-            f"管理者が照合候補「{receipt.display_filename}」を確認し、この明細行の領収書として確定しました。"
+        item.match_status = StatementMatchStatus.UNMATCHED
+        item.match_reason_code = StatementMatchReason.NO_COMPATIBLE_RECEIPT
+        item.match_confidence = 0.0
+        item.match_memo = "領収書照合対象へ戻しました。"
+        item.save(
+            update_fields=[
+                "receipt_required",
+                "match_status",
+                "match_reason_code",
+                "match_confidence",
+                "match_memo",
+            ]
         )
+        reconcile_card_statement_items(item.statement_id, preserve_manual=True)
+        messages.success(request, f"明細 {item.line_reference or item.pk} を領収書照合対象へ戻しました。")
     else:
-        service_id = request.POST.get("service_id")
-        if not service_id:
-            messages.error(request, "対応するユーザー / サービスを選択してください。")
-            return redirect(redirect_url)
-        service = get_object_or_404(
-            RegisteredService.objects.select_related("user", "catalog_service"),
-            pk=service_id,
-            user__is_staff=False,
-            user__is_superuser=False,
-            uses_p_card=True,
-        )
-        item.matched_user = service.user
-        item.matched_catalog_service = service.catalog_service
-        item.matched_service = service
-        item.matched_receipt = None
-        item.match_status = StatementMatchStatus.MATCHED
-        item.match_reason_code = StatementMatchReason.MANUAL_CONFIRMED
-        item.receipt_required = request.POST.get("receipt_required") == "on"
-        item.match_confidence = 1.0
-        item.match_memo = "管理者が対応ユーザーとサービスを確認しました。"
-    item.save(
-        update_fields=[
-            "matched_user",
-            "matched_catalog_service",
-            "matched_service",
-            "matched_receipt",
-            "match_status",
-            "match_reason_code",
-            "receipt_required",
-            "match_confidence",
-            "match_memo",
-        ]
-    )
-    reconcile_card_statement_items(item.statement_id, preserve_manual=True)
-    messages.success(request, f"明細 {item.line_reference or item.pk} の対応を更新しました。")
+        messages.error(request, "この操作は廃止されました。最新の領収書と再照合してください。")
+
     return redirect(redirect_url)
 
 

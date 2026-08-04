@@ -19,8 +19,11 @@ from .ai_filename import (
     ReceiptFilenameResult,
     build_openai_content,
     build_result_from_ai_payload,
+    extract_receipt_text_fallback,
     filename_user_part_from_user,
+    merge_payload_with_text_fallback,
 )
+from .ai_processing import apply_ai_filename_to_receipt
 from .forms import (
     ExtraReceiptUploadForm,
     ReceiptBatchUploadForm,
@@ -33,11 +36,10 @@ from .forms import (
 from .monthly_status import build_user_month_summary
 from .statement_ai import StatementAnalysisItem, StatementAnalysisResult, build_statement_result_from_payload
 from .statement_processing import (
-    CARD_LAST4_MATCH_SCORE,
     CARD_STATEMENT_MONTH_SEMANTICS_RECONCILE_MARKER,
+    DATE_MATCH_TOLERANCE_DAYS,
     _available_receipts_for_statement_month,
     _catalog_ids_for_text,
-    _evaluate_receipt_candidate,
     _registered_services_for_period,
     process_card_statement,
 )
@@ -45,7 +47,6 @@ from .models import (
     BillingType,
     CardStatement,
     CardStatementItem,
-    CardStatementMatchCandidate,
     CardStatementStatus,
     EmailDeliveryLog,
     EmailReminderSchedule,
@@ -65,9 +66,6 @@ from .models import (
     ServiceExceptionRequest,
     ServiceExceptionRequestStatus,
     ServiceRegistrationSource,
-    StatementCandidateGateStatus,
-    StatementCandidatePriorityTier,
-    StatementCandidateStrength,
     StatementMatchReason,
     StatementMatchStatus,
     Submission,
@@ -218,6 +216,104 @@ class ReceiptFlowTests(TestCase):
 
         self.assertEqual(result.status, ReceiptFilenameStatus.GENERATED)
         self.assertEqual(result.suggested_filename, "260602_test_Anthropic_220_USD.pdf")
+
+    def test_jetbrains_pdf_text_fallback_extracts_paid_total_payment_date_and_recipient(self):
+        embedded_text = """
+JetBrains s.r.o.
+Invoice INVCZ11278387
+Invoice Details: Bill To:
+Issue date: 6.6.2026
+Payment Date: 6.6.2026
+Kohki Mametani
+20060472 6.6.2026 koki.mametani@hakuhodo.co.jp
+Subtotal: 14,000.00 JPY
+VAT Amount: 1,400.00 JPY
+Total: 15,400.00 JPY
+PAID: 15,400.00 JPY
+"""
+        fallback = extract_receipt_text_fallback(
+            embedded_text,
+            expected_recipient_context="アカウント=koki.mametani@hakuhodo.co.jp",
+        )
+
+        self.assertEqual(fallback.payee, "JetBrains s.r.o.")
+        self.assertEqual(fallback.payment_date, date(2026, 6, 6))
+        self.assertEqual(fallback.amount, Decimal("15400.00"))
+        self.assertEqual(fallback.currency, "JPY")
+        self.assertTrue(fallback.recipient_name_matches_user)
+
+        payload, used = merge_payload_with_text_fallback(
+            {
+                "card_last4": None,
+                "card_last4_matches_target": None,
+                "payee": None,
+                "recipient_name": None,
+                "recipient_name_matches_user": None,
+                "recipient_name_relation_reason": "",
+                "filename_label": None,
+                "service_payee_related": None,
+                "service_payee_relation_reason": "",
+                "payment_date": None,
+                "amount": None,
+                "currency": None,
+                "can_create_filename": False,
+                "confidence": 0.1,
+                "reason": "画像だけでは読み取れませんでした。",
+            },
+            fallback,
+            service_context="JetBrains AI / JetBrains",
+        )
+        result = build_result_from_ai_payload(
+            payload,
+            original_filename="豆谷_Jetbrains_15400.pdf",
+            user_filename_part="mametani",
+        )
+
+        self.assertTrue(used)
+        self.assertEqual(result.status, ReceiptFilenameStatus.GENERATED)
+        self.assertEqual(result.suggested_filename, "260606_mametani_JetBrains_15400_JPY.pdf")
+
+    @mock.patch("receipts.ai_processing.generate_ai_receipt_filename")
+    def test_needs_review_result_still_persists_extracted_amount_date_and_currency(self, mocked_generate):
+        submission = Submission.objects.create(user=self.user, period_month=date(2026, 7, 1))
+        receipt = Receipt.objects.create(
+            submission=submission,
+            service=self.service,
+            service_name_snapshot=self.service.name,
+            billing_type_snapshot=self.service.billing_type,
+            original_filename="jetbrains.pdf",
+            file=SimpleUploadedFile("jetbrains.pdf", b"%PDF-1.4 receipt", content_type="application/pdf"),
+            content_type="application/pdf",
+            expires_at=timezone.now() + timedelta(days=30),
+        )
+        mocked_generate.return_value = ReceiptFilenameResult(
+            status=ReceiptFilenameStatus.NEEDS_REVIEW,
+            admin_memo="宛名だけ管理者確認が必要です。",
+            payee="JetBrains s.r.o.",
+            filename_label="JetBrains",
+            payment_date=date(2026, 6, 6),
+            amount=Decimal("15400.00"),
+            currency="JPY",
+            recipient_name="Kohki Mametani",
+            recipient_name_matches_user=None,
+            payee_confirmed=True,
+            date_confirmed=True,
+            amount_confirmed=True,
+            currency_confirmed=True,
+            service_payee_related=True,
+            confidence=0.92,
+        )
+
+        apply_ai_filename_to_receipt(receipt)
+        receipt.refresh_from_db()
+
+        self.assertEqual(receipt.ai_filename_status, ReceiptFilenameStatus.NEEDS_REVIEW)
+        self.assertEqual(receipt.amount, Decimal("15400.00"))
+        self.assertEqual(receipt.currency, "JPY")
+        self.assertEqual(receipt.issued_on, date(2026, 6, 6))
+        self.assertTrue(receipt.ai_check_amount)
+        self.assertTrue(receipt.ai_check_date)
+        self.assertTrue(receipt.ai_check_currency)
 
     def test_ai_payload_marks_unrelated_service_payee_for_review(self):
         result = build_result_from_ai_payload(
@@ -3695,7 +3791,7 @@ class FinalWorkflowAcceptanceTests(TestCase):
         self.assertEqual(result.items[0].match_status, StatementMatchStatus.AMBIGUOUS)
 
     @mock.patch("receipts.statement_processing.generate_card_statement_analysis")
-    def test_statement_processing_highlights_missing_receipt_and_cancels_false_no_usage(self, mocked_analysis):
+    def test_statement_processing_highlights_missing_receipt_without_guessing_no_usage_owner(self, mocked_analysis):
         MonthlyServiceDeclaration.objects.create(
             user=self.user,
             service=self.api_service,
@@ -3738,7 +3834,7 @@ class FinalWorkflowAcceptanceTests(TestCase):
         statement.refresh_from_db()
         item = statement.items.get()
         self.assertEqual(statement.status, CardStatementStatus.NEEDS_REVIEW)
-        self.assertFalse(
+        self.assertTrue(
             MonthlyServiceDeclaration.objects.filter(
                 user=self.user,
                 service=self.api_service,
@@ -3746,9 +3842,9 @@ class FinalWorkflowAcceptanceTests(TestCase):
             ).exists()
         )
         self.assertTrue(item.needs_highlight)
-        self.assertEqual(item.receipt_status_label, "領収書未提出")
-        self.assertIn("対象領収書月は利用なし", item.match_memo)
-        self.assertIn("利用なし", statement.ai_admin_memo)
+        self.assertEqual(item.receipt_status_label, "未提出")
+        self.assertIn("3条件をすべて満たす", item.match_memo)
+        self.assertIn("未一致1件", statement.ai_admin_memo)
 
     @mock.patch("receipts.statement_processing.generate_card_statement_analysis")
     def test_statement_processing_links_existing_receipt(self, mocked_analysis):
@@ -3793,7 +3889,7 @@ class FinalWorkflowAcceptanceTests(TestCase):
         item = statement.items.get()
         self.assertEqual(item.matched_receipt, receipt)
         self.assertFalse(item.needs_highlight)
-        self.assertEqual(item.receipt_status_label, "領収書あり")
+        self.assertEqual(item.receipt_status_label, "提出済み")
 
     @mock.patch("receipts.statement_processing.generate_card_statement_analysis")
     def test_july_statement_matches_june_receipt_in_july_submission_not_august_submission(self, mocked_analysis):
@@ -3916,6 +4012,10 @@ class FinalWorkflowAcceptanceTests(TestCase):
         self.assertContains(response, "ご利用代金明細月")
         self.assertContains(response, "対象領収書月")
         self.assertContains(response, "2026年06月")
+        self.assertContains(response, 'class="statement-result-list"')
+        self.assertContains(response, "statement-result-card")
+        self.assertNotContains(response, "global-statement-table")
+        self.assertNotContains(response, "table-scroll-wide")
         item.refresh_from_db()
         statement.refresh_from_db()
         self.assertEqual(item.matched_receipt, june_receipt)
@@ -4106,184 +4206,179 @@ class FinalWorkflowAcceptanceTests(TestCase):
 
         self.client.login(username="admin", password="admin-password-123")
         response = self.client.get(reverse("staff_card_statements") + "?month=2026-07")
-        self.assertContains(response, "other@example.com")
+        self.assertNotContains(response, "other@example.com")
         self.assertContains(response, "260603_other_OpenAI_220_USD.pdf")
-        self.assertNotContains(response, 'class="statement-missing-row"')
+        self.assertNotContains(response, 'class="statement-unmatched-row"')
+        self.assertNotContains(response, "照合候補")
+
+    def _create_processing_statement(self, *, period_month=date(2026, 7, 1)):
+        return CardStatement.objects.create(
+            period_month=period_month,
+            file=SimpleUploadedFile(
+                "statement.pdf",
+                b"%PDF-1.4 statement",
+                content_type="application/pdf",
+            ),
+            original_filename="statement.pdf",
+            content_type="application/pdf",
+            status=CardStatementStatus.PROCESSING,
+            uploaded_by=self.superuser,
+            expires_at=timezone.now() + timedelta(days=30),
+        )
+
+    def _statement_result(self, *items, card_last4="7210", statement_period="2026-07"):
+        return StatementAnalysisResult(
+            status=CardStatementStatus.COMPLETED,
+            card_last4=card_last4,
+            statement_period=statement_period,
+            payment_date=date(2026, 7, 29),
+            items=tuple(items),
+        )
+
+    def _statement_item(
+        self,
+        *,
+        reference="0274",
+        transaction_date=date(2026, 6, 10),
+        merchant="CLAUDE.AI SUBSCR ANTHROPIC.COM",
+        amount="22.00",
+        currency="USD",
+    ):
+        return StatementAnalysisItem(
+            line_reference=reference,
+            transaction_date=transaction_date,
+            merchant_name=merchant,
+            amount_jpy=Decimal("3595"),
+            original_amount=Decimal(amount),
+            original_currency=currency,
+            service_catalog_id=self.subscription_catalog.pk,
+            match_status=StatementMatchStatus.MATCHED,
+            receipt_required=True,
+            confidence=0.99,
+            reason="明細行を抽出しました。",
+        )
 
     @mock.patch("receipts.statement_processing.generate_card_statement_analysis")
-    def test_global_statement_does_not_guess_user_when_same_service_has_multiple_users(self, mocked_analysis):
-        other_user = User.objects.create_user(
-            username="other@example.com",
-            email="other@example.com",
-            password="password123",
+    def test_statement_matches_exact_amount_payee_and_same_date(self, mocked_analysis):
+        claude_catalog = ServiceCatalog.objects.create(
+            name="Claude",
+            billing_type=BillingType.METERED,
+            merchant_aliases="CLAUDE.AI SUBSCR, ANTHROPIC.COM, ANTHROPIC",
+            created_by=self.superuser,
         )
-        RegisteredService.objects.create(
-            user=other_user,
-            catalog_service=self.subscription_catalog,
-            name=self.subscription_catalog.name,
-            billing_type=self.subscription_catalog.billing_type,
+        claude_service = RegisteredService.objects.create(
+            user=self.user,
+            catalog_service=claude_catalog,
+            name=claude_catalog.name,
+            billing_type=claude_catalog.billing_type,
             registered_by=self.superuser,
         )
-        statement = CardStatement.objects.create(
-            period_month=date(2026, 7, 1),
-            file=SimpleUploadedFile("statement.pdf", b"%PDF-1.4 statement", content_type="application/pdf"),
-            original_filename="statement.pdf",
-            content_type="application/pdf",
-            status=CardStatementStatus.PROCESSING,
-            uploaded_by=self.superuser,
-            expires_at=timezone.now() + timedelta(days=30),
-        )
-        mocked_analysis.return_value = StatementAnalysisResult(
-            status=CardStatementStatus.COMPLETED,
-            card_last4="7210",
-            statement_period="2026-07",
-            payment_date=date(2026, 7, 29),
-            items=(
-                StatementAnalysisItem(
-                    line_reference="0276",
-                    transaction_date=date(2026, 6, 3),
-                    merchant_name="OPENAI *CHATGPT",
-                    amount_jpy=Decimal("35949"),
-                    original_amount=Decimal("220"),
-                    original_currency="USD",
-                    service_catalog_id=self.subscription_catalog.pk,
-                    match_status=StatementMatchStatus.MATCHED,
-                    receipt_required=True,
-                    confidence=0.99,
-                    reason="ChatGPT候補。",
-                ),
-            ),
-        )
-
-        process_card_statement(statement.pk)
-        item = statement.items.get()
-        self.assertIsNone(item.matched_user)
-        self.assertIsNone(item.matched_service)
-        self.assertEqual(item.matched_catalog_service, self.subscription_catalog)
-        self.assertEqual(item.match_status, StatementMatchStatus.AMBIGUOUS)
-        self.assertTrue(item.needs_highlight)
-        self.assertIn("複数ユーザー", item.match_memo)
-
-    @mock.patch("receipts.statement_processing.generate_card_statement_analysis")
-    def test_global_statement_highlights_missing_receipt_row(self, mocked_analysis):
-        statement = CardStatement.objects.create(
-            period_month=date(2026, 7, 1),
-            file=SimpleUploadedFile("statement.pdf", b"%PDF-1.4 statement", content_type="application/pdf"),
-            original_filename="statement.pdf",
-            content_type="application/pdf",
-            status=CardStatementStatus.PROCESSING,
-            uploaded_by=self.superuser,
-            expires_at=timezone.now() + timedelta(days=30),
-        )
-        mocked_analysis.return_value = StatementAnalysisResult(
-            status=CardStatementStatus.COMPLETED,
-            card_last4="7210",
-            statement_period="2026-07",
-            payment_date=date(2026, 7, 29),
-            items=(
-                StatementAnalysisItem(
-                    line_reference="0302",
-                    transaction_date=date(2026, 6, 16),
-                    merchant_name="OPENAI",
-                    amount_jpy=Decimal("8236"),
-                    original_amount=Decimal("49.92"),
-                    original_currency="USD",
-                    service_catalog_id=self.api_catalog.pk,
-                    match_status=StatementMatchStatus.MATCHED,
-                    receipt_required=True,
-                    confidence=0.98,
-                    reason="OpenAI API候補。",
-                ),
-            ),
-        )
-
-        process_card_statement(statement.pk)
-        item = statement.items.get()
-        self.assertTrue(item.needs_highlight)
-
-        self.client.login(username="admin", password="admin-password-123")
-        response = self.client.get(reverse("staff_card_statements") + "?month=2026-07")
-        self.assertContains(response, 'class="statement-missing-row"')
-        self.assertContains(response, "領収書未提出")
-        self.assertContains(response, "黄色は必須条件を満たす提出済み領収書を確定できていない行")
-        self.assertContains(response, 'data-tutorial-target="staff-statement-upload-section"')
-        self.assertContains(response, 'data-tutorial-target="staff-statement-results"')
-
-    @mock.patch("receipts.statement_processing.generate_card_statement_analysis")
-    def test_statement_unique_amount_candidate_counts_as_submitted_when_merchant_differs(self, mocked_analysis):
-        receipt = self.create_receipt(service=self.subscription, filename="unexpected-billing.pdf")
-        receipt.amount = Decimal("49.92")
+        receipt = self.create_receipt(service=claude_service, filename="anthropic-22.pdf")
+        receipt.amount = Decimal("22.00")
         receipt.currency = "USD"
-        receipt.issued_on = date(2026, 6, 16)
-        receipt.ai_extracted_payee = "ANTHROPIC"
+        receipt.issued_on = date(2026, 6, 10)
+        receipt.ai_extracted_payee = "Anthropic, PBC"
         receipt.save(update_fields=["amount", "currency", "issued_on", "ai_extracted_payee"])
-        statement = CardStatement.objects.create(
-            period_month=date(2026, 7, 1),
-            file=SimpleUploadedFile("statement.pdf", b"%PDF-1.4 statement", content_type="application/pdf"),
-            original_filename="statement.pdf",
-            content_type="application/pdf",
-            status=CardStatementStatus.PROCESSING,
-            uploaded_by=self.superuser,
-            expires_at=timezone.now() + timedelta(days=30),
-        )
-        mocked_analysis.return_value = StatementAnalysisResult(
-            status=CardStatementStatus.COMPLETED,
-            card_last4="7210",
-            statement_period="2026-07",
-            payment_date=date(2026, 7, 29),
-            items=(
-                StatementAnalysisItem(
-                    line_reference="0302",
-                    transaction_date=date(2026, 6, 16),
-                    merchant_name="UNRELATED BILLING NAME",
-                    amount_jpy=Decimal("8236"),
-                    original_amount=Decimal("49.92"),
-                    original_currency="USD",
-                    service_catalog_id=self.api_catalog.pk,
-                    match_status=StatementMatchStatus.MATCHED,
-                    receipt_required=True,
-                    confidence=0.80,
-                    reason="利用先からはサービスを断定できません。",
-                ),
-            ),
+        statement = self._create_processing_statement()
+        mocked_analysis.return_value = self._statement_result(
+            self._statement_item(merchant="CLAUDE.AI SUBSCR")
         )
 
         process_card_statement(statement.pk)
         item = statement.items.get()
-        candidate = item.match_candidates.get(receipt=receipt)
 
         self.assertEqual(item.matched_receipt, receipt)
-        self.assertEqual(item.match_status, StatementMatchStatus.AMBIGUOUS)
-        self.assertFalse(item.needs_highlight)
-        self.assertEqual(item.receipt_status_label, "領収書あり")
-        self.assertEqual(statement.missing_receipt_count, 0)
-        self.assertEqual(candidate.strength, StatementCandidateStrength.AMOUNT_ONLY)
-        self.assertEqual(candidate.gate_status, StatementCandidateGateStatus.AUTO_ELIGIBLE)
-        self.assertEqual(candidate.priority_tier, StatementCandidatePriorityTier.EXACT_AMOUNT_ONLY)
-        self.assertEqual(item.match_reason_code, StatementMatchReason.AUTO_AMOUNT_ONLY)
-        self.assertTrue(candidate.amount_match)
-        self.assertFalse(candidate.merchant_match)
-        self.assertIn("外貨金額", candidate.rationale)
-
-        self.client.login(username="admin", password="admin-password-123")
-        response = self.client.get(reverse("staff_card_statements") + "?month=2026-07")
-        self.assertContains(response, "照合候補・除外 1件")
-        self.assertContains(response, "優先度2: 金額・通貨完全一致・関係要確認")
-        self.assertContains(response, "現在の照合先")
-        self.assertContains(response, "薄橙色は金額・通貨が完全かつ一意に一致")
+        self.assertEqual(item.match_status, StatementMatchStatus.MATCHED)
+        self.assertEqual(item.match_reason_code, StatementMatchReason.AUTO_STRONG)
+        self.assertEqual(item.receipt_status_label, "提出済み")
+        self.assertIn("利用日と領収書日付の差0日", item.match_memo)
 
     @mock.patch("receipts.statement_processing.generate_card_statement_analysis")
-    def test_statement_duplicate_exact_amounts_remain_candidates_without_auto_assignment(self, mocked_analysis):
-        first = self.create_receipt(service=self.subscription, filename="first-22.pdf")
+    def test_statement_matches_receipt_within_plus_or_minus_one_day(self, mocked_analysis):
+        receipt = self.create_receipt(filename="anthropic-next-day.pdf")
+        receipt.amount = Decimal("22")
+        receipt.currency = "USD"
+        receipt.issued_on = date(2026, 6, 11)
+        receipt.ai_extracted_payee = "ANTHROPIC"
+        receipt.save(update_fields=["amount", "currency", "issued_on", "ai_extracted_payee"])
+        statement = self._create_processing_statement()
+        mocked_analysis.return_value = self._statement_result(self._statement_item())
+
+        process_card_statement(statement.pk)
+        item = statement.items.get()
+
+        self.assertEqual(DATE_MATCH_TOLERANCE_DAYS, 1)
+        self.assertEqual(item.matched_receipt, receipt)
+        self.assertIn("差1日", item.match_memo)
+
+    @mock.patch("receipts.statement_processing.generate_card_statement_analysis")
+    def test_statement_does_not_match_receipt_outside_one_day(self, mocked_analysis):
+        receipt = self.create_receipt(filename="anthropic-two-days-later.pdf")
+        receipt.amount = Decimal("22.00")
+        receipt.currency = "USD"
+        receipt.issued_on = date(2026, 6, 12)
+        receipt.ai_extracted_payee = "Anthropic, PBC"
+        receipt.save(update_fields=["amount", "currency", "issued_on", "ai_extracted_payee"])
+        statement = self._create_processing_statement()
+        mocked_analysis.return_value = self._statement_result(self._statement_item())
+
+        process_card_statement(statement.pk)
+        item = statement.items.get()
+
+        self.assertIsNone(item.matched_receipt)
+        self.assertEqual(item.match_status, StatementMatchStatus.UNMATCHED)
+        self.assertEqual(item.row_class, "statement-unmatched-row")
+        self.assertEqual(item.receipt_status_label, "未提出")
+
+    @mock.patch("receipts.statement_processing.generate_card_statement_analysis")
+    def test_statement_does_not_match_different_amount_even_when_payee_and_date_match(self, mocked_analysis):
+        receipt = self.create_receipt(filename="anthropic-22.pdf")
+        receipt.amount = Decimal("22.00")
+        receipt.currency = "USD"
+        receipt.issued_on = date(2026, 6, 10)
+        receipt.ai_extracted_payee = "Anthropic, PBC"
+        receipt.save(update_fields=["amount", "currency", "issued_on", "ai_extracted_payee"])
+        statement = self._create_processing_statement()
+        mocked_analysis.return_value = self._statement_result(
+            self._statement_item(amount="64.00")
+        )
+
+        process_card_statement(statement.pk)
+        item = statement.items.get()
+
+        self.assertIsNone(item.matched_receipt)
+        self.assertEqual(item.match_status, StatementMatchStatus.UNMATCHED)
+        self.assertNotEqual(item.match_status, StatementMatchStatus.AMBIGUOUS)
+
+    @mock.patch("receipts.statement_processing.generate_card_statement_analysis")
+    def test_statement_does_not_match_unrelated_payee_even_when_amount_and_date_match(self, mocked_analysis):
+        receipt = self.create_receipt(filename="openai-22.pdf")
+        receipt.amount = Decimal("22.00")
+        receipt.currency = "USD"
+        receipt.issued_on = date(2026, 6, 10)
+        receipt.ai_extracted_payee = "OpenAI, LLC"
+        receipt.save(update_fields=["amount", "currency", "issued_on", "ai_extracted_payee"])
+        statement = self._create_processing_statement()
+        mocked_analysis.return_value = self._statement_result(self._statement_item())
+
+        process_card_statement(statement.pk)
+        item = statement.items.get()
+
+        self.assertIsNone(item.matched_receipt)
+        self.assertEqual(item.match_status, StatementMatchStatus.UNMATCHED)
+
+    @mock.patch("receipts.statement_processing.generate_card_statement_analysis")
+    def test_multiple_similar_receipts_are_assigned_arbitrarily_one_to_one(self, mocked_analysis):
+        first = self.create_receipt(filename="anthropic-a.pdf")
         first.amount = Decimal("22.00")
         first.currency = "USD"
-        first.issued_on = date(2026, 6, 4)
-        first.ai_extracted_payee = "FIRST VENDOR"
+        first.issued_on = date(2026, 6, 9)
+        first.ai_extracted_payee = "Anthropic, PBC"
         first.save(update_fields=["amount", "currency", "issued_on", "ai_extracted_payee"])
 
         other_user = User.objects.create_user(
-            username="other-amount@example.com",
-            email="other-amount@example.com",
+            username="other@example.com",
+            email="other@example.com",
             password="password123",
         )
         other_service = RegisteredService.objects.create(
@@ -4299,889 +4394,154 @@ class FinalWorkflowAcceptanceTests(TestCase):
             service=other_service,
             service_name_snapshot=other_service.name,
             billing_type_snapshot=other_service.billing_type,
-            original_filename="second-22.pdf",
+            original_filename="anthropic-b.pdf",
             amount=Decimal("22.00"),
             currency="USD",
-            issued_on=date(2026, 6, 4),
-            ai_extracted_payee="SECOND VENDOR",
-            file=SimpleUploadedFile("second-22.pdf", b"%PDF-1.4 second", content_type="application/pdf"),
-            expires_at=timezone.now() + timedelta(days=30),
-        )
-        statement = CardStatement.objects.create(
-            period_month=date(2026, 7, 1),
-            file=SimpleUploadedFile("statement.pdf", b"%PDF-1.4 statement", content_type="application/pdf"),
-            original_filename="statement.pdf",
-            content_type="application/pdf",
-            status=CardStatementStatus.PROCESSING,
-            uploaded_by=self.superuser,
-            expires_at=timezone.now() + timedelta(days=30),
-        )
-        mocked_analysis.return_value = StatementAnalysisResult(
-            status=CardStatementStatus.COMPLETED,
-            card_last4="7210",
-            statement_period="2026-07",
-            payment_date=date(2026, 7, 29),
-            items=(
-                StatementAnalysisItem(
-                    line_reference="0277",
-                    transaction_date=date(2026, 6, 4),
-                    merchant_name="UNKNOWN MERCHANT",
-                    amount_jpy=Decimal("3595"),
-                    original_amount=Decimal("22.00"),
-                    original_currency="USD",
-                    service_catalog_id=self.api_catalog.pk,
-                    match_status=StatementMatchStatus.MATCHED,
-                    receipt_required=True,
-                    confidence=0.80,
-                    reason="利用先は不明です。",
-                ),
+            issued_on=date(2026, 6, 11),
+            ai_extracted_payee="ANTHROPIC",
+            file=SimpleUploadedFile(
+                "anthropic-b.pdf",
+                b"%PDF-1.4 other",
+                content_type="application/pdf",
             ),
+            expires_at=timezone.now() + timedelta(days=30),
+        )
+        statement = self._create_processing_statement()
+        mocked_analysis.return_value = self._statement_result(
+            self._statement_item(reference="A"),
+            self._statement_item(reference="B"),
         )
 
         process_card_statement(statement.pk)
-        item = statement.items.get()
+        items = list(statement.items.order_by("sequence"))
 
-        self.assertIsNone(item.matched_receipt)
-        self.assertTrue(item.needs_highlight)
-        self.assertEqual(item.match_status, StatementMatchStatus.AMBIGUOUS)
-        self.assertEqual(item.match_reason_code, StatementMatchReason.MULTIPLE_COMPATIBLE)
-        self.assertEqual(item.match_candidates.count(), 2)
         self.assertSetEqual(
-            set(item.match_candidates.values_list("receipt_id", flat=True)),
+            {items[0].matched_receipt_id, items[1].matched_receipt_id},
             {first.pk, second.pk},
         )
-        self.assertIn("必須条件を満たす領収書候補が複数", item.match_memo)
+        self.assertNotEqual(items[0].matched_receipt_id, items[1].matched_receipt_id)
+        self.assertTrue(all(item.match_status == StatementMatchStatus.MATCHED for item in items))
 
     @mock.patch("receipts.statement_processing.generate_card_statement_analysis")
-    def test_statement_explicit_service_conflict_is_rejected_not_ambiguous(self, mocked_analysis):
-        anthropic_catalog = ServiceCatalog.objects.create(
-            name="Claude",
-            billing_type=BillingType.SUBSCRIPTION,
-            merchant_aliases="CLAUDE.AI, ANTHROPIC, ANTHROPIC.COM",
-            created_by=self.superuser,
-        )
-        anthropic_service = RegisteredService.objects.create(
-            user=self.user,
-            catalog_service=anthropic_catalog,
-            name=anthropic_catalog.name,
-            billing_type=anthropic_catalog.billing_type,
-            registered_by=self.superuser,
-        )
-        receipt = self.create_receipt(service=anthropic_service, filename="anthropic-22.pdf")
-        receipt.amount = Decimal("22.00")
-        receipt.currency = "USD"
-        receipt.issued_on = date(2026, 6, 4)
-        receipt.ai_extracted_payee = "ANTHROPIC.COM"
-        receipt.ai_check_service_payee_related = True
-        receipt.save(
-            update_fields=[
-                "amount",
-                "currency",
-                "issued_on",
-                "ai_extracted_payee",
-                "ai_check_service_payee_related",
-            ]
-        )
-        statement = CardStatement.objects.create(
-            period_month=date(2026, 7, 1),
-            file=SimpleUploadedFile("statement.pdf", b"%PDF-1.4 statement", content_type="application/pdf"),
-            original_filename="statement.pdf",
-            content_type="application/pdf",
-            status=CardStatementStatus.PROCESSING,
-            uploaded_by=self.superuser,
-            expires_at=timezone.now() + timedelta(days=30),
-        )
-        mocked_analysis.return_value = StatementAnalysisResult(
-            status=CardStatementStatus.COMPLETED,
-            card_last4="7210",
-            statement_period="2026-07",
-            payment_date=date(2026, 7, 29),
-            items=(
-                StatementAnalysisItem(
-                    line_reference="0277",
-                    transaction_date=date(2026, 6, 4),
-                    merchant_name="OPENAI *CHATGPT",
-                    amount_jpy=Decimal("3595"),
-                    original_amount=Decimal("22.00"),
-                    original_currency="USD",
-                    service_catalog_id=self.subscription_catalog.pk,
-                    match_status=StatementMatchStatus.MATCHED,
-                    receipt_required=True,
-                    confidence=0.99,
-                    reason="ChatGPTの請求名義と一致。",
-                ),
-            ),
-        )
+    def test_one_statement_line_uses_one_of_multiple_similar_receipts_without_candidate_state(self, mocked_analysis):
+        receipts = []
+        for index, issued_on in enumerate((date(2026, 6, 9), date(2026, 6, 11)), start=1):
+            receipt = self.create_receipt(filename=f"anthropic-{index}.pdf")
+            receipt.amount = Decimal("22.00")
+            receipt.currency = "USD"
+            receipt.issued_on = issued_on
+            receipt.ai_extracted_payee = "Anthropic, PBC"
+            receipt.save(update_fields=["amount", "currency", "issued_on", "ai_extracted_payee"])
+            receipts.append(receipt)
+        statement = self._create_processing_statement()
+        mocked_analysis.return_value = self._statement_result(self._statement_item())
 
         process_card_statement(statement.pk)
         item = statement.items.get()
-        candidate = item.match_candidates.get(receipt=receipt)
 
-        self.assertIsNone(item.matched_receipt)
+        self.assertIn(item.matched_receipt_id, {receipt.pk for receipt in receipts})
         self.assertEqual(item.match_status, StatementMatchStatus.MATCHED)
-        self.assertEqual(item.match_reason_code, StatementMatchReason.SERVICE_ONLY)
-        self.assertTrue(item.needs_highlight)
-        self.assertEqual(candidate.gate_status, StatementCandidateGateStatus.REJECTED)
-        self.assertEqual(candidate.priority_tier, StatementCandidatePriorityTier.REJECTED)
-        self.assertIn("明確に異なります", candidate.gate_memo)
         self.assertNotEqual(item.match_status, StatementMatchStatus.AMBIGUOUS)
+
+    @mock.patch("receipts.statement_processing.generate_card_statement_analysis")
+    def test_statement_page_hides_user_identity_and_candidate_ui_and_marks_unmatched_red(self, mocked_analysis):
+        other_user = User.objects.create_user(
+            username="hidden-user@example.com",
+            email="hidden-user@example.com",
+            password="password123",
+        )
+        other_service = RegisteredService.objects.create(
+            user=other_user,
+            catalog_service=self.subscription_catalog,
+            name=self.subscription_catalog.name,
+            billing_type=self.subscription_catalog.billing_type,
+            registered_by=self.superuser,
+        )
+        other_submission = Submission.objects.create(user=other_user, period_month=date(2026, 7, 1))
+        Receipt.objects.create(
+            submission=other_submission,
+            service=other_service,
+            service_name_snapshot=other_service.name,
+            billing_type_snapshot=other_service.billing_type,
+            original_filename="anthropic-22.pdf",
+            generated_filename="260610_hidden_Anthropic_22_USD.pdf",
+            amount=Decimal("22.00"),
+            currency="USD",
+            issued_on=date(2026, 6, 10),
+            ai_extracted_payee="Anthropic, PBC",
+            file=SimpleUploadedFile(
+                "anthropic-22.pdf",
+                b"%PDF-1.4 other",
+                content_type="application/pdf",
+            ),
+            expires_at=timezone.now() + timedelta(days=30),
+        )
+        statement = self._create_processing_statement()
+        mocked_analysis.return_value = self._statement_result(
+            self._statement_item(reference="MATCH", amount="22.00"),
+            self._statement_item(reference="MISSING", amount="64.00"),
+        )
+        process_card_statement(statement.pk)
 
         self.client.login(username="admin", password="admin-password-123")
         response = self.client.get(reverse("staff_card_statements") + "?month=2026-07")
-        self.assertContains(response, "必須条件不一致")
-        self.assertContains(response, "除外候補を管理者判断で確定")
 
-    @mock.patch("receipts.statement_processing.generate_card_statement_analysis")
-    def test_receipt_payee_and_selected_service_conflict_is_rejected_before_scoring(self, mocked_analysis):
-        anthropic_catalog = ServiceCatalog.objects.create(
-            name="Claude",
-            billing_type=BillingType.SUBSCRIPTION,
-            merchant_aliases="CLAUDE.AI, ANTHROPIC, ANTHROPIC.COM",
-            created_by=self.superuser,
-        )
-        receipt = self.create_receipt(service=self.subscription, filename="wrong-service-selection.pdf")
-        receipt.amount = Decimal("22.00")
-        receipt.currency = "USD"
-        receipt.issued_on = date(2026, 6, 4)
-        receipt.ai_extracted_payee = "ANTHROPIC.COM"
-        receipt.save(update_fields=["amount", "currency", "issued_on", "ai_extracted_payee"])
+        self.assertContains(response, "260610_hidden_Anthropic_22_USD.pdf")
+        self.assertNotContains(response, "hidden-user@example.com")
+        self.assertNotContains(response, "照合候補")
+        self.assertNotContains(response, "この領収書で確定")
+        self.assertContains(response, "statement-unmatched-row")
+        self.assertContains(response, "未一致")
+
+    def test_staff_can_mark_statement_item_outside_and_restore_required(self):
         statement = CardStatement.objects.create(
             period_month=date(2026, 7, 1),
             file=SimpleUploadedFile("statement.pdf", b"%PDF-1.4 statement", content_type="application/pdf"),
             original_filename="statement.pdf",
             content_type="application/pdf",
-            status=CardStatementStatus.PROCESSING,
-            uploaded_by=self.superuser,
-            expires_at=timezone.now() + timedelta(days=30),
-        )
-        mocked_analysis.return_value = StatementAnalysisResult(
-            status=CardStatementStatus.COMPLETED,
+            status=CardStatementStatus.NEEDS_REVIEW,
             card_last4="7210",
             statement_period="2026-07",
-            payment_date=date(2026, 7, 29),
-            items=(
-                StatementAnalysisItem(
-                    line_reference="0277",
-                    transaction_date=date(2026, 6, 4),
-                    merchant_name="OPENAI *CHATGPT",
-                    amount_jpy=Decimal("3595"),
-                    original_amount=Decimal("22.00"),
-                    original_currency="USD",
-                    service_catalog_id=self.subscription_catalog.pk,
-                    match_status=StatementMatchStatus.MATCHED,
-                    receipt_required=True,
-                    confidence=0.99,
-                    reason="ChatGPTの請求名義と一致。",
-                ),
-            ),
-        )
-
-        process_card_statement(statement.pk)
-        item = statement.items.get()
-        candidate = item.match_candidates.get(receipt=receipt)
-
-        self.assertIsNone(item.matched_receipt)
-        self.assertEqual(candidate.gate_status, StatementCandidateGateStatus.REJECTED)
-        self.assertIn("領収書上の払先", candidate.gate_memo)
-        self.assertNotEqual(item.match_status, StatementMatchStatus.AMBIGUOUS)
-
-    @mock.patch("receipts.statement_processing.generate_card_statement_analysis")
-    def test_statement_amount_conflict_vetoes_matching_even_when_service_matches(self, mocked_analysis):
-        receipt = self.create_receipt(service=self.subscription, filename="wrong-amount.pdf")
-        receipt.amount = Decimal("99.00")
-        receipt.currency = "USD"
-        receipt.issued_on = date(2026, 6, 4)
-        receipt.ai_extracted_payee = "OPENAI *CHATGPT"
-        receipt.ai_check_service_payee_related = True
-        receipt.save(
-            update_fields=[
-                "amount",
-                "currency",
-                "issued_on",
-                "ai_extracted_payee",
-                "ai_check_service_payee_related",
-            ]
-        )
-        statement = CardStatement.objects.create(
-            period_month=date(2026, 7, 1),
-            file=SimpleUploadedFile("statement.pdf", b"%PDF-1.4 statement", content_type="application/pdf"),
-            original_filename="statement.pdf",
-            content_type="application/pdf",
-            status=CardStatementStatus.PROCESSING,
-            uploaded_by=self.superuser,
-            expires_at=timezone.now() + timedelta(days=30),
-        )
-        mocked_analysis.return_value = StatementAnalysisResult(
-            status=CardStatementStatus.COMPLETED,
-            card_last4="7210",
-            statement_period="2026-07",
-            payment_date=date(2026, 7, 29),
-            items=(
-                StatementAnalysisItem(
-                    line_reference="0277",
-                    transaction_date=date(2026, 6, 4),
-                    merchant_name="OPENAI *CHATGPT",
-                    amount_jpy=Decimal("3595"),
-                    original_amount=Decimal("22.00"),
-                    original_currency="USD",
-                    service_catalog_id=self.subscription_catalog.pk,
-                    match_status=StatementMatchStatus.MATCHED,
-                    receipt_required=True,
-                    confidence=0.99,
-                    reason="ChatGPTの請求名義と一致。",
-                ),
-            ),
-        )
-
-        process_card_statement(statement.pk)
-        item = statement.items.get()
-        candidate = item.match_candidates.get(receipt=receipt)
-
-        self.assertIsNone(item.matched_receipt)
-        self.assertEqual(candidate.gate_status, StatementCandidateGateStatus.REJECTED)
-        self.assertIn("金額が一致しません", candidate.gate_memo)
-        self.assertEqual(item.match_reason_code, StatementMatchReason.SERVICE_ONLY)
-
-    @mock.patch("receipts.statement_processing.generate_card_statement_analysis")
-    def test_receipt_without_card_last4_can_still_auto_match(self, mocked_analysis):
-        receipt = self.create_receipt(service=self.subscription, filename="no-card-last4.pdf")
-        receipt.amount = Decimal("22.00")
-        receipt.currency = "USD"
-        receipt.issued_on = date(2026, 6, 4)
-        receipt.ai_extracted_payee = "OPENAI *CHATGPT"
-        receipt.ai_extracted_card_last4 = ""
-        receipt.ai_check_service_payee_related = True
-        receipt.save(
-            update_fields=[
-                "amount",
-                "currency",
-                "issued_on",
-                "ai_extracted_payee",
-                "ai_extracted_card_last4",
-                "ai_check_service_payee_related",
-            ]
-        )
-        statement = CardStatement.objects.create(
-            period_month=date(2026, 7, 1),
-            file=SimpleUploadedFile("statement.pdf", b"%PDF-1.4 statement", content_type="application/pdf"),
-            original_filename="statement.pdf",
-            content_type="application/pdf",
-            status=CardStatementStatus.PROCESSING,
-            uploaded_by=self.superuser,
-            expires_at=timezone.now() + timedelta(days=30),
-        )
-        mocked_analysis.return_value = StatementAnalysisResult(
-            status=CardStatementStatus.COMPLETED,
-            card_last4="7210",
-            statement_period="2026-07",
-            payment_date=date(2026, 7, 29),
-            items=(
-                StatementAnalysisItem(
-                    line_reference="0277",
-                    transaction_date=date(2026, 6, 4),
-                    merchant_name="OPENAI *CHATGPT",
-                    amount_jpy=Decimal("3595"),
-                    original_amount=Decimal("22.00"),
-                    original_currency="USD",
-                    service_catalog_id=self.subscription_catalog.pk,
-                    match_status=StatementMatchStatus.MATCHED,
-                    receipt_required=True,
-                    confidence=0.99,
-                    reason="ChatGPTの請求名義と一致。",
-                ),
-            ),
-        )
-
-        process_card_statement(statement.pk)
-        item = statement.items.get()
-        candidate = item.match_candidates.get(receipt=receipt)
-
-        self.assertEqual(item.matched_receipt, receipt)
-        self.assertEqual(candidate.gate_status, StatementCandidateGateStatus.AUTO_ELIGIBLE)
-        self.assertNotEqual(candidate.gate_status, StatementCandidateGateStatus.REJECTED)
-        self.assertIn("カード末尾記載なし", candidate.rationale)
-        self.assertIn("カード末尾記載なし（中立）", candidate.evidence_labels)
-
-    def test_receipt_card_last4_match_adds_40_without_changing_priority_tier(self):
-        receipt = self.create_receipt(service=self.subscription, filename="card-score.pdf")
-        receipt.amount = Decimal("22.00")
-        receipt.currency = "USD"
-        receipt.issued_on = date(2026, 6, 4)
-        receipt.ai_extracted_payee = "OPENAI *CHATGPT"
-        receipt.ai_check_service_payee_related = True
-        receipt.save(
-            update_fields=[
-                "amount",
-                "currency",
-                "issued_on",
-                "ai_extracted_payee",
-                "ai_check_service_payee_related",
-            ]
-        )
-        statement = CardStatement.objects.create(
-            period_month=date(2026, 7, 1),
-            status=CardStatementStatus.COMPLETED,
-            card_last4="7210",
-            statement_period="2026-07",
-            original_filename="statement.pdf",
             uploaded_by=self.superuser,
             expires_at=timezone.now() + timedelta(days=30),
         )
         item = CardStatementItem.objects.create(
             statement=statement,
             sequence=1,
-            line_reference="0277",
-            transaction_date=date(2026, 6, 4),
-            merchant_name="OPENAI *CHATGPT",
-            amount_jpy=Decimal("3595"),
+            line_reference="X1",
+            transaction_date=date(2026, 6, 10),
+            merchant_name="ANTHROPIC",
             original_amount=Decimal("22.00"),
             original_currency="USD",
-            matched_catalog_service=self.subscription_catalog,
-            match_status=StatementMatchStatus.MATCHED,
-            match_confidence=0.99,
+            match_status=StatementMatchStatus.UNMATCHED,
+            match_reason_code=StatementMatchReason.NO_COMPATIBLE_RECEIPT,
             receipt_required=True,
         )
-        catalogs = list(ServiceCatalog.objects.order_by("pk"))
-        without_card = _evaluate_receipt_candidate(
-            item,
-            receipt,
-            catalogs=catalogs,
-            target_receipt_month=date(2026, 6, 1),
-        )
-        self.assertIsNotNone(without_card)
-
-        receipt.ai_extracted_card_last4 = "7210"
-        receipt.save(update_fields=["ai_extracted_card_last4"])
-        with_card = _evaluate_receipt_candidate(
-            item,
-            receipt,
-            catalogs=catalogs,
-            target_receipt_month=date(2026, 6, 1),
-        )
-        self.assertIsNotNone(with_card)
-        self.assertEqual(with_card.score - without_card.score, CARD_LAST4_MATCH_SCORE)
-        self.assertEqual(with_card.priority_tier, without_card.priority_tier)
-        self.assertEqual(with_card.gate_status, without_card.gate_status)
-        self.assertTrue(with_card.card_last4_match)
-
-    @mock.patch("receipts.statement_processing.generate_card_statement_analysis")
-    def test_different_receipt_card_last4_is_manual_candidate_not_rejected(self, mocked_analysis):
-        receipt = self.create_receipt(service=self.subscription, filename="different-card.pdf")
-        receipt.amount = Decimal("22.00")
-        receipt.currency = "USD"
-        receipt.issued_on = date(2026, 6, 4)
-        receipt.ai_extracted_payee = "OPENAI *CHATGPT"
-        receipt.ai_extracted_card_last4 = "9999"
-        receipt.ai_check_service_payee_related = True
-        receipt.save(
-            update_fields=[
-                "amount",
-                "currency",
-                "issued_on",
-                "ai_extracted_payee",
-                "ai_extracted_card_last4",
-                "ai_check_service_payee_related",
-            ]
-        )
-        statement = CardStatement.objects.create(
-            period_month=date(2026, 7, 1),
-            file=SimpleUploadedFile("statement.pdf", b"%PDF-1.4 statement", content_type="application/pdf"),
-            original_filename="statement.pdf",
-            content_type="application/pdf",
-            status=CardStatementStatus.PROCESSING,
-            uploaded_by=self.superuser,
-            expires_at=timezone.now() + timedelta(days=30),
-        )
-        mocked_analysis.return_value = StatementAnalysisResult(
-            status=CardStatementStatus.COMPLETED,
-            card_last4="7210",
-            statement_period="2026-07",
-            payment_date=date(2026, 7, 29),
-            items=(
-                StatementAnalysisItem(
-                    line_reference="0277",
-                    transaction_date=date(2026, 6, 4),
-                    merchant_name="OPENAI *CHATGPT",
-                    amount_jpy=Decimal("3595"),
-                    original_amount=Decimal("22.00"),
-                    original_currency="USD",
-                    service_catalog_id=self.subscription_catalog.pk,
-                    match_status=StatementMatchStatus.MATCHED,
-                    receipt_required=True,
-                    confidence=0.99,
-                    reason="ChatGPTの請求名義と一致。",
-                ),
-            ),
-        )
-
-        process_card_statement(statement.pk)
-        item = statement.items.get()
-        candidate = item.match_candidates.get(receipt=receipt)
-
-        self.assertIsNone(item.matched_receipt)
-        self.assertEqual(candidate.gate_status, StatementCandidateGateStatus.MANUAL_ONLY)
-        self.assertNotEqual(candidate.gate_status, StatementCandidateGateStatus.REJECTED)
-        self.assertIn("カード末尾要確認", candidate.gate_memo)
-        self.assertIn("カード末尾要確認", candidate.rationale)
-
-    @mock.patch("receipts.statement_processing.generate_card_statement_analysis")
-    def test_statement_level_card_mismatch_vetoes_exact_candidate(self, mocked_analysis):
-        receipt = self.create_receipt(service=self.subscription, filename="openai-22.pdf")
-        receipt.amount = Decimal("22.00")
-        receipt.currency = "USD"
-        receipt.issued_on = date(2026, 6, 4)
-        receipt.ai_extracted_payee = "OPENAI *CHATGPT"
-        receipt.ai_check_service_payee_related = True
-        receipt.save(
-            update_fields=[
-                "amount",
-                "currency",
-                "issued_on",
-                "ai_extracted_payee",
-                "ai_check_service_payee_related",
-            ]
-        )
-        statement = CardStatement.objects.create(
-            period_month=date(2026, 7, 1),
-            file=SimpleUploadedFile("statement.pdf", b"%PDF-1.4 statement", content_type="application/pdf"),
-            original_filename="statement.pdf",
-            content_type="application/pdf",
-            status=CardStatementStatus.PROCESSING,
-            uploaded_by=self.superuser,
-            expires_at=timezone.now() + timedelta(days=30),
-        )
-        mocked_analysis.return_value = StatementAnalysisResult(
-            status=CardStatementStatus.NEEDS_REVIEW,
-            card_last4="9999",
-            statement_period="2026-07",
-            payment_date=date(2026, 7, 29),
-            items=(
-                StatementAnalysisItem(
-                    line_reference="0277",
-                    transaction_date=date(2026, 6, 4),
-                    merchant_name="OPENAI *CHATGPT",
-                    amount_jpy=Decimal("3595"),
-                    original_amount=Decimal("22.00"),
-                    original_currency="USD",
-                    service_catalog_id=self.subscription_catalog.pk,
-                    match_status=StatementMatchStatus.MATCHED,
-                    receipt_required=True,
-                    confidence=0.99,
-                    reason="ChatGPTの請求名義と一致。",
-                ),
-            ),
-        )
-
-        process_card_statement(statement.pk)
-        item = statement.items.get()
-        candidate = item.match_candidates.get(receipt=receipt)
-
-        self.assertIsNone(item.matched_receipt)
-        self.assertEqual(item.match_status, StatementMatchStatus.UNMATCHED)
-        self.assertEqual(item.match_reason_code, StatementMatchReason.NO_COMPATIBLE_RECEIPT)
-        self.assertEqual(candidate.gate_status, StatementCandidateGateStatus.REJECTED)
-        self.assertIn("明細書のカード末尾", candidate.gate_memo)
-
-    @mock.patch("receipts.statement_processing.generate_card_statement_analysis")
-    def test_low_confidence_ai_service_candidate_does_not_identify_user(self, mocked_analysis):
-        statement = CardStatement.objects.create(
-            period_month=date(2026, 7, 1),
-            file=SimpleUploadedFile("statement.pdf", b"%PDF-1.4 statement", content_type="application/pdf"),
-            original_filename="statement.pdf",
-            content_type="application/pdf",
-            status=CardStatementStatus.PROCESSING,
-            uploaded_by=self.superuser,
-            expires_at=timezone.now() + timedelta(days=30),
-        )
-        mocked_analysis.return_value = StatementAnalysisResult(
-            status=CardStatementStatus.NEEDS_REVIEW,
-            card_last4="7210",
-            statement_period="2026-07",
-            payment_date=date(2026, 7, 29),
-            items=(
-                StatementAnalysisItem(
-                    line_reference="X1",
-                    transaction_date=date(2026, 6, 4),
-                    merchant_name="UNKNOWN BILLING",
-                    amount_jpy=Decimal("3595"),
-                    original_amount=Decimal("22.00"),
-                    original_currency="USD",
-                    service_catalog_id=self.subscription_catalog.pk,
-                    match_status=StatementMatchStatus.AMBIGUOUS,
-                    receipt_required=True,
-                    confidence=0.60,
-                    reason="候補はあるが断定できません。",
-                ),
-            ),
-        )
-
-        process_card_statement(statement.pk)
-        item = statement.items.get()
-
-        self.assertIsNone(item.matched_user)
-        self.assertIsNone(item.matched_service)
-        self.assertEqual(item.match_status, StatementMatchStatus.UNMATCHED)
-        self.assertEqual(item.match_reason_code, StatementMatchReason.NO_COMPATIBLE_RECEIPT)
-
-    @mock.patch("receipts.statement_processing.generate_card_statement_analysis")
-    def test_statement_one_cent_difference_is_rejected_even_when_service_matches(self, mocked_analysis):
-        receipt = self.create_receipt(service=self.subscription, filename="different-by-one-cent.pdf")
-        receipt.amount = Decimal("22.01")
-        receipt.currency = "USD"
-        receipt.issued_on = date(2026, 6, 4)
-        receipt.ai_extracted_payee = "OPENAI *CHATGPT"
-        receipt.ai_check_service_payee_related = True
-        receipt.save(
-            update_fields=[
-                "amount",
-                "currency",
-                "issued_on",
-                "ai_extracted_payee",
-                "ai_check_service_payee_related",
-            ]
-        )
-        statement = CardStatement.objects.create(
-            period_month=date(2026, 7, 1),
-            file=SimpleUploadedFile("statement.pdf", b"%PDF-1.4 statement", content_type="application/pdf"),
-            original_filename="statement.pdf",
-            content_type="application/pdf",
-            status=CardStatementStatus.PROCESSING,
-            uploaded_by=self.superuser,
-            expires_at=timezone.now() + timedelta(days=30),
-        )
-        mocked_analysis.return_value = StatementAnalysisResult(
-            status=CardStatementStatus.COMPLETED,
-            card_last4="7210",
-            statement_period="2026-07",
-            payment_date=date(2026, 7, 29),
-            items=(
-                StatementAnalysisItem(
-                    line_reference="0277",
-                    transaction_date=date(2026, 6, 4),
-                    merchant_name="OPENAI *CHATGPT",
-                    amount_jpy=Decimal("3595"),
-                    original_amount=Decimal("22.00"),
-                    original_currency="USD",
-                    service_catalog_id=self.subscription_catalog.pk,
-                    match_status=StatementMatchStatus.MATCHED,
-                    receipt_required=True,
-                    confidence=0.99,
-                    reason="ChatGPTの請求名義と一致。",
-                ),
-            ),
-        )
-
-        process_card_statement(statement.pk)
-        item = statement.items.get()
-        candidate = item.match_candidates.get(receipt=receipt)
-
-        self.assertIsNone(item.matched_receipt)
-        self.assertNotEqual(item.match_status, StatementMatchStatus.AMBIGUOUS)
-        self.assertEqual(candidate.gate_status, StatementCandidateGateStatus.REJECTED)
-        self.assertEqual(candidate.priority_tier, StatementCandidatePriorityTier.REJECTED)
-        self.assertFalse(candidate.amount_match)
-        self.assertIn("金額が完全一致しません", candidate.gate_memo)
-        self.assertIn("許容差は設定していません", candidate.gate_memo)
-
-    @mock.patch("receipts.statement_processing.generate_card_statement_analysis")
-    def test_statement_one_yen_difference_is_rejected(self, mocked_analysis):
-        receipt = self.create_receipt(service=self.subscription, filename="different-by-one-yen.pdf")
-        receipt.amount = Decimal("3596")
-        receipt.currency = "JPY"
-        receipt.issued_on = date(2026, 6, 4)
-        receipt.ai_extracted_payee = "OPENAI *CHATGPT"
-        receipt.ai_check_service_payee_related = True
-        receipt.save(
-            update_fields=[
-                "amount",
-                "currency",
-                "issued_on",
-                "ai_extracted_payee",
-                "ai_check_service_payee_related",
-            ]
-        )
-        statement = CardStatement.objects.create(
-            period_month=date(2026, 7, 1),
-            file=SimpleUploadedFile("statement.pdf", b"%PDF-1.4 statement", content_type="application/pdf"),
-            original_filename="statement.pdf",
-            content_type="application/pdf",
-            status=CardStatementStatus.PROCESSING,
-            uploaded_by=self.superuser,
-            expires_at=timezone.now() + timedelta(days=30),
-        )
-        mocked_analysis.return_value = StatementAnalysisResult(
-            status=CardStatementStatus.COMPLETED,
-            card_last4="7210",
-            statement_period="2026-07",
-            payment_date=date(2026, 7, 29),
-            items=(
-                StatementAnalysisItem(
-                    line_reference="0277",
-                    transaction_date=date(2026, 6, 4),
-                    merchant_name="OPENAI *CHATGPT",
-                    amount_jpy=Decimal("3595"),
-                    original_amount=Decimal("22.00"),
-                    original_currency="USD",
-                    service_catalog_id=self.subscription_catalog.pk,
-                    match_status=StatementMatchStatus.MATCHED,
-                    receipt_required=True,
-                    confidence=0.99,
-                    reason="ChatGPTの請求名義と一致。",
-                ),
-            ),
-        )
-
-        process_card_statement(statement.pk)
-        item = statement.items.get()
-        candidate = item.match_candidates.get(receipt=receipt)
-
-        self.assertIsNone(item.matched_receipt)
-        self.assertNotEqual(item.match_status, StatementMatchStatus.AMBIGUOUS)
-        self.assertEqual(candidate.gate_status, StatementCandidateGateStatus.REJECTED)
-        self.assertIn("明細: 3595 JPY", candidate.gate_memo)
-        self.assertIn("領収書: 3596 JPY", candidate.gate_memo)
-
-    @mock.patch("receipts.statement_processing.generate_card_statement_analysis")
-    def test_statement_missing_receipt_amount_is_rejected_not_ambiguous(self, mocked_analysis):
-        claude_api_catalog = ServiceCatalog.objects.create(
-            name="Claude",
-            billing_type=BillingType.METERED,
-            merchant_aliases="ANTHROPIC* CLOUD, ANTHROPIC.COM, CLAUDE API",
-            created_by=self.superuser,
-        )
-        claude_api_service = RegisteredService.objects.create(
-            user=self.user,
-            catalog_service=claude_api_catalog,
-            name=claude_api_catalog.name,
-            billing_type=claude_api_catalog.billing_type,
-            registered_by=self.superuser,
-        )
-        receipt = self.create_receipt(service=claude_api_service, filename="uchiyama-claude-22.pdf")
-        receipt.amount = None
-        receipt.currency = ""
-        receipt.issued_on = None
-        receipt.ai_extracted_payee = "ANTHROPIC"
-        receipt.ai_check_service_payee_related = True
-        receipt.save(
-            update_fields=[
-                "amount",
-                "currency",
-                "issued_on",
-                "ai_extracted_payee",
-                "ai_check_service_payee_related",
-            ]
-        )
-        statement = CardStatement.objects.create(
-            period_month=date(2026, 7, 1),
-            file=SimpleUploadedFile("statement.pdf", b"%PDF-1.4 statement", content_type="application/pdf"),
-            original_filename="statement.pdf",
-            content_type="application/pdf",
-            status=CardStatementStatus.PROCESSING,
-            uploaded_by=self.superuser,
-            expires_at=timezone.now() + timedelta(days=30),
-        )
-        mocked_analysis.return_value = StatementAnalysisResult(
-            status=CardStatementStatus.COMPLETED,
-            card_last4="7210",
-            statement_period="2026-07",
-            payment_date=date(2026, 7, 29),
-            items=(
-                StatementAnalysisItem(
-                    line_reference="0381",
-                    transaction_date=date(2026, 6, 23),
-                    merchant_name="ANTHROPIC* CLOUD",
-                    amount_jpy=Decimal("10830"),
-                    original_amount=Decimal("64.00"),
-                    original_currency="USD",
-                    service_catalog_id=claude_api_catalog.pk,
-                    match_status=StatementMatchStatus.MATCHED,
-                    receipt_required=True,
-                    confidence=0.99,
-                    reason="Claude APIの請求候補。",
-                ),
-            ),
-        )
-
-        process_card_statement(statement.pk)
-        item = statement.items.get()
-        candidate = item.match_candidates.get(receipt=receipt)
-
-        self.assertIsNone(item.matched_receipt)
-        self.assertNotEqual(item.match_status, StatementMatchStatus.AMBIGUOUS)
-        self.assertEqual(candidate.gate_status, StatementCandidateGateStatus.REJECTED)
-        self.assertEqual(candidate.priority_tier, StatementCandidatePriorityTier.REJECTED)
-        self.assertIn("金額または通貨を確認できない", candidate.gate_memo)
-
-    @mock.patch("receipts.statement_processing.generate_card_statement_analysis")
-    def test_statement_decimal_scale_difference_still_counts_as_exact(self, mocked_analysis):
-        receipt = self.create_receipt(service=self.subscription, filename="exact-22.pdf")
-        receipt.amount = Decimal("22.00")
-        receipt.currency = "USD"
-        receipt.issued_on = date(2026, 6, 4)
-        receipt.ai_extracted_payee = "OPENAI *CHATGPT"
-        receipt.ai_check_service_payee_related = True
-        receipt.save(
-            update_fields=[
-                "amount",
-                "currency",
-                "issued_on",
-                "ai_extracted_payee",
-                "ai_check_service_payee_related",
-            ]
-        )
-        statement = CardStatement.objects.create(
-            period_month=date(2026, 7, 1),
-            file=SimpleUploadedFile("statement.pdf", b"%PDF-1.4 statement", content_type="application/pdf"),
-            original_filename="statement.pdf",
-            content_type="application/pdf",
-            status=CardStatementStatus.PROCESSING,
-            uploaded_by=self.superuser,
-            expires_at=timezone.now() + timedelta(days=30),
-        )
-        mocked_analysis.return_value = StatementAnalysisResult(
-            status=CardStatementStatus.COMPLETED,
-            card_last4="7210",
-            statement_period="2026-07",
-            payment_date=date(2026, 7, 29),
-            items=(
-                StatementAnalysisItem(
-                    line_reference="0277",
-                    transaction_date=date(2026, 6, 4),
-                    merchant_name="OPENAI *CHATGPT",
-                    amount_jpy=Decimal("3595"),
-                    original_amount=Decimal("22.000"),
-                    original_currency="USD",
-                    service_catalog_id=self.subscription_catalog.pk,
-                    match_status=StatementMatchStatus.MATCHED,
-                    receipt_required=True,
-                    confidence=0.99,
-                    reason="ChatGPTの請求名義と一致。",
-                ),
-            ),
-        )
-
-        process_card_statement(statement.pk)
-        item = statement.items.get()
-        candidate = item.match_candidates.get(receipt=receipt)
-
-        self.assertEqual(item.matched_receipt, receipt)
-        self.assertEqual(candidate.gate_status, StatementCandidateGateStatus.AUTO_ELIGIBLE)
-        self.assertEqual(candidate.priority_tier, StatementCandidatePriorityTier.EXACT_IDENTITY)
-        self.assertTrue(candidate.amount_match)
-        self.assertIn("完全一致", candidate.rationale)
-
-    @mock.patch("receipts.statement_processing.generate_card_statement_analysis")
-    def test_statement_date_disambiguates_same_amount_candidates(self, mocked_analysis):
-        exact_date = self.create_receipt(service=self.subscription, filename="exact-date.pdf")
-        exact_date.amount = Decimal("22.00")
-        exact_date.currency = "USD"
-        exact_date.issued_on = date(2026, 6, 4)
-        exact_date.ai_extracted_payee = "OTHER COMPANY"
-        exact_date.save(update_fields=["amount", "currency", "issued_on", "ai_extracted_payee"])
-
-        different_date = self.create_receipt(service=self.subscription, filename="different-date.pdf")
-        different_date.amount = Decimal("22.00")
-        different_date.currency = "USD"
-        different_date.issued_on = date(2026, 6, 20)
-        different_date.ai_extracted_payee = "ANOTHER COMPANY"
-        different_date.save(update_fields=["amount", "currency", "issued_on", "ai_extracted_payee"])
-
-        statement = CardStatement.objects.create(
-            period_month=date(2026, 7, 1),
-            file=SimpleUploadedFile("statement.pdf", b"%PDF-1.4 statement", content_type="application/pdf"),
-            original_filename="statement.pdf",
-            content_type="application/pdf",
-            status=CardStatementStatus.PROCESSING,
-            uploaded_by=self.superuser,
-            expires_at=timezone.now() + timedelta(days=30),
-        )
-        mocked_analysis.return_value = StatementAnalysisResult(
-            status=CardStatementStatus.COMPLETED,
-            card_last4="7210",
-            statement_period="2026-07",
-            payment_date=date(2026, 7, 29),
-            items=(
-                StatementAnalysisItem(
-                    line_reference="0277",
-                    transaction_date=date(2026, 6, 4),
-                    merchant_name="UNKNOWN MERCHANT",
-                    amount_jpy=Decimal("3595"),
-                    original_amount=Decimal("22.00"),
-                    original_currency="USD",
-                    service_catalog_id=self.api_catalog.pk,
-                    match_status=StatementMatchStatus.MATCHED,
-                    receipt_required=True,
-                    confidence=0.80,
-                    reason="利用先は不明です。",
-                ),
-            ),
-        )
-
-        process_card_statement(statement.pk)
-        item = statement.items.get()
-
-        self.assertEqual(item.matched_receipt, exact_date)
-        self.assertNotEqual(item.matched_receipt, different_date)
-        self.assertEqual(item.match_status, StatementMatchStatus.AMBIGUOUS)
-        self.assertEqual(item.match_candidates.count(), 2)
-        self.assertTrue(item.match_candidates.get(receipt=exact_date).date_match)
-
-    @mock.patch("receipts.statement_processing.generate_card_statement_analysis")
-    def test_staff_can_confirm_one_of_statement_receipt_candidates(self, mocked_analysis):
-        receipt = self.create_receipt(service=self.subscription, filename="candidate.pdf")
-        receipt.amount = Decimal("22.00")
-        receipt.currency = "USD"
-        receipt.issued_on = date(2026, 6, 4)
-        receipt.ai_extracted_payee = "OTHER COMPANY"
-        receipt.save(update_fields=["amount", "currency", "issued_on", "ai_extracted_payee"])
-        statement = CardStatement.objects.create(
-            period_month=date(2026, 7, 1),
-            file=SimpleUploadedFile("statement.pdf", b"%PDF-1.4 statement", content_type="application/pdf"),
-            original_filename="statement.pdf",
-            content_type="application/pdf",
-            status=CardStatementStatus.PROCESSING,
-            uploaded_by=self.superuser,
-            expires_at=timezone.now() + timedelta(days=30),
-        )
-        mocked_analysis.return_value = StatementAnalysisResult(
-            status=CardStatementStatus.COMPLETED,
-            card_last4="7210",
-            statement_period="2026-07",
-            payment_date=date(2026, 7, 29),
-            items=(
-                StatementAnalysisItem(
-                    line_reference="0277",
-                    transaction_date=date(2026, 6, 4),
-                    merchant_name="UNKNOWN MERCHANT",
-                    amount_jpy=Decimal("3595"),
-                    original_amount=Decimal("22.00"),
-                    original_currency="USD",
-                    service_catalog_id=self.api_catalog.pk,
-                    match_status=StatementMatchStatus.MATCHED,
-                    receipt_required=True,
-                    confidence=0.80,
-                    reason="利用先は不明です。",
-                ),
-            ),
-        )
-        process_card_statement(statement.pk)
-        item = statement.items.get()
-        self.assertTrue(CardStatementMatchCandidate.objects.filter(item=item, receipt=receipt).exists())
-
         self.client.login(username="admin", password="admin-password-123")
+
         response = self.client.post(
             reverse("staff_update_statement_item", args=[item.pk]),
-            {"item_action": "receipt", "receipt_id": receipt.pk},
+            {"item_action": "ignore"},
         )
         self.assertRedirects(
             response,
-            reverse("staff_card_statements") + "?month=2026-07#statement-1",
+            reverse("staff_card_statements") + f"?month=2026-07#statement-{statement.pk}",
         )
         item.refresh_from_db()
-        self.assertEqual(item.matched_receipt, receipt)
-        self.assertEqual(item.match_status, StatementMatchStatus.MATCHED)
-        self.assertEqual(item.match_confidence, 1.0)
-        self.assertTrue(item.match_memo.startswith("管理者"))
+        self.assertEqual(item.match_status, StatementMatchStatus.IGNORED)
+        self.assertFalse(item.receipt_required)
+
+        response = self.client.post(
+            reverse("staff_update_statement_item", args=[item.pk]),
+            {"item_action": "required"},
+        )
+        self.assertRedirects(
+            response,
+            reverse("staff_card_statements") + f"?month=2026-07#statement-{statement.pk}",
+        )
+        item.refresh_from_db()
+        self.assertEqual(item.match_status, StatementMatchStatus.UNMATCHED)
+        self.assertTrue(item.receipt_required)
 
 
     def test_p_card_setting_controls_statement_scope_and_can_be_changed_by_admin(self):
@@ -5296,7 +4656,8 @@ class FinalWorkflowAcceptanceTests(TestCase):
             matched_user=self.user,
             matched_catalog_service=self.api_catalog,
             matched_service=self.api_service,
-            match_status=StatementMatchStatus.MATCHED,
+            match_status=StatementMatchStatus.UNMATCHED,
+            match_reason_code=StatementMatchReason.NO_COMPATIBLE_RECEIPT,
             receipt_required=True,
             match_memo="対応する領収書が見つかりません。",
         )
@@ -5345,7 +4706,8 @@ class FinalWorkflowAcceptanceTests(TestCase):
             matched_user=self.user,
             matched_catalog_service=self.api_catalog,
             matched_service=self.api_service,
-            match_status=StatementMatchStatus.MATCHED,
+            match_status=StatementMatchStatus.UNMATCHED,
+            match_reason_code=StatementMatchReason.NO_COMPATIBLE_RECEIPT,
             receipt_required=True,
             match_memo="対応する領収書が見つかりません。",
         )
@@ -5363,8 +4725,9 @@ class FinalWorkflowAcceptanceTests(TestCase):
         self.assertTrue(payload.startswith(b"%PDF-"))
         rendered_text = "\n".join(captured_text)
         self.assertIn("2026年07月明細 / 対象領収書月 2026年06月", rendered_text)
-        self.assertIn("未提出・確認対象", rendered_text)
+        self.assertIn("未一致（領収書未提出）", rendered_text)
         self.assertNotIn("未提出・手動確認対象", rendered_text)
+        self.assertNotIn("未提出・確認対象", rendered_text)
         self.assertNotIn("ユーザー別 要対応サマリー", rendered_text)
         self.assertNotIn("解析メモ", rendered_text)
         self.assertNotIn("Slack共有用PDF", rendered_text)
@@ -5373,6 +4736,8 @@ class FinalWorkflowAcceptanceTests(TestCase):
         self.assertNotIn("明細行", rendered_text)
         self.assertNotIn("領収書対象", rendered_text)
         self.assertNotIn("領収書確認済み", rendered_text)
+        self.assertNotIn("対象ユーザー", rendered_text)
+        self.assertNotIn("対象サービス", rendered_text)
 
     def test_processing_statement_report_is_not_downloadable(self):
         statement = CardStatement.objects.create(
@@ -5396,7 +4761,7 @@ class FinalWorkflowAcceptanceTests(TestCase):
         self.assertEqual(response.status_code, 404)
 
     def test_version_file_is_present_without_web_display_requirement(self):
-        self.assertEqual(Path("VERSION").read_text(encoding="utf-8").strip(), "1.10.3")
+        self.assertEqual(Path("VERSION").read_text(encoding="utf-8").strip(), "1.11.0")
 
 
 @override_settings(PASSWORD_HASHERS=FAST_PASSWORD_HASHERS)

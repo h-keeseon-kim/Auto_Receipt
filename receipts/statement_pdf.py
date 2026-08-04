@@ -26,8 +26,7 @@ MUTED = colors.HexColor("#64748B")
 BRAND = colors.HexColor("#2457D6")
 BORDER = colors.HexColor("#D7DFEA")
 HEADER_BG = colors.HexColor("#EEF3FF")
-MISSING_BG = colors.HexColor("#FFF3BF")
-REVIEW_BG = colors.HexColor("#FFE4C7")
+UNMATCHED_BG = colors.HexColor("#FFD8D4")
 NEUTRAL_BG = colors.HexColor("#F5F7FA")
 WHITE = colors.white
 
@@ -82,27 +81,13 @@ def _receipt_available(item: CardStatementItem) -> bool:
     return bool(item.matched_receipt_id and item.matched_receipt and item.matched_receipt.file_available)
 
 
-def _manual_review(item: CardStatementItem) -> bool:
-    return bool(
-        item.match_status in {StatementMatchStatus.AMBIGUOUS, StatementMatchStatus.UNMATCHED}
-        or (item.receipt_required and item.matched_user_id is None)
-    )
-
-
-def _action_status(item: CardStatementItem) -> str:
-    labels: list[str] = []
-    if item.receipt_required and not _receipt_available(item):
-        labels.append("領収書未提出")
-    if _manual_review(item):
-        labels.append("管理者確認")
-    return " / ".join(dict.fromkeys(labels)) or "確認済み"
+def _is_unmatched(item: CardStatementItem) -> bool:
+    return bool(item.receipt_required and not _receipt_available(item))
 
 
 def _row_background(item: CardStatementItem):
-    if item.receipt_required and not _receipt_available(item):
-        return MISSING_BG
-    if _manual_review(item):
-        return REVIEW_BG
+    if _is_unmatched(item):
+        return UNMATCHED_BG
     if item.match_status == StatementMatchStatus.IGNORED:
         return NEUTRAL_BG
     return WHITE
@@ -236,38 +221,30 @@ def _metadata_table(statement: CardStatement, styles: dict[str, ParagraphStyle])
     return table
 
 
-def _action_items_table(action_items: list[CardStatementItem], styles: dict[str, ParagraphStyle]) -> Table | Paragraph:
-    if not action_items:
-        return Paragraph("未提出・確認対象の明細行はありません。", styles["notice"])
+def _unmatched_items_table(items: list[CardStatementItem], styles: dict[str, ParagraphStyle]) -> Table | Paragraph:
+    if not items:
+        return Paragraph("未一致の明細行はありません。", styles["notice"])
 
-    rows = [
-        [
-            _paragraph("No.", styles["header"]),
-            _paragraph("利用日", styles["header"]),
-            _paragraph("ご利用先", styles["header"]),
-            _paragraph("金額", styles["header"]),
-            _paragraph("ユーザー", styles["header"]),
-            _paragraph("サービス", styles["header"]),
-            _paragraph("状態", styles["header"]),
-            _paragraph("確認メモ", styles["header"]),
-        ]
-    ]
-    for item in action_items:
-        rows.append(
-            [
-                _paragraph(item.line_reference or item.sequence, styles["small"]),
-                _paragraph(item.transaction_date.strftime("%Y-%m-%d") if item.transaction_date else "-", styles["small"]),
-                _paragraph(item.merchant_name, styles["small"]),
-                _paragraph(_amount_text(item), styles["small"]),
-                _paragraph(item.matched_user_label, styles["small"]),
-                _paragraph(item.matched_service_label, styles["small"]),
-                _paragraph(_action_status(item), styles["small"]),
-                _paragraph(_short_text(item.match_memo or "-"), styles["tiny"]),
-            ]
-        )
+    rows = [[
+        _paragraph("No.", styles["header"]),
+        _paragraph("利用日", styles["header"]),
+        _paragraph("ご利用先", styles["header"]),
+        _paragraph("金額", styles["header"]),
+        _paragraph("状態", styles["header"]),
+        _paragraph("判定メモ", styles["header"]),
+    ]]
+    for item in items:
+        rows.append([
+            _paragraph(item.line_reference or item.sequence, styles["small"]),
+            _paragraph(item.transaction_date.strftime("%Y-%m-%d") if item.transaction_date else "-", styles["small"]),
+            _paragraph(item.merchant_name, styles["small"]),
+            _paragraph(_amount_text(item), styles["small"]),
+            _paragraph("未一致", styles["small"]),
+            _paragraph(_short_text(item.match_memo or "-"), styles["tiny"]),
+        ])
     table = Table(
         rows,
-        colWidths=[13 * mm, 20 * mm, 43 * mm, 25 * mm, 38 * mm, 43 * mm, 28 * mm, 48 * mm],
+        colWidths=[14 * mm, 23 * mm, 66 * mm, 30 * mm, 24 * mm, 101 * mm],
         repeatRows=1,
         splitByRow=1,
     )
@@ -280,41 +257,40 @@ def _action_items_table(action_items: list[CardStatementItem], styles: dict[str,
         ("TOPPADDING", (0, 0), (-1, -1), 3),
         ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
     ]
-    for row_index, item in enumerate(action_items, start=1):
-        commands.append(("BACKGROUND", (0, row_index), (-1, row_index), _row_background(item)))
+    for row_index in range(1, len(rows)):
+        commands.append(("BACKGROUND", (0, row_index), (-1, row_index), UNMATCHED_BG))
     table.setStyle(TableStyle(commands))
     return table
 
 
 def _all_items_table(items: list[CardStatementItem], styles: dict[str, ParagraphStyle]) -> Table:
-    rows = [
-        [
-            _paragraph("No.", styles["header"]),
-            _paragraph("利用日", styles["header"]),
-            _paragraph("ご利用先", styles["header"]),
-            _paragraph("金額", styles["header"]),
-            _paragraph("ユーザー", styles["header"]),
-            _paragraph("サービス", styles["header"]),
-            _paragraph("判定理由", styles["header"]),
-            _paragraph("領収書", styles["header"]),
-        ]
-    ]
+    rows = [[
+        _paragraph("No.", styles["header"]),
+        _paragraph("利用日", styles["header"]),
+        _paragraph("ご利用先", styles["header"]),
+        _paragraph("金額", styles["header"]),
+        _paragraph("照合状態", styles["header"]),
+        _paragraph("対応領収書", styles["header"]),
+        _paragraph("判定メモ", styles["header"]),
+    ]]
     for item in items:
-        rows.append(
-            [
-                _paragraph(item.line_reference or item.sequence, styles["small"]),
-                _paragraph(item.transaction_date.strftime("%Y-%m-%d") if item.transaction_date else "-", styles["small"]),
-                _paragraph(item.merchant_name, styles["small"]),
-                _paragraph(_amount_text(item), styles["small"]),
-                _paragraph(item.matched_user_label, styles["small"]),
-                _paragraph(item.matched_service_label, styles["small"]),
-                _paragraph(item.match_reason_label, styles["small"]),
-                _paragraph(item.receipt_status_label, styles["small"]),
-            ]
+        receipt_name = (
+            item.matched_receipt.display_filename
+            if item.matched_receipt_id and item.matched_receipt and item.matched_receipt.file_available
+            else "-"
         )
+        rows.append([
+            _paragraph(item.line_reference or item.sequence, styles["small"]),
+            _paragraph(item.transaction_date.strftime("%Y-%m-%d") if item.transaction_date else "-", styles["small"]),
+            _paragraph(item.merchant_name, styles["small"]),
+            _paragraph(_amount_text(item), styles["small"]),
+            _paragraph(item.get_match_status_display(), styles["small"]),
+            _paragraph(receipt_name, styles["small"]),
+            _paragraph(_short_text(item.match_memo or "-", max_chars=120), styles["tiny"]),
+        ])
     table = Table(
         rows,
-        colWidths=[13 * mm, 20 * mm, 53 * mm, 26 * mm, 39 * mm, 46 * mm, 28 * mm, 33 * mm],
+        colWidths=[13 * mm, 22 * mm, 58 * mm, 28 * mm, 28 * mm, 56 * mm, 53 * mm],
         repeatRows=1,
         splitByRow=1,
     )
@@ -348,16 +324,12 @@ def _page_callback(canvas, doc) -> None:
 
 
 def build_card_statement_reconciliation_pdf(statement: CardStatement) -> bytes:
-    """Build a Slack-shareable PDF summary of one statement reconciliation result."""
+    """Build a Slack-shareable PDF focused on submitted vs. unmatched statement lines."""
 
     _register_fonts()
     styles = _styles()
     items = list(statement.items.all())
-    action_items = [
-        item
-        for item in items
-        if (item.receipt_required and not _receipt_available(item)) or _manual_review(item)
-    ]
+    unmatched_items = [item for item in items if _is_unmatched(item)]
 
     buffer = BytesIO()
     document = SimpleDocTemplate(
@@ -380,8 +352,8 @@ def build_card_statement_reconciliation_pdf(statement: CardStatement) -> bytes:
         ),
         _metadata_table(statement, styles),
         Spacer(1, 3 * mm),
-        Paragraph("未提出・確認対象", styles["section"]),
-        _action_items_table(action_items, styles),
+        Paragraph("未一致（領収書未提出）", styles["section"]),
+        _unmatched_items_table(unmatched_items, styles),
         PageBreak(),
         Paragraph("全明細照合結果", styles["section"]),
         _all_items_table(items, styles),
