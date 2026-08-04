@@ -212,6 +212,60 @@ class StatementMatchingEngineTests(unittest.TestCase):
         used = [key for assignment in result.assignments.values() for key in assignment.component_keys]
         self.assertEqual(len(used), len(set(used)))
 
+    def test_google_one_invoices_match_both_google_one_statement_lines(self):
+        lines = [
+            StatementLine(
+                key="0356",
+                sequence=1,
+                transaction_date=date(2026, 6, 12),
+                merchant_key="GOOGLE_ONE",
+                amount_options=(AmountOption(Decimal("32000"), "JPY", "円請求額"),),
+                reference="0356",
+            ),
+            StatementLine(
+                key="0379",
+                sequence=2,
+                transaction_date=date(2026, 6, 24),
+                merchant_key="GOOGLE_ONE",
+                amount_options=(AmountOption(Decimal("32000"), "JPY", "円請求額"),),
+                reference="0379",
+            ),
+        ]
+        components = [
+            EvidenceComponent(
+                key="google-one-june-11",
+                receipt_id=1,
+                receipt_order=1,
+                filename="google-one-1.pdf",
+                merchant_key="GOOGLE_ONE",
+                signed_amount=Decimal("32000"),
+                currency="JPY",
+                event_date=date(2026, 6, 11),
+                document_kind=DOC_INVOICE,
+                payee="Google Asia Pacific Pte. Ltd.",
+                service_label="Google One",
+            ),
+            EvidenceComponent(
+                key="google-one-june-23",
+                receipt_id=2,
+                receipt_order=2,
+                filename="google-one-2.pdf",
+                merchant_key="GOOGLE_ONE",
+                signed_amount=Decimal("32000"),
+                currency="JPY",
+                event_date=date(2026, 6, 23),
+                document_kind=DOC_INVOICE,
+                payee="Google Asia Pacific Pte. Ltd.",
+                service_label="Google One",
+            ),
+        ]
+
+        result = reconcile_statement(lines, components, date_tolerance_days=1)
+
+        self.assertEqual(set(result.assignments), {"0356", "0379"})
+        self.assertEqual(result.assignments["0356"].component_keys, ("google-one-june-11",))
+        self.assertEqual(result.assignments["0379"].component_keys, ("google-one-june-23",))
+
     def test_unrelated_merchant_does_not_match_even_if_amount_and_date_match(self):
         result = reconcile_statement(
             [line("L", 1, 10, "OPENAI", "22")],

@@ -68,6 +68,9 @@ SIMPLE_RECEIPT_MATCHING_RECONCILE_MARKER = (
 EMPIRICAL_MATCHING_RECONCILE_MARKER = (
     "【照合ルール更新】2026年7月実明細61行・提出PDF63件の全件検証に基づき、取引構成要素・重複排除・返金純額照合へ更新したため再照合します。"
 )
+SERVICE_LABEL_RECONCILE_MARKER = (
+    "【照合ルール更新】法的な払先と領収書本文のサービス名を分離し、Google One等をサービス名で照合するため再照合します。"
+)
 
 # 実データでは通常一致56件がすべて同日または1日差だった。
 DATE_MATCH_TOLERANCE_DAYS = 1
@@ -104,6 +107,7 @@ def reconcile_pending_card_statement_month_semantics(*, period_month=None, state
         | Q(ai_admin_memo__contains=EXACT_AMOUNT_MATCHING_RECONCILE_MARKER)
         | Q(ai_admin_memo__contains=SIMPLE_RECEIPT_MATCHING_RECONCILE_MARKER)
         | Q(ai_admin_memo__contains=EMPIRICAL_MATCHING_RECONCILE_MARKER)
+        | Q(ai_admin_memo__contains=SERVICE_LABEL_RECONCILE_MARKER)
     ).exclude(status__in=[CardStatementStatus.PROCESSING, CardStatementStatus.FAILED])
     if period_month is not None:
         queryset = queryset.filter(period_month=period_month)
@@ -312,6 +316,9 @@ def _enrich_receipt_financial_metadata(receipt: Receipt) -> None:
         if fallback.payee and not receipt.ai_extracted_payee:
             receipt.ai_extracted_payee = fallback.payee[:160]
             update_fields.append("ai_extracted_payee")
+        if fallback.service_label and not receipt.ai_extracted_service_label:
+            receipt.ai_extracted_service_label = fallback.service_label[:160]
+            update_fields.append("ai_extracted_service_label")
         if fallback.payment_date and (receipt.issued_on is None or fallback.financial_document_kind == ReceiptFinancialDocumentKind.REFUND):
             receipt.issued_on = fallback.payment_date
             update_fields.append("issued_on")
@@ -334,6 +341,7 @@ def _enrich_receipt_financial_metadata(receipt: Receipt) -> None:
                 "currency": receipt.currency.upper(),
                 "transaction_date": receipt.issued_on.isoformat(),
                 "payee": receipt.ai_extracted_payee,
+                "service_label": receipt.ai_extracted_service_label,
                 "invoice_number": receipt.financial_transaction_reference,
                 "transaction_id": receipt.financial_transaction_reference,
                 "related_transaction_id": receipt.financial_related_reference,
@@ -368,6 +376,7 @@ def _receipt_components(
             currency = str(raw.get("currency") or "").upper()[:3]
             event_date = _parse_date(raw.get("transaction_date"))
             payee = str(raw.get("payee") or receipt.ai_extracted_payee or "").strip()
+            service_label = str(raw.get("service_label") or receipt.ai_extracted_service_label or "").strip()
             amount = -abs(amount) if role == ROLE_REFUND and amount is not None else (abs(amount) if amount is not None else None)
             document_kind = str(raw.get("document_kind") or receipt.financial_document_kind or "unknown").lower()
 
@@ -384,12 +393,16 @@ def _receipt_components(
                 or not payee
             ):
                 continue
-            merchant_key = _canonical_merchant_key(payee, catalogs)
+            # Google Asia Pacificのような法的販売者名だけでは、Google Oneと
+            # Google Cloudを区別できない。領収書本文に製品・サービス名が明示
+            # されている場合は、そのサービス名の既知キーを最優先する。
+            service_merchant_key = _known_merchant_key(service_label)
+            merchant_key = service_merchant_key or _canonical_merchant_key(payee, catalogs)
             if not merchant_key:
                 continue
             evidence_payee = payee
             raw_key = str(raw.get("component_key") or f"component-{index + 1}")
-            component_key = f"receipt-{receipt.pk}:{raw_key}"[:240]
+            component_key = f"receipt-{receipt.pk}:{raw_key}"[:160]
             components.append(
                 EvidenceComponent(
                     key=component_key,
@@ -407,6 +420,7 @@ def _receipt_components(
                     related_transaction_id=str(raw.get("related_transaction_id") or "")[:160],
                     source_label=str(raw.get("source_label") or "")[:120],
                     payee=evidence_payee[:160],
+                    service_label=service_label[:160],
                 )
             )
             valid_count += 1
@@ -427,6 +441,7 @@ def _statement_line(item: CardStatementItem, catalogs: list[ServiceCatalog]) -> 
         transaction_date=item.transaction_date,
         merchant_key=_canonical_merchant_key(item.merchant_name, catalogs),
         amount_options=tuple(options),
+        reference=item.line_reference,
     )
 
 
@@ -527,6 +542,7 @@ def _create_evidence_records(
                 document_kind_snapshot=component.document_kind[:20],
                 filename_snapshot=component.filename[:255],
                 payee_snapshot=component.payee[:160],
+                service_label_snapshot=component.service_label[:160],
                 invoice_number_snapshot=component.invoice_number[:160],
                 transaction_reference_snapshot=component.transaction_id[:160],
                 related_transaction_reference_snapshot=component.related_transaction_id[:160],
@@ -537,7 +553,7 @@ def _create_evidence_records(
 
 
 def _unresolved_receipt_key(receipt: Receipt, catalogs: list[ServiceCatalog]) -> str:
-    context = receipt.ai_extracted_payee
+    context = receipt.ai_extracted_service_label or receipt.ai_extracted_payee
     if not context and receipt.service_id:
         context = receipt.service.display_name
         if receipt.service.catalog_service_id:
@@ -576,8 +592,171 @@ def _shortage_note(
         return (
             f"同一請求元・金額・通貨の明細{same_lines}件に対して、明示参照番号で重複除外した"
             f"決済証憑は{support}件です。少なくとも{same_lines - support}件不足しています。"
+            "同額・同請求元の明細を利用者情報なしで一対一割当しているため、この行は不足件数を代表して"
+            "未一致表示しており、特定ユーザーの不足を意味しません。"
         )
     return "対応する提出書類を確認できません。"
+
+
+
+def _line_amount_for_currency(line: StatementLine, currency: str) -> AmountOption | None:
+    return next((option for option in line.amount_options if option.currency == currency), None)
+
+
+def _unused_component_reason(
+    component: EvidenceComponent,
+    lines: list[StatementLine],
+) -> dict[str, Any]:
+    """未使用の提出証拠が明細へ紐付かなかった理由を説明する。"""
+
+    merchant_lines = [line for line in lines if line.merchant_key == component.merchant_key]
+    if not merchant_lines:
+        return {
+            "reason_code": "merchant_not_found",
+            "reason": "ご利用代金明細に同じ請求元・サービスの明細がありません。",
+        }
+
+    amount_compatible: list[tuple[StatementLine, AmountOption]] = []
+    same_currency: list[tuple[StatementLine, AmountOption]] = []
+    for line in merchant_lines:
+        option = _line_amount_for_currency(line, component.currency)
+        if option is None:
+            continue
+        same_currency.append((line, option))
+        if option.amount == component.signed_amount:
+            amount_compatible.append((line, option))
+
+    def date_distance(line: StatementLine) -> int:
+        if line.transaction_date and component.event_date:
+            return abs((line.transaction_date - component.event_date).days)
+        return 9999
+
+    if amount_compatible:
+        line, option = min(amount_compatible, key=lambda pair: (date_distance(pair[0]), pair[0].sequence, pair[0].key))
+        distance = date_distance(line)
+        if distance > DATE_MATCH_TOLERANCE_DAYS:
+            return {
+                "reason_code": "date_outside_window",
+                "reason": (
+                    f"請求元・金額・通貨は明細 {line.reference or line.sequence} と一致しますが、"
+                    f"日付差が{distance}日あり、±{DATE_MATCH_TOLERANCE_DAYS}日の照合範囲外です。"
+                ),
+                "closest_line_key": line.key,
+                "closest_line_reference": line.reference,
+                "closest_line_sequence": line.sequence,
+                "closest_statement_date": line.transaction_date.isoformat() if line.transaction_date else "",
+                "closest_statement_amount": format(option.amount, "f"),
+                "closest_statement_currency": option.currency,
+            }
+        return {
+            "reason_code": "surplus_evidence",
+            "reason": (
+                "同じ請求元・金額・通貨・近接日付の明細はありますが、他の提出証拠が先に一対一で割り当てられています。"
+                "明細件数より提出証拠が多い、または重複書類の可能性があります。"
+            ),
+            "closest_line_key": line.key,
+            "closest_line_reference": line.reference,
+            "closest_line_sequence": line.sequence,
+            "closest_statement_date": line.transaction_date.isoformat() if line.transaction_date else "",
+            "closest_statement_amount": format(option.amount, "f"),
+            "closest_statement_currency": option.currency,
+        }
+
+    if same_currency:
+        line, option = min(same_currency, key=lambda pair: (date_distance(pair[0]), pair[0].sequence, pair[0].key))
+        distance = date_distance(line)
+        if distance <= DATE_MATCH_TOLERANCE_DAYS:
+            return {
+                "reason_code": "amount_mismatch",
+                "reason": (
+                    f"同じ請求元で日付が近い明細 {line.reference or line.sequence} がありますが、"
+                    f"金額が明細 {format(option.amount, 'f')} {option.currency} に対し、"
+                    f"提出書類は {format(component.signed_amount, 'f')} {component.currency} です。"
+                ),
+                "closest_line_key": line.key,
+                "closest_line_reference": line.reference,
+                "closest_line_sequence": line.sequence,
+                "closest_statement_date": line.transaction_date.isoformat() if line.transaction_date else "",
+                "closest_statement_amount": format(option.amount, "f"),
+                "closest_statement_currency": option.currency,
+            }
+        return {
+            "reason_code": "amount_and_date_mismatch",
+            "reason": "同じ請求元の明細はありますが、金額完全一致かつ日付±1日の条件を満たしません。",
+            "closest_line_key": line.key,
+            "closest_line_reference": line.reference,
+            "closest_line_sequence": line.sequence,
+            "closest_statement_date": line.transaction_date.isoformat() if line.transaction_date else "",
+            "closest_statement_amount": format(option.amount, "f"),
+            "closest_statement_currency": option.currency,
+        }
+
+    line = min(merchant_lines, key=lambda candidate: (date_distance(candidate), candidate.sequence, candidate.key))
+    return {
+        "reason_code": "currency_mismatch",
+        "reason": "同じ請求元の明細はありますが、比較可能な同一通貨の金額がありません。",
+        "closest_line_key": line.key,
+        "closest_line_reference": line.reference,
+        "closest_line_sequence": line.sequence,
+        "closest_statement_date": line.transaction_date.isoformat() if line.transaction_date else "",
+    }
+
+
+def _build_unmatched_receipt_snapshot(
+    *,
+    unused_components: list[EvidenceComponent],
+    unresolved_receipts: list[Receipt],
+    lines: list[StatementLine],
+    receipt_by_id: dict[int, Receipt],
+) -> list[dict[str, Any]]:
+    snapshots: list[dict[str, Any]] = []
+    for component in sorted(unused_components, key=lambda value: (value.receipt_order, value.key)):
+        receipt = receipt_by_id.get(component.receipt_id)
+        if receipt is None:
+            continue
+        reason = _unused_component_reason(component, lines)
+        snapshots.append(
+            {
+                "receipt_id": receipt.pk,
+                "component_key": component.key,
+                "filename": receipt.display_filename,
+                "original_filename": receipt.original_filename,
+                "user": receipt.submission.user.username,
+                "service": receipt.service_display_name_snapshot,
+                "service_label": component.service_label or receipt.ai_extracted_service_label,
+                "payee": component.payee or receipt.ai_extracted_payee,
+                "event_date": component.event_date.isoformat() if component.event_date else "",
+                "amount": format(component.signed_amount, "f"),
+                "currency": component.currency,
+                "role": component.role,
+                "document_kind": component.document_kind,
+                "source_label": component.source_label,
+                **reason,
+            }
+        )
+
+    for receipt in unresolved_receipts:
+        snapshots.append(
+            {
+                "receipt_id": receipt.pk,
+                "component_key": "",
+                "filename": receipt.display_filename,
+                "original_filename": receipt.original_filename,
+                "user": receipt.submission.user.username,
+                "service": receipt.service_display_name_snapshot,
+                "service_label": receipt.ai_extracted_service_label,
+                "payee": receipt.ai_extracted_payee,
+                "event_date": receipt.issued_on.isoformat() if receipt.issued_on else "",
+                "amount": format(receipt.amount, "f") if receipt.amount is not None else "",
+                "currency": receipt.currency or "",
+                "role": "",
+                "document_kind": receipt.financial_document_kind,
+                "source_label": "",
+                "reason_code": "parse_review",
+                "reason": "提出ファイルはありますが、明細照合に必要な取引構成要素を抽出できません。AI再検査または管理者確認が必要です。",
+            }
+        )
+    return snapshots
 
 
 def reconcile_card_statement_items(statement_id: int, *, preserve_manual: bool = True) -> CardStatement:
@@ -600,6 +779,10 @@ def reconcile_card_statement_items(statement_id: int, *, preserve_manual: bool =
     statement_errors = _statement_gate_errors(statement)
 
     manual_item_ids = {item.pk for item in items if preserve_manual and _is_manual_override(item)}
+    manual_component_keys = set(
+        CardStatementReceiptEvidence.objects.filter(statement_item_id__in=manual_item_ids)
+        .values_list("component_key", flat=True)
+    )
     auto_items: list[CardStatementItem] = []
     auto_lines: list[StatementLine] = []
     for item in items:
@@ -641,7 +824,7 @@ def reconcile_card_statement_items(statement_id: int, *, preserve_manual: bool =
 
     reconciliation = reconcile_statement(
         auto_lines,
-        components,
+        [component for component in components if component.key not in manual_component_keys],
         date_tolerance_days=DATE_MATCH_TOLERANCE_DAYS,
     )
     component_by_key = reconciliation.components_by_key
@@ -702,6 +885,18 @@ def reconcile_card_statement_items(statement_id: int, *, preserve_manual: bool =
                 base_memo=_base_match_memo(item.match_memo),
                 reason=_shortage_note(item, items, list(component_by_key.values()), catalogs),
             )
+
+    unused_components = [
+        component_by_key[key]
+        for key in reconciliation.unused_component_keys
+        if key in component_by_key
+    ]
+    unmatched_receipt_snapshot = _build_unmatched_receipt_snapshot(
+        unused_components=unused_components,
+        unresolved_receipts=unresolved_pool,
+        lines=auto_lines,
+        receipt_by_id=receipt_by_id,
+    )
 
     no_usage_conflicts: list[str] = []
     for item in items:
@@ -764,6 +959,7 @@ def reconcile_card_statement_items(statement_id: int, *, preserve_manual: bool =
             EXACT_AMOUNT_MATCHING_RECONCILE_MARKER,
             SIMPLE_RECEIPT_MATCHING_RECONCILE_MARKER,
             EMPIRICAL_MATCHING_RECONCILE_MARKER,
+            SERVICE_LABEL_RECONCILE_MARKER,
         ):
             extraction_memo = extraction_memo.replace(marker, "")
         extraction_memo = extraction_memo.strip()
@@ -772,7 +968,8 @@ def reconcile_card_statement_items(statement_id: int, *, preserve_manual: bool =
             f"【照合結果】明細月{statement.period_month:%Y-%m}（対象領収書月{target_receipt_month:%Y-%m}）の"
             f"提出PDF{len(receipts)}件を、ファイル名や利用者ではなくPDF本文の取引構成要素で照合しました。"
             f"直接一致{direct_count}件、返金書内の元決済{original_count}件、紐付返金相殺{linked_count}件、"
-            f"同一請求元内の近接返金相殺{merchant_net_count}件、解析要確認{review_count}件、未一致{missing_count}件です。"
+            f"同一請求元内の近接返金相殺{merchant_net_count}件、解析要確認{review_count}件、未一致{missing_count}件、"
+            f"明細未使用の提出証拠{len(unmatched_receipt_snapshot)}件です。"
             f"通常取引は金額・通貨完全一致、請求元一致、利用日±{DATE_MATCH_TOLERANCE_DAYS}日を全体最適化で一対一割当し、"
             "明示Invoice/Transaction IDが同じ重複書類は1取引として扱っています。利用者特定は条件に含めません。"
         )
@@ -781,8 +978,14 @@ def reconcile_card_statement_items(statement_id: int, *, preserve_manual: bool =
         if no_usage_conflicts:
             reconciliation_memo += " " + " ".join(dict.fromkeys(no_usage_conflicts))
         statement.ai_admin_memo = " ".join(part for part in (extraction_memo, reconciliation_memo) if part)[:5000]
+        statement.unmatched_receipt_components = unmatched_receipt_snapshot
         statement.reconciled_at = timezone.now()
-        statement.save(update_fields=["status", "ai_admin_memo", "reconciled_at", "updated_at"])
+        statement.save(
+            update_fields=[
+                "status", "ai_admin_memo", "unmatched_receipt_components",
+                "reconciled_at", "updated_at",
+            ]
+        )
     return statement
 
 

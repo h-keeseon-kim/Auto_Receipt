@@ -1,3 +1,22 @@
+<nav class="statement-result-filter-tabs" aria-label="照合結果の絞り込み">
+    {% for option in statement_result_filter_options %}
+        <a
+            class="statement-result-filter-tab{% if option.active %} active{% endif %}"
+            href="{% url 'staff_card_statements' %}?month={{ selected_month|date:'Y-m' }}&result={{ option.key }}"
+            {% if option.active %}aria-current="page"{% endif %}
+        >
+            <span>{{ option.label }}</span>
+            <strong>{{ option.count }}</strong>
+        </a>
+    {% endfor %}
+</nav>
+<div class="statement-result-filter-summary">
+    <strong>{{ result_filter_label }}を表示中</strong>
+    {% for option in statement_result_filter_options %}
+        {% if option.active %}<span>{{ option.count }}件 / 全{{ result_filter_counts.all }}件</span>{% endif %}
+    {% endfor %}
+</div>
+
 {% for statement in statements %}
 <section class="card section statement-card" id="statement-{{ statement.pk }}" data-statement-status="{{ statement.status }}">
     <div class="section-header">
@@ -14,6 +33,7 @@
             {% if statement.status != 'processing' and statement.status != 'failed' %}
                 <form method="post" action="{% url 'staff_reconcile_card_statement' statement.pk %}">
                     {% csrf_token %}
+                    <input type="hidden" name="result" value="{{ result_filter }}">
                     <button type="submit" class="button small">最新の領収書と再照合</button>
                 </form>
                 {% if statement.items.count %}
@@ -23,6 +43,7 @@
             {% if statement.file_available %}<a class="button small" href="{% url 'staff_download_card_statement' statement.pk %}">明細DL</a>{% endif %}
             <form method="post" action="{% url 'staff_delete_card_statement' statement.pk %}" onsubmit="return confirm('この全社カード明細ファイルと照合履歴を削除しますか？');">
                 {% csrf_token %}
+                <input type="hidden" name="result" value="{{ result_filter }}">
                 <button type="submit" class="button small danger-outline">削除</button>
             </form>
         </div>
@@ -37,6 +58,7 @@
         <div class="card"><span class="label">明細行</span><strong>{{ statement.items.count }}</strong></div>
         <div class="card"><span class="label">解析要確認</span><strong class="{% if statement.manual_review_count %}warning{% endif %}">{{ statement.manual_review_count }}</strong></div>
         <div class="card"><span class="label">未一致</span><strong class="{% if statement.missing_receipt_count %}danger{% endif %}">{{ statement.missing_receipt_count }}</strong></div>
+        <div class="card"><span class="label">明細未使用の提出書類</span><strong class="{% if statement.unmatched_receipt_components %}warning{% endif %}">{{ statement.unmatched_receipt_components|length }}</strong></div>
     </section>
 
     {% if statement.ai_admin_memo %}
@@ -45,86 +67,139 @@
 
     {% if statement.status == 'processing' %}
         <div class="message notice processing-text">AIで全社明細の情報を抽出中です。完了した解析結果はこの画面へ自動反映されます。</div>
-    {% elif statement.items.all %}
+    {% elif statement.items.count %}
         <div class="message notice statement-match-rule-notice">
             <strong>照合条件：</strong>
-            通常取引は、金額・通貨完全一致、ご利用先・払先関連、明細利用日と領収書日付が±1日以内の候補を、明細全体で最大件数となるよう一対一割り当てします。
-            同一取引の請求書と領収書は参照番号で重複除外し、残った明細では1件の請求・支払と最大3件の返金を純額完全一致で照合します。
+            通常取引は、金額・通貨完全一致、ご利用先・払先または本文上のサービス名の関連、明細利用日と領収書日付が±1日以内の候補を、明細全体で最大件数となるよう一対一割り当てします。
+            法的な販売者名とサービス名は別に保持します。例えば「Google Asia Pacific Pte. Ltd.」が販売者でも、本文に「Google One」と明示されていればGoogle One明細として照合します。
             利用者の特定は判定条件に含めません。<strong>赤色は未一致、黄色は提出ファイルの解析要確認です。</strong>
         </div>
-        <div class="statement-result-list" role="list" aria-label="ご利用代金明細の照合結果">
-            {% for item in statement.items.all %}
-                <article class="statement-result-card {{ item.row_class }}" role="listitem">
-                    <header class="statement-result-header">
-                        <div class="statement-result-title">
-                            <div class="statement-result-kicker">
-                                <span class="badge neutral">明細 {{ item.line_reference|default:item.sequence }}</span>
-                                <span class="muted small">{{ item.transaction_date|date:"Y-m-d"|default:"利用日未抽出" }}</span>
+
+        {% if statement.display_items %}
+            <div class="statement-result-list" role="list" aria-label="ご利用代金明細の照合結果">
+                {% for item in statement.display_items %}
+                    <article class="statement-result-card {{ item.row_class }}" role="listitem">
+                        <header class="statement-result-header">
+                            <div class="statement-result-title">
+                                <div class="statement-result-kicker">
+                                    <span class="badge neutral">明細 {{ item.line_reference|default:item.sequence }}</span>
+                                    <span class="muted small">{{ item.transaction_date|date:"Y-m-d"|default:"利用日未抽出" }}</span>
+                                </div>
+                                <h3>{{ item.merchant_name }}</h3>
                             </div>
-                            <h3>{{ item.merchant_name }}</h3>
-                        </div>
-                        <div class="statement-result-amount" aria-label="明細金額">
-                            {% if item.amount_jpy is not None %}<strong>¥{{ item.amount_jpy|floatformat:0 }}</strong>{% else %}<strong>-</strong>{% endif %}
-                            {% if item.original_amount is not None %}<span>{{ item.original_amount|floatformat:-2 }} {{ item.original_currency }}</span>{% endif %}
-                        </div>
-                        <div class="statement-result-badges">
-                            <span class="badge {% if item.match_status == 'matched' %}submitted{% elif item.match_status == 'ignored' %}neutral{% elif item.match_status == 'needs_review' %}draft{% else %}danger{% endif %}">{{ item.get_match_status_display }}</span>
-                            <span class="badge {% if item.match_status == 'matched' %}submitted{% elif not item.receipt_required %}neutral{% elif item.match_status == 'needs_review' %}draft{% else %}danger{% endif %}">{{ item.receipt_status_label }}</span>
-                        </div>
-                    </header>
+                            <div class="statement-result-amount" aria-label="明細金額">
+                                {% if item.amount_jpy is not None %}<strong>¥{{ item.amount_jpy|floatformat:0 }}</strong>{% else %}<strong>-</strong>{% endif %}
+                                {% if item.original_amount is not None %}<span>{{ item.original_amount|floatformat:-2 }} {{ item.original_currency }}</span>{% endif %}
+                            </div>
+                            <div class="statement-result-badges">
+                                <span class="badge {% if item.match_status == 'matched' %}submitted{% elif item.match_status == 'ignored' %}neutral{% elif item.match_status == 'needs_review' %}draft{% else %}danger{% endif %}">{{ item.get_match_status_display }}</span>
+                                <span class="badge {% if item.match_status == 'matched' %}submitted{% elif not item.receipt_required %}neutral{% elif item.match_status == 'needs_review' %}draft{% else %}danger{% endif %}">{{ item.receipt_status_label }}</span>
+                            </div>
+                        </header>
 
-                    <div class="statement-simple-result-grid">
-                        <section class="statement-result-panel">
-                            <h4>照合証拠</h4>
-                            {% if item.receipt_evidences.all %}
-                                <ul class="statement-evidence-list">
-                                    {% for evidence in item.receipt_evidences.all %}
-                                        <li>
-                                            <span class="badge {% if evidence.role == 'refund' %}draft{% else %}submitted{% endif %}">{{ evidence.get_role_display }}</span>
-                                            {% if evidence.receipt and evidence.receipt.file_available %}
-                                                <a href="{% url 'download_receipt' evidence.receipt.pk %}">{{ evidence.filename_snapshot }}</a>
-                                            {% else %}
-                                                <span>{{ evidence.filename_snapshot }}</span>
-                                            {% endif %}
-                                            <span class="muted small">{{ evidence.amount_display }}{% if evidence.event_date %} / {{ evidence.event_date|date:"Y-m-d" }}{% endif %}</span>
-                                        </li>
-                                    {% endfor %}
-                                </ul>
-                                {% if item.evidence_count > 1 %}<p class="muted small"><strong>純額:</strong> {{ item.evidence_calculation }}</p>{% endif %}
-                            {% elif item.match_status == 'needs_review' %}
-                                <p class="warning"><strong>提出ファイルはありますが、照合に必要な情報を抽出できていません。</strong></p>
-                            {% elif item.receipt_required %}
-                                <p class="danger"><strong>提出済み領収書と一致しませんでした。</strong></p>
-                            {% else %}
-                                <p class="muted">領収書管理対象外です。</p>
-                            {% endif %}
-                        </section>
-
-                        <section class="statement-result-panel statement-result-judgement">
-                            <h4>判定</h4>
-                            <p class="statement-match-reason"><strong>{{ item.match_reason_label }}</strong></p>
-                            {% if item.match_memo %}<p class="muted small statement-result-memo">{{ item.match_memo }}</p>{% endif %}
-                        </section>
-
-                        <section class="statement-result-panel statement-result-admin-panel">
-                            <h4>管理者操作</h4>
-                            <form method="post" action="{% url 'staff_update_statement_item' item.pk %}" class="statement-item-form statement-item-form-compact">
-                                {% csrf_token %}
-                                {% if item.receipt_required %}
-                                    <p class="muted small">この明細が領収書不要の項目である場合のみ、対象外に変更してください。</p>
-                                    <button type="submit" name="item_action" value="ignore" class="button small">領収書対象外にする</button>
+                        <div class="statement-simple-result-grid">
+                            <section class="statement-result-panel">
+                                <h4>照合証拠</h4>
+                                {% if item.receipt_evidences.all %}
+                                    <ul class="statement-evidence-list">
+                                        {% for evidence in item.receipt_evidences.all %}
+                                            <li>
+                                                <span class="badge {% if evidence.role == 'refund' %}draft{% else %}submitted{% endif %}">{{ evidence.get_role_display }}</span>
+                                                {% if evidence.receipt and evidence.receipt.file_available %}
+                                                    <a href="{% url 'download_receipt' evidence.receipt.pk %}">{{ evidence.filename_snapshot }}</a>
+                                                {% else %}
+                                                    <span>{{ evidence.filename_snapshot }}</span>
+                                                {% endif %}
+                                                <span class="muted small">{{ evidence.amount_display }}{% if evidence.event_date %} / {{ evidence.event_date|date:"Y-m-d" }}{% endif %}</span>
+                                                {% if evidence.service_label_snapshot %}<span class="statement-evidence-service">サービス: {{ evidence.service_label_snapshot }}</span>{% endif %}
+                                                {% if evidence.payee_snapshot and evidence.payee_snapshot != evidence.service_label_snapshot %}<span class="muted small">販売者: {{ evidence.payee_snapshot }}</span>{% endif %}
+                                            </li>
+                                        {% endfor %}
+                                    </ul>
+                                    {% if item.evidence_count > 1 %}<p class="muted small"><strong>純額:</strong> {{ item.evidence_calculation }}</p>{% endif %}
+                                {% elif item.match_status == 'needs_review' %}
+                                    <p class="warning"><strong>提出ファイルはありますが、照合に必要な情報を抽出できていません。</strong></p>
+                                {% elif item.receipt_required %}
+                                    <p class="danger"><strong>提出済み領収書と一致しませんでした。</strong></p>
                                 {% else %}
-                                    <p class="muted small">領収書照合対象へ戻すと、保存済み領収書で再照合します。</p>
-                                    <button type="submit" name="item_action" value="required" class="button small">領収書対象に戻す</button>
+                                    <p class="muted">領収書管理対象外です。</p>
                                 {% endif %}
-                            </form>
-                        </section>
+                            </section>
+
+                            <section class="statement-result-panel statement-result-judgement">
+                                <h4>判定</h4>
+                                <p class="statement-match-reason"><strong>{{ item.match_reason_label }}</strong></p>
+                                {% if item.match_memo %}<p class="muted small statement-result-memo">{{ item.match_memo }}</p>{% endif %}
+                            </section>
+
+                            <section class="statement-result-panel statement-result-admin-panel">
+                                <h4>管理者操作</h4>
+                                <form method="post" action="{% url 'staff_update_statement_item' item.pk %}" class="statement-item-form statement-item-form-compact">
+                                    {% csrf_token %}
+                                    <input type="hidden" name="result" value="{{ result_filter }}">
+                                    {% if item.receipt_required %}
+                                        <p class="muted small">この明細が領収書不要の項目である場合のみ、対象外に変更してください。</p>
+                                        <button type="submit" name="item_action" value="ignore" class="button small">領収書対象外にする</button>
+                                    {% else %}
+                                        <p class="muted small">領収書照合対象へ戻すと、保存済み領収書で再照合します。</p>
+                                        <button type="submit" name="item_action" value="required" class="button small">領収書対象に戻す</button>
+                                    {% endif %}
+                                </form>
+                            </section>
+                        </div>
+                    </article>
+                {% endfor %}
+            </div>
+        {% else %}
+            <div class="card statement-filter-empty">
+                <strong>{{ result_filter_label }}に該当する明細はありません。</strong>
+                <a href="{% url 'staff_card_statements' %}?month={{ selected_month|date:'Y-m' }}&result=all">すべての結果を表示</a>
+            </div>
+        {% endif %}
+
+        {% if result_filter == 'all' or result_filter == 'unmatched' %}
+            {% if statement.unmatched_receipt_components %}
+                <section class="statement-unused-receipts" aria-labelledby="unused-receipts-{{ statement.pk }}">
+                    <div class="section-header compact">
+                        <div>
+                            <h3 id="unused-receipts-{{ statement.pk }}">明細に紐づかなかった提出書類</h3>
+                            <p class="muted">提出済みですが、カード明細のどの行にも一対一で使用されなかった書類です。カード明細側の金額誤記、別取引、重複提出、日付差、解析不足を確認できます。</p>
+                        </div>
+                        <span class="badge draft">{{ statement.unmatched_receipt_components|length }}件</span>
                     </div>
-                </article>
-            {% empty %}
-                <div class="muted center statement-result-empty">明細項目を抽出できませんでした。</div>
-            {% endfor %}
-        </div>
+                    <div class="statement-unused-receipt-grid">
+                        {% for entry in statement.unmatched_receipt_components %}
+                            <article class="statement-unused-receipt-card{% if entry.reason_code == 'amount_mismatch' %} amount-mismatch{% elif entry.reason_code == 'parse_review' %} review{% endif %}">
+                                <div class="statement-unused-receipt-heading">
+                                    <div>
+                                        <span class="badge {% if entry.reason_code == 'amount_mismatch' %}danger{% else %}draft{% endif %}">
+                                            {% if entry.reason_code == 'amount_mismatch' %}金額不一致{% elif entry.reason_code == 'parse_review' %}解析要確認{% elif entry.reason_code == 'surplus_evidence' %}余剰・重複候補{% else %}明細未使用{% endif %}
+                                        </span>
+                                        <h4>
+                                            {% if entry.receipt_id %}<a href="{% url 'download_receipt' entry.receipt_id %}">{{ entry.filename }}</a>{% else %}{{ entry.filename }}{% endif %}
+                                        </h4>
+                                    </div>
+                                    {% if entry.amount %}<strong>{{ entry.amount|floatformat:-2 }} {{ entry.currency }}</strong>{% endif %}
+                                </div>
+                                <dl class="statement-unused-receipt-details">
+                                    <div><dt>利用者</dt><dd>{{ entry.user|default:"-" }}</dd></div>
+                                    <div><dt>登録項目</dt><dd>{{ entry.service|default:"その他" }}</dd></div>
+                                    <div><dt>サービス</dt><dd>{{ entry.service_label|default:"未抽出" }}</dd></div>
+                                    <div><dt>法的販売者</dt><dd>{{ entry.payee|default:"未抽出" }}</dd></div>
+                                    <div><dt>書類日</dt><dd>{{ entry.event_date|default:"未抽出" }}</dd></div>
+                                    {% if entry.closest_line_reference or entry.closest_line_sequence %}
+                                        <div><dt>最も近い明細</dt><dd>{{ entry.closest_line_reference|default:entry.closest_line_sequence }}{% if entry.closest_statement_date %} / {{ entry.closest_statement_date }}{% endif %}{% if entry.closest_statement_amount %} / {{ entry.closest_statement_amount }} {{ entry.closest_statement_currency }}{% endif %}</dd></div>
+                                    {% endif %}
+                                </dl>
+                                <p class="statement-unused-receipt-reason">{{ entry.reason }}</p>
+                                {% if entry.original_filename and entry.original_filename != entry.filename %}<p class="muted small">元ファイル: {{ entry.original_filename }}</p>{% endif %}
+                            </article>
+                        {% endfor %}
+                    </div>
+                </section>
+            {% endif %}
+        {% endif %}
+
         <p class="muted small statement-highlight-legend"><span class="legend-swatch unmatched"></span> 赤色は未一致です。<span class="legend-swatch review"></span> 黄色は提出ファイルがあるものの、金額・日付・払先などの解析が不足し、未提出と断定していない行です。</p>
     {% else %}
         <p class="muted center">解析結果はありません。</p>

@@ -40,6 +40,7 @@ from .statement_processing import (
     DATE_MATCH_TOLERANCE_DAYS,
     _available_receipts_for_statement_month,
     _catalog_ids_for_text,
+    _known_merchant_key,
     _registered_services_for_period,
     process_card_statement,
 )
@@ -272,6 +273,46 @@ PAID: 15,400.00 JPY
         self.assertTrue(used)
         self.assertEqual(result.status, ReceiptFilenameStatus.GENERATED)
         self.assertEqual(result.suggested_filename, "260606_mametani_JetBrains_15400_JPY.pdf")
+
+    def test_google_one_service_label_is_separate_from_legal_seller_and_used_in_filename(self):
+        embedded_text = """
+請求書番号: 690519447965764-13
+請求書発行日 2026年6月23日
+Google Asia Pacific Pte. Ltd.
+Google One
+Google AI Ultra (30 TB) (Google One)
+合計（JPY） ￥32,000
+"""
+        fallback = extract_receipt_text_fallback(embedded_text)
+
+        self.assertEqual(fallback.payee, "Google Asia Pacific Pte. Ltd.")
+        self.assertEqual(fallback.service_label, "Google One")
+        self.assertEqual(fallback.payment_date, date(2026, 6, 23))
+        self.assertEqual(fallback.amount, Decimal("32000.00"))
+        self.assertEqual(fallback.currency, "JPY")
+        self.assertEqual(_known_merchant_key(fallback.service_label), "GOOGLE_ONE")
+
+        result = build_result_from_ai_payload(
+            {
+                "card_last4": None,
+                "card_last4_matches_target": None,
+                "payee": fallback.payee,
+                "service_label": "Google AI Ultra (30 TB) (Google One)",
+                "filename_label": fallback.payee,
+                "service_payee_related": True,
+                "payment_date": "2026-06-23",
+                "amount": "32000.00",
+                "currency": "JPY",
+                "confidence": 0.98,
+                "can_create_filename": True,
+                "financial_document_kind": "invoice",
+                "reason": "",
+            },
+            original_filename="金_GOOGLEONE_32000JPY.pdf",
+            user_filename_part="keeseon.kim",
+        )
+        self.assertEqual(result.service_label, "Google One")
+        self.assertEqual(result.suggested_filename, "260623_keeseon.kim_Google_One_32000_JPY.pdf")
 
     @mock.patch("receipts.ai_processing.generate_ai_receipt_filename")
     def test_needs_review_result_still_persists_extracted_amount_date_and_currency(self, mocked_generate):
@@ -4760,8 +4801,141 @@ class FinalWorkflowAcceptanceTests(TestCase):
         response = self.client.get(reverse("staff_download_card_statement_report", args=[statement.pk]))
         self.assertEqual(response.status_code, 404)
 
+    def test_statement_result_filter_and_unmatched_submitted_receipts_are_visible(self):
+        unused_receipt = self.create_receipt(filename="金_Github_11USD.pdf")
+        unused_receipt.generated_filename = "260621_keeseon.kim_GitHub_Copilot_11_USD.pdf"
+        unused_receipt.save(update_fields=["generated_filename"])
+        statement = CardStatement.objects.create(
+            period_month=date(2026, 7, 1),
+            file=SimpleUploadedFile("company-statement.pdf", b"%PDF-1.4 statement", content_type="application/pdf"),
+            original_filename="company-statement.pdf",
+            status=CardStatementStatus.NEEDS_REVIEW,
+            card_last4="7210",
+            statement_period="2026-07",
+            unmatched_receipt_components=[
+                {
+                    "receipt_id": unused_receipt.pk,
+                    "filename": unused_receipt.generated_filename,
+                    "original_filename": unused_receipt.original_filename,
+                    "user": self.user.username,
+                    "service": "GitHub（サブスク）",
+                    "service_label": "GitHub Copilot",
+                    "payee": "GitHub, Inc.",
+                    "event_date": "2026-06-21",
+                    "amount": "11.00",
+                    "currency": "USD",
+                    "reason_code": "amount_mismatch",
+                    "reason": "同じ請求元で日付が近い明細0385は1.10 USDですが、提出書類は11.00 USDです。",
+                    "closest_line_reference": "0385",
+                    "closest_statement_date": "2026-06-21",
+                    "closest_statement_amount": "1.10",
+                    "closest_statement_currency": "USD",
+                }
+            ],
+            expires_at=timezone.now() + timedelta(days=30),
+        )
+        CardStatementItem.objects.create(
+            statement=statement,
+            sequence=1,
+            line_reference="0385",
+            transaction_date=date(2026, 6, 21),
+            merchant_name="UNMATCHED GITHUB LINE",
+            original_amount=Decimal("1.10"),
+            original_currency="USD",
+            match_status=StatementMatchStatus.UNMATCHED,
+            receipt_required=True,
+        )
+        CardStatementItem.objects.create(
+            statement=statement,
+            sequence=2,
+            line_reference="0379",
+            transaction_date=date(2026, 6, 24),
+            merchant_name="MATCHED GOOGLE ONE LINE",
+            amount_jpy=Decimal("32000"),
+            match_status=StatementMatchStatus.MATCHED,
+            receipt_required=True,
+        )
+
+        self.client.login(username="admin", password="admin-password-123")
+        response = self.client.get(
+            reverse("staff_card_statements") + "?month=2026-07&result=unmatched"
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "未一致を表示中")
+        self.assertContains(response, "UNMATCHED GITHUB LINE")
+        self.assertNotContains(response, "MATCHED GOOGLE ONE LINE")
+        self.assertContains(response, "明細に紐づかなかった提出書類")
+        self.assertContains(response, "260621_keeseon.kim_GitHub_Copilot_11_USD.pdf")
+        self.assertContains(response, "1.10 USD")
+        self.assertContains(response, "11.00 USD")
+
+        matched_response = self.client.get(
+            reverse("staff_card_statements") + "?month=2026-07&result=matched"
+        )
+        self.assertContains(matched_response, "MATCHED GOOGLE ONE LINE")
+        self.assertNotContains(matched_response, "UNMATCHED GITHUB LINE")
+        self.assertNotContains(matched_response, "明細に紐づかなかった提出書類")
+
+    def test_statement_pdf_includes_submitted_documents_not_used_by_statement(self):
+        from . import statement_pdf
+
+        statement = CardStatement.objects.create(
+            period_month=date(2026, 7, 1),
+            file=SimpleUploadedFile("company-statement.pdf", b"%PDF-1.4 statement", content_type="application/pdf"),
+            original_filename="company-statement.pdf",
+            status=CardStatementStatus.NEEDS_REVIEW,
+            card_last4="7210",
+            statement_period="2026-07",
+            unmatched_receipt_components=[
+                {
+                    "filename": "260621_keeseon.kim_GitHub_Copilot_11_USD.pdf",
+                    "user": "keeseon.kim@hakuhodo.co.jp",
+                    "service": "GitHub（サブスク）",
+                    "service_label": "GitHub Copilot",
+                    "payee": "GitHub, Inc.",
+                    "event_date": "2026-06-21",
+                    "amount": "11.00",
+                    "currency": "USD",
+                    "reason_code": "amount_mismatch",
+                    "reason": "明細0385は1.10 USDですが、提出書類は11.00 USDです。",
+                    "closest_line_reference": "0385",
+                    "closest_statement_date": "2026-06-21",
+                    "closest_statement_amount": "1.10",
+                    "closest_statement_currency": "USD",
+                }
+            ],
+            expires_at=timezone.now() + timedelta(days=30),
+        )
+        CardStatementItem.objects.create(
+            statement=statement,
+            sequence=1,
+            line_reference="0385",
+            transaction_date=date(2026, 6, 21),
+            merchant_name="GITHUB",
+            original_amount=Decimal("1.10"),
+            original_currency="USD",
+            match_status=StatementMatchStatus.UNMATCHED,
+            receipt_required=True,
+        )
+
+        captured_text: list[str] = []
+        original_paragraph = statement_pdf.Paragraph
+
+        def capture_paragraph(text, style, *args, **kwargs):
+            captured_text.append(str(text))
+            return original_paragraph(text, style, *args, **kwargs)
+
+        with mock.patch.object(statement_pdf, "Paragraph", side_effect=capture_paragraph):
+            payload = statement_pdf.build_card_statement_reconciliation_pdf(statement)
+
+        self.assertTrue(payload.startswith(b"%PDF-"))
+        rendered_text = "\n".join(captured_text)
+        self.assertIn("明細に紐づかなかった提出書類", rendered_text)
+        self.assertIn("GitHub_Copilot_11_USD", rendered_text)
+        self.assertIn("明細0385は1.10 USD", rendered_text)
+
     def test_version_file_is_present_without_web_display_requirement(self):
-        self.assertEqual(Path("VERSION").read_text(encoding="utf-8").strip(), "1.12.0")
+        self.assertEqual(Path("VERSION").read_text(encoding="utf-8").strip(), "1.13.0")
 
 
 @override_settings(PASSWORD_HASHERS=FAST_PASSWORD_HASHERS)

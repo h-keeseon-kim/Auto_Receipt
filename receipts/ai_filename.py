@@ -26,6 +26,7 @@ class ReceiptTextFallback:
 
     text: str = ""
     payee: str = ""
+    service_label: str = ""
     recipient_name: str = ""
     recipient_name_matches_user: bool | None = None
     recipient_name_relation_reason: str = ""
@@ -45,6 +46,7 @@ class ReceiptFilenameResult:
     suggested_filename: str = ""
     admin_memo: str = ""
     payee: str = ""
+    service_label: str = ""
     filename_label: str = ""
     payment_date: date | None = None
     amount: Decimal | None = None
@@ -364,6 +366,54 @@ def _extract_probable_payee(text: str) -> str:
     return ""
 
 
+KNOWN_SERVICE_LABEL_PATTERNS: tuple[tuple[str, str], ...] = (
+    ("Google One", r"\bGoogle\s+One\b|\(Google\s+One\)"),
+    ("Google Cloud", r"\bGoogle\s+Cloud\b|\bGoogle\s+Cloud\s+Platform\b"),
+    ("GitHub Copilot", r"\bGitHub\s+Copilot\b"),
+    ("JetBrains AI Pro", r"\bJetBrains\s+AI\s+Pro\b"),
+    ("ChatGPT", r"\bChatGPT\b"),
+    ("Claude", r"\bClaude(?:\.AI)?\b"),
+    ("OpenAI API", r"\bOpenAI\s+API\b"),
+    ("AudioShake", r"\bAudioShake\b"),
+    ("Railway", r"\bRailway\b"),
+    ("Cursor", r"\bCursor\b|\bAnysphere\b"),
+    ("Dify", r"\bDify\b"),
+    ("Suno", r"\bSuno\b"),
+    ("Grok", r"\bGrok\b"),
+    ("Figma", r"\bFigma\b"),
+)
+
+
+def _extract_probable_service_label(text: str) -> str:
+    """領収書本文に明示された製品・サービス名を抽出する。
+
+    法的な販売者名（例: Google Asia Pacific）と、実際に請求された
+    サービス名（例: Google One）は別情報として保持する。ファイル名と
+    カード明細照合では、本文に明示されたサービス名を優先できる。
+    """
+
+    normalized = unicodedata.normalize("NFKC", text or "")
+    for label, pattern in KNOWN_SERVICE_LABEL_PATTERNS:
+        if re.search(pattern, normalized, flags=re.I):
+            return label
+    return ""
+
+
+def normalize_service_label(value: str) -> str:
+    """既知サービスは安定した短い名称へ正規化する。
+
+    例として、モデルが ``Google AI Ultra (30 TB) (Google One)`` を
+    返した場合でも、管理・ファイル名・明細照合では ``Google One`` を
+    使用する。既知パターンに当てはまらない名称はそのまま保持する。
+    """
+
+    normalized = unicodedata.normalize("NFKC", value or "").strip()
+    if not normalized:
+        return ""
+    known = _extract_probable_service_label(normalized)
+    return known or normalize_filename_label(normalized)
+
+
 def _extract_expected_email(expected_recipient_context: str) -> str:
     emails = re.findall(r"[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}", expected_recipient_context or "", flags=re.I)
     return emails[0].lower() if emails else ""
@@ -635,6 +685,7 @@ def normalize_transaction_components(
                 "currency": currency,
                 "transaction_date": transaction_date.isoformat(),
                 "payee": normalize_payee(raw.get("payee") or fallback_payee),
+                "service_label": normalize_service_label(raw.get("service_label") or ""),
                 "invoice_number": str(raw.get("invoice_number") or "").strip()[:160],
                 "transaction_id": str(raw.get("transaction_id") or "").strip()[:160],
                 "related_transaction_id": str(raw.get("related_transaction_id") or "").strip()[:160],
@@ -661,6 +712,7 @@ def extract_receipt_text_fallback(
     text = unicodedata.normalize("NFKC", text).replace("\x00", "-")
 
     payee = _extract_probable_payee(text)
+    service_label = _extract_probable_service_label(text)
     financial_document_kind = _extract_financial_document_kind(text)
     payment_date = _extract_labeled_payment_date(text)
     if payment_date is None and re.search(
@@ -687,6 +739,11 @@ def extract_receipt_text_fallback(
         transaction_reference=transaction_reference,
         related_transaction_reference=related_transaction_reference,
     )
+    if service_label:
+        transaction_components = tuple(
+            {**component, "service_label": service_label}
+            for component in transaction_components
+        )
     expected_email = _extract_expected_email(expected_recipient_context)
     lowered_text = text.lower()
     recipient_name = ""
@@ -709,6 +766,7 @@ def extract_receipt_text_fallback(
     return ReceiptTextFallback(
         text=text,
         payee=payee,
+        service_label=service_label,
         recipient_name=recipient_name,
         recipient_name_matches_user=recipient_match,
         recipient_name_relation_reason=recipient_reason,
@@ -762,7 +820,8 @@ def merge_payload_with_text_fallback(
             fallback_used = True
 
     fill("payee", fallback.payee)
-    fill("filename_label", fallback.payee)
+    fill("service_label", fallback.service_label)
+    fill("filename_label", fallback.service_label or fallback.payee)
     fill("recipient_name", fallback.recipient_name)
     fill("payment_date", fallback.payment_date.isoformat() if fallback.payment_date else None)
     fill("amount", str(fallback.amount) if fallback.amount is not None else None)
@@ -819,7 +878,23 @@ def merge_payload_with_text_fallback(
         )
         fallback_used = True
 
-    if merged.get("service_payee_related") is None:
+    service_label_value = normalize_service_label(
+        str(merged.get("service_label") or fallback.service_label or "")
+    )
+    if service_label_value:
+        if merged.get("service_label") != service_label_value:
+            fallback_used = True
+        merged["service_label"] = service_label_value
+        # 本文に既知サービスが明示される場合、法的販売者名より優先する。
+        merged["filename_label"] = service_label_value
+    service_label_relation = infer_context_relation(service_label_value, service_context)
+    if service_label_relation is True and merged.get("service_payee_related") is not True:
+        merged["service_payee_related"] = True
+        merged["service_payee_relation_reason"] = (
+            "領収書本文のサービス名と、登録サービスまたは入力メモが明確に関連しています。"
+        )
+        fallback_used = True
+    elif merged.get("service_payee_related") is None:
         relation = infer_context_relation(str(merged.get("payee") or fallback.payee), service_context)
         if relation is not None:
             merged["service_payee_related"] = relation
@@ -966,10 +1041,11 @@ def generate_ai_receipt_filename(
             "card_last4": None,
             "card_last4_matches_target": None,
             "payee": text_fallback.payee or None,
+            "service_label": text_fallback.service_label or None,
             "recipient_name": text_fallback.recipient_name or None,
             "recipient_name_matches_user": text_fallback.recipient_name_matches_user,
             "recipient_name_relation_reason": text_fallback.recipient_name_relation_reason,
-            "filename_label": text_fallback.payee or None,
+            "filename_label": text_fallback.service_label or text_fallback.payee or None,
             "service_payee_related": fallback_relation,
             "service_payee_relation_reason": (
                 "PDF埋め込みテキストの払先と、登録サービス・払先候補または入力メモに明確な文字関連があります。"
@@ -1050,7 +1126,8 @@ def build_openai_content(
             "曖昧または確認できない場合は service_payee_related を null にする。\n"
         )
         filename_instruction = (
-            "5. filename_label は、領収書本体で確認できた払先・取引内容を中心に、必須メモを補助情報として使って、"
+            "5. service_label は領収書本文に明示された製品・サービス・プラン名があれば返す。"
+            "filename_label は、service_labelが明確ならそれを優先し、なければ領収書本体で確認できた払先・取引内容を中心に、必須メモを補助情報として使って、"
             "ファイル名に適した短い名称を返す。例: OpenAI返金、ChatGPTプラン変更。"
             "領収書上の明確な払先と矛盾する名称をメモだけから作らない。"
             "メモ全体をそのままコピーせず、企業名または企業名+短い取引種別に要約する。\n"
@@ -1068,7 +1145,11 @@ def build_openai_content(
             "判断が曖昧、または払先やサービスとの関係を確認できない場合は service_payee_related を null にする。\n"
         )
         filename_instruction = (
-            "5. filename_label は登録サービス名ではなく、領収書上の実際の払先から Inc. / LLC / PBC などの法人格表記を除いた短い企業名を返す。\n"
+            "5. service_label は領収書本文に明示された製品・サービス・プラン名を返す。"
+            "例: Google One、Google Cloud、ChatGPT、Claude、GitHub Copilot。"
+            "法的な販売者名しか分からない場合は null にする。"
+            "filename_label は service_label が明確ならそれを優先し、明確でない場合だけ払先企業の短い名称を使う。"
+            "例: Google Asia Pacificが販売者でも、明細にGoogle Oneとある場合はGoogle Oneを返す。\n"
         )
         relation_name = "登録サービス名と払先"
 
@@ -1098,7 +1179,9 @@ def build_openai_content(
                 + "カード情報がないことだけを理由にファイル名作成不可・確認失敗にしない。\n"
                 + "2. 領収書内の実際の払先・販売者・請求元・merchant/payee を確認する。"
                 + "画面上のサービス名やユーザー入力メモより、領収書に表示された請求元を優先する。"
-                + "例えば ChatGPT（サブスク）の払先は OpenAI、Claude（サブスク）の払先は Anthropic のように判断する。\n"
+                + "例えば ChatGPT（サブスク）の払先は OpenAI、Claude（サブスク）の払先は Anthropic のように判断する。"
+                + "同時に、領収書本文に製品・サービス名が明示されている場合は service_label として別に返す。"
+                + "Google Asia Pacific（払先）とGoogle One（サービス名）のように、法的販売者名とサービス名を混同しない。\n"
                 + "3. 領収書の Billed to、Bill to、Customer、Account holder、宛名、利用者名、ご使用者氏名、購入者名など、"
                 + "支払先ではなく利用者側の名前を確認する。対象ユーザー情報と明確に対応する場合は "
                 + "recipient_name_matches_user を true、明確に別人・別利用者の場合は false、"
@@ -1163,11 +1246,12 @@ def receipt_filename_schema() -> dict[str, Any]:
             "properties": {
                 "card_last4": {"type": ["string", "null"], "description": "領収書に表示された支払カード末尾4桁。読めない場合は null。"},
                 "card_last4_matches_target": {"type": ["boolean", "null"], "description": "カード末尾が指定された末尾4桁と一致するか。読めない場合は null。"},
-                "payee": {"type": ["string", "null"], "description": "実際の払先・販売者・請求元。登録サービス名ではなく領収書上の相手先。"},
+                "payee": {"type": ["string", "null"], "description": "実際の払先・販売者・請求元。登録サービス名ではなく領収書上の法的な相手先。"},
+                "service_label": {"type": ["string", "null"], "description": "領収書本文に明示された製品・サービス・プラン名。例: Google One、Google Cloud、ChatGPT、Claude。法的販売者名とは分ける。"},
                 "recipient_name": {"type": ["string", "null"], "description": "領収書の利用者名、宛名、ご使用者氏名、購入者名、Billed to、Customer、Account holder。払先名ではない。"},
                 "recipient_name_matches_user": {"type": ["boolean", "null"], "description": "領収書の利用者名・宛名が対象ユーザー情報と明確に対応するか。曖昧・記載なしの場合は null。"},
                 "recipient_name_relation_reason": {"type": "string", "description": "利用者名・宛名と対象ユーザーの対応について、管理者が確認すべき根拠または不足情報。"},
-                "filename_label": {"type": ["string", "null"], "description": "ファイル名に使う短い名称。通常は払先企業名。その他領収書では領収書内容を優先しつつ必須メモを補助情報にした企業名または企業名+短い取引種別。"},
+                "filename_label": {"type": ["string", "null"], "description": "ファイル名に使う短い名称。本文に明確なservice_labelがあればそれを優先し、なければ短い払先企業名を使う。"},
                 "service_payee_related": {"type": ["boolean", "null"], "description": "通常領収書では登録サービスと払先、その他領収書では必須メモと領収書内容が合理的に関連しているか。曖昧・確認不可の場合は null。"},
                 "service_payee_relation_reason": {"type": "string", "description": "関連性について管理者が確認すべき理由や根拠。"},
                 "payment_date": {"type": ["string", "null"], "description": "支払日または領収書日付。YYYY-MM-DD。"},
@@ -1189,6 +1273,7 @@ def receipt_filename_schema() -> dict[str, Any]:
                             "currency": {"type": "string"},
                             "transaction_date": {"type": "string"},
                             "payee": {"type": ["string", "null"]},
+                            "service_label": {"type": ["string", "null"]},
                             "invoice_number": {"type": ["string", "null"]},
                             "transaction_id": {"type": ["string", "null"]},
                             "related_transaction_id": {"type": ["string", "null"]},
@@ -1198,7 +1283,7 @@ def receipt_filename_schema() -> dict[str, Any]:
                         },
                         "required": [
                             "component_key", "role", "signed_amount", "currency", "transaction_date",
-                            "payee", "invoice_number", "transaction_id", "related_transaction_id",
+                            "payee", "service_label", "invoice_number", "transaction_id", "related_transaction_id",
                             "source_label", "confidence", "document_kind"
                         ],
                     },
@@ -1211,6 +1296,7 @@ def receipt_filename_schema() -> dict[str, Any]:
                 "card_last4",
                 "card_last4_matches_target",
                 "payee",
+                "service_label",
                 "recipient_name",
                 "recipient_name_matches_user",
                 "recipient_name_relation_reason",
@@ -1286,7 +1372,10 @@ def build_result_from_payload(
     recipient_name_relation_reason = str(payload.get("recipient_name_relation_reason") or "").strip()
 
     payee = normalize_payee(payload.get("payee") or "")
-    filename_label = normalize_filename_label(payload.get("filename_label") or payee)
+    service_label = normalize_service_label(payload.get("service_label") or "")
+    # PDF本文に製品・サービス名が明示されている場合は、モデルが法的販売者名を
+    # filename_labelに返しても、サービス名を決定的に優先する。
+    filename_label = normalize_filename_label(service_label or payload.get("filename_label") or payee)
     payment_date = parse_iso_date(payload.get("payment_date"))
     amount = parse_amount(payload.get("amount"))
     currency = normalize_currency(payload.get("currency") or "")
@@ -1301,6 +1390,11 @@ def build_result_from_payload(
         fallback_payee=payee,
         fallback_kind=financial_document_kind,
     )
+    if service_label and transaction_components:
+        transaction_components = tuple(
+            {**component, "service_label": component.get("service_label") or service_label}
+            for component in transaction_components
+        )
     if not transaction_components and payment_date is not None and amount is not None and currency:
         role = "refund" if financial_document_kind == ReceiptFinancialDocumentKind.REFUND else "charge"
         signed_amount = -abs(amount) if role == "refund" else abs(amount)
@@ -1313,6 +1407,7 @@ def build_result_from_payload(
                     "currency": currency,
                     "transaction_date": payment_date.isoformat(),
                     "payee": payee,
+                    "service_label": service_label,
                     "invoice_number": transaction_reference if financial_document_kind != ReceiptFinancialDocumentKind.REFUND else "",
                     "transaction_id": transaction_reference,
                     "related_transaction_id": related_transaction_reference,
@@ -1390,6 +1485,7 @@ def build_result_from_payload(
     result_kwargs = dict(
         suggested_filename=suggested_filename if can_create and not issues else "",
         payee=payee,
+        service_label=service_label,
         filename_label=filename_label,
         payment_date=payment_date,
         amount=amount,

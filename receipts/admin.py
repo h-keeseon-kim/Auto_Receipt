@@ -30,6 +30,7 @@ class ReceiptInline(admin.TabularInline):
         "ai_filename_admin_memo",
         "ai_filename_checked_at",
         "ai_extracted_payee",
+        "ai_extracted_service_label",
         "ai_extracted_recipient_name",
         "ai_extracted_card_last4",
         "financial_document_kind",
@@ -76,6 +77,8 @@ class ReceiptInline(admin.TabularInline):
         "generated_filename",
         "ai_filename_status",
         "ai_filename_admin_memo",
+        "ai_extracted_payee",
+        "ai_extracted_service_label",
         "financial_document_kind",
         "financial_transaction_reference",
         "financial_related_reference",
@@ -190,7 +193,7 @@ class ReceiptAdmin(admin.ModelAdmin):
         "file_status",
     )
     list_filter = ("is_extra", "p_card_usage_snapshot", "financial_document_kind", "upload_source", "admin_review_status", "ai_resubmission_recommended", "billing_type_snapshot", "currency", "ai_filename_status", "ai_period_check_status", "ai_check_recipient_name", "ai_check_service_payee_related", "ai_check_period_match", "submission__period_month", "file_deleted_at")
-    search_fields = ("service_name_snapshot", "memo", "submission__user__username", "uploaded_by__username", "uploaded_by__email", "original_filename", "generated_filename", "ai_extracted_payee", "ai_extracted_recipient_name", "financial_transaction_reference", "financial_related_reference", "ai_filename_admin_memo", "ai_period_check_memo", "ai_recipient_name_check_memo", "ai_service_payee_check_memo", "ai_resubmission_recommendation_memo")
+    search_fields = ("service_name_snapshot", "memo", "submission__user__username", "uploaded_by__username", "uploaded_by__email", "original_filename", "generated_filename", "ai_extracted_payee", "ai_extracted_service_label", "ai_extracted_recipient_name", "financial_transaction_reference", "financial_related_reference", "ai_filename_admin_memo", "ai_period_check_memo", "ai_recipient_name_check_memo", "ai_service_payee_check_memo", "ai_resubmission_recommendation_memo")
     readonly_fields = (
         "service_name_snapshot",
         "billing_type_snapshot",
@@ -201,6 +204,7 @@ class ReceiptAdmin(admin.ModelAdmin):
         "ai_filename_admin_memo",
         "ai_filename_checked_at",
         "ai_extracted_payee",
+        "ai_extracted_service_label",
         "ai_extracted_recipient_name",
         "ai_extracted_card_last4",
         "financial_document_kind",
@@ -356,7 +360,11 @@ class CardStatementAdmin(admin.ModelAdmin):
     )
     list_filter = ("status", "period_month", "file_deleted_at")
     search_fields = ("original_filename", "ai_admin_memo", "items__merchant_name", "items__matched_user__username")
-    readonly_fields = ("uploaded_at", "processed_at", "reconciled_at", "expires_at", "file_deleted_at", "file_delete_reason", "updated_at")
+    readonly_fields = (
+        "unmatched_receipt_components",
+        "uploaded_at", "processed_at", "reconciled_at", "expires_at",
+        "file_deleted_at", "file_delete_reason", "updated_at",
+    )
     inlines = [CardStatementItemInline]
 
 
@@ -386,17 +394,17 @@ class CardStatementItemAdmin(admin.ModelAdmin):
 class CardStatementReceiptEvidenceAdmin(admin.ModelAdmin):
     list_display = (
         "statement_item", "sequence", "role", "receipt", "signed_amount", "currency",
-        "event_date", "document_kind_snapshot", "filename_snapshot",
+        "event_date", "document_kind_snapshot", "filename_snapshot", "service_label_snapshot",
     )
     list_filter = ("role", "currency", "document_kind_snapshot", "statement_item__statement__period_month")
     search_fields = (
         "statement_item__merchant_name", "statement_item__line_reference", "filename_snapshot",
-        "payee_snapshot", "invoice_number_snapshot", "transaction_reference_snapshot",
+        "payee_snapshot", "service_label_snapshot", "invoice_number_snapshot", "transaction_reference_snapshot",
         "related_transaction_reference_snapshot",
     )
     readonly_fields = (
         "statement_item", "receipt", "component_key", "role", "sequence", "signed_amount", "currency",
         "event_date", "document_kind_snapshot", "filename_snapshot", "payee_snapshot",
-        "invoice_number_snapshot", "transaction_reference_snapshot",
+        "service_label_snapshot", "invoice_number_snapshot", "transaction_reference_snapshot",
         "related_transaction_reference_snapshot", "source_label", "created_at",
     )

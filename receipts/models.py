@@ -785,6 +785,12 @@ class Receipt(models.Model):
     ai_filename_admin_memo = models.TextField("AIファイル名管理者メモ", blank=True)
     ai_filename_checked_at = models.DateTimeField("AIファイル名確認日時", null=True, blank=True)
     ai_extracted_payee = models.CharField("AI抽出払先", max_length=160, blank=True)
+    ai_extracted_service_label = models.CharField(
+        "AI抽出サービス名",
+        max_length=160,
+        blank=True,
+        help_text="領収書本文に明示された製品・サービス・プラン名。法的な払先名とは分けて保存します。",
+    )
     ai_extracted_recipient_name = models.CharField("AI抽出利用者名（宛名）", max_length=160, blank=True)
     ai_extracted_card_last4 = models.CharField("AI抽出カード下4桁", max_length=4, blank=True)
     financial_document_kind = models.CharField(
@@ -1344,6 +1350,15 @@ class CardStatement(models.Model):
     statement_period = models.CharField("AI判定明細月", max_length=7, blank=True)
     payment_date = models.DateField("支払日", null=True, blank=True)
     ai_admin_memo = models.TextField("AI管理者メモ", blank=True)
+    unmatched_receipt_components = models.JSONField(
+        "明細未使用の提出証拠",
+        default=list,
+        blank=True,
+        help_text=(
+            "対象月に提出されたものの、カード明細のどの行にも使用されなかった領収書・取引構成要素です。"
+            "カード明細側の誤記や別取引の確認に利用します。"
+        ),
+    )
     uploaded_by = models.ForeignKey(
         settings.AUTH_USER_MODEL,
         on_delete=models.SET_NULL,
@@ -1596,6 +1611,7 @@ class CardStatementReceiptEvidence(models.Model):
     document_kind_snapshot = models.CharField("書類区分", max_length=20, blank=True)
     filename_snapshot = models.CharField("ファイル名", max_length=255)
     payee_snapshot = models.CharField("払先", max_length=160, blank=True)
+    service_label_snapshot = models.CharField("サービス名", max_length=160, blank=True)
     invoice_number_snapshot = models.CharField("請求書番号", max_length=160, blank=True)
     transaction_reference_snapshot = models.CharField("取引参照番号", max_length=160, blank=True)
     related_transaction_reference_snapshot = models.CharField("関連取引参照番号", max_length=160, blank=True)

@@ -64,6 +64,7 @@ class StatementLine:
     transaction_date: date | None
     merchant_key: str
     amount_options: tuple[AmountOption, ...]
+    reference: str = ""
 
 
 @dataclass(frozen=True)
@@ -83,6 +84,7 @@ class EvidenceComponent:
     related_transaction_id: str = ""
     source_label: str = ""
     payee: str = ""
+    service_label: str = ""
 
     def __post_init__(self):
         object.__setattr__(self, "signed_amount", Decimal(str(self.signed_amount)))

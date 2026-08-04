@@ -18,6 +18,7 @@
     <div class="card"><span class="label">AI解析中</span><strong class="{% if stats.processing_count %}danger{% endif %}">{{ stats.processing_count }}</strong></div>
     <div class="card"><span class="label">解析要確認</span><strong class="{% if stats.review_count %}warning{% endif %}">{{ stats.review_count }}</strong></div>
     <div class="card"><span class="label">未一致</span><strong class="{% if stats.missing_count %}danger{% endif %}">{{ stats.missing_count }}</strong></div>
+    <div class="card"><span class="label">明細未使用の提出書類</span><strong class="{% if stats.unused_receipt_count %}warning{% endif %}">{{ stats.unused_receipt_count }}</strong></div>
 </section>
 
 <section class="card section" data-tutorial-target="staff-statement-upload-section">
@@ -48,7 +49,7 @@
     </form>
 </section>
 
-<div data-statement-results data-tutorial-target="staff-statement-results" data-status-url="{% url 'staff_card_statement_status' %}?month={{ selected_month|date:'Y-m' }}">
+<div data-statement-results data-tutorial-target="staff-statement-results" data-status-url="{% url 'staff_card_statement_status' %}?month={{ selected_month|date:'Y-m' }}&result={{ result_filter }}">
     {% include "receipts/_staff_card_statements.html" %}
 </div>
 {% endblock %}

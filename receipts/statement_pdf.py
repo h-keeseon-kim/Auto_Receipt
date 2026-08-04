@@ -283,6 +283,68 @@ def _action_items_table(items: list[CardStatementItem], styles: dict[str, Paragr
     return table
 
 
+
+def _unused_receipts_table(entries: list[dict], styles: dict[str, ParagraphStyle]) -> Table | Paragraph:
+    if not entries:
+        return Paragraph("明細に紐づかなかった提出書類はありません。", styles["notice"])
+
+    rows = [[
+        _paragraph("提出ファイル", styles["header"]),
+        _paragraph("書類日 / 金額", styles["header"]),
+        _paragraph("サービス / 販売者", styles["header"]),
+        _paragraph("最も近い明細", styles["header"]),
+        _paragraph("明細に使用されなかった理由", styles["header"]),
+    ]]
+    for entry in entries:
+        amount = "-"
+        if entry.get("amount"):
+            amount = f"{entry.get('amount')} {entry.get('currency') or ''}".strip()
+        date_amount = f"{entry.get('event_date') or '-'}\n{amount}"
+        service_payee = entry.get("service_label") or entry.get("service") or "-"
+        payee = entry.get("payee") or ""
+        if payee and payee != service_payee:
+            service_payee += f"\n販売者: {payee}"
+        closest_reference = entry.get("closest_line_reference") or entry.get("closest_line_sequence") or "-"
+        closest = str(closest_reference)
+        if entry.get("closest_statement_date"):
+            closest += f" / {entry.get('closest_statement_date')}"
+        if entry.get("closest_statement_amount"):
+            closest += (
+                f"\n{entry.get('closest_statement_amount')} "
+                f"{entry.get('closest_statement_currency') or ''}"
+            ).rstrip()
+        filename = entry.get("filename") or entry.get("original_filename") or "-"
+        if entry.get("user"):
+            filename += f"\n{entry.get('user')}"
+        rows.append([
+            _paragraph(filename, styles["small"]),
+            _paragraph(date_amount, styles["small"]),
+            _paragraph(service_payee, styles["small"]),
+            _paragraph(closest, styles["small"]),
+            _paragraph(_short_text(entry.get("reason") or "-", max_chars=230), styles["tiny"]),
+        ])
+
+    table = Table(
+        rows,
+        colWidths=[58 * mm, 31 * mm, 52 * mm, 42 * mm, 75 * mm],
+        repeatRows=1,
+        splitByRow=1,
+    )
+    commands = [
+        ("BACKGROUND", (0, 0), (-1, 0), BRAND),
+        ("GRID", (0, 0), (-1, -1), 0.3, BORDER),
+        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+        ("LEFTPADDING", (0, 0), (-1, -1), 3),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 3),
+        ("TOPPADDING", (0, 0), (-1, -1), 3),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+    ]
+    for row_index, entry in enumerate(entries, start=1):
+        background = UNMATCHED_BG if entry.get("reason_code") == "amount_mismatch" else REVIEW_BG
+        commands.append(("BACKGROUND", (0, row_index), (-1, row_index), background))
+    table.setStyle(TableStyle(commands))
+    return table
+
 def _all_items_table(items: list[CardStatementItem], styles: dict[str, ParagraphStyle]) -> Table:
     rows = [[
         _paragraph("No.", styles["header"]),
@@ -370,10 +432,23 @@ def build_card_statement_reconciliation_pdf(statement: CardStatement) -> bytes:
         Spacer(1, 3 * mm),
         Paragraph("未一致・解析要確認", styles["section"]),
         _action_items_table(action_items, styles),
+    ]
+    unused_entries = list(statement.unmatched_receipt_components or [])
+    if unused_entries:
+        story.extend([
+            Spacer(1, 3 * mm),
+            Paragraph("明細に紐づかなかった提出書類", styles["section"]),
+            Paragraph(
+                "提出済みですが、カード明細のどの行にも使用されなかった書類です。カード明細側の金額誤記・別取引・重複提出・解析不足の確認に使用します。",
+                styles["subtitle"],
+            ),
+            _unused_receipts_table(unused_entries, styles),
+        ])
+    story.extend([
         PageBreak(),
         Paragraph("全明細照合結果", styles["section"]),
         _all_items_table(items, styles),
-    ]
+    ])
 
     document.build(story, onFirstPage=_page_callback, onLaterPages=_page_callback)
     return buffer.getvalue()

@@ -2010,6 +2010,57 @@ def staff_user_month_status(request, user_id: int):
     )
 
 
+STATEMENT_RESULT_FILTERS = {
+    "all": "すべて",
+    "unmatched": "未一致",
+    "needs_review": "解析要確認",
+    "matched": "一致",
+    "ignored": "対象外",
+}
+
+
+def normalize_statement_result_filter(value: str | None) -> str:
+    value = (value or "all").strip().lower()
+    return value if value in STATEMENT_RESULT_FILTERS else "all"
+
+
+def build_statement_result_filter_options(counts: dict[str, int], current: str) -> list[dict[str, object]]:
+    return [
+        {
+            "key": key,
+            "label": label,
+            "count": counts.get(key, 0),
+            "active": key == current,
+        }
+        for key, label in STATEMENT_RESULT_FILTERS.items()
+    ]
+
+
+def prepare_statement_result_display(statements, result_filter: str):
+    counts = {key: 0 for key in STATEMENT_RESULT_FILTERS}
+
+    def belongs(item, key: str) -> bool:
+        if key == "all":
+            return True
+        if key == "unmatched":
+            return item.receipt_required and item.match_status == StatementMatchStatus.UNMATCHED
+        if key == "needs_review":
+            return item.receipt_required and item.match_status == StatementMatchStatus.NEEDS_REVIEW
+        if key == "matched":
+            return item.match_status == StatementMatchStatus.MATCHED
+        if key == "ignored":
+            return not item.receipt_required or item.match_status == StatementMatchStatus.IGNORED
+        return True
+
+    for statement in statements:
+        all_items = list(statement.items.all())
+        for key in counts:
+            counts[key] += sum(1 for item in all_items if belongs(item, key))
+        statement.display_items = [item for item in all_items if belongs(item, result_filter)]
+        statement.display_item_count = len(statement.display_items)
+    return counts
+
+
 def global_statement_queryset(period_month):
     evidence_queryset = CardStatementReceiptEvidence.objects.select_related(
         "receipt",
@@ -2044,12 +2095,16 @@ def staff_card_statements(request):
     )
     reconcile_pending_card_statement_month_semantics(period_month=selected_month)
     # 明細月とユーザー提出月は同じ月。照合対象の領収書はその前月分。
-    statements = global_statement_queryset(selected_month)
+    result_filter = normalize_statement_result_filter(request.GET.get("result"))
+    statement_queryset = global_statement_queryset(selected_month)
+    statements = list(statement_queryset)
+    result_filter_counts = prepare_statement_result_display(statements, result_filter)
     stats = {
-        "statement_count": statements.count(),
-        "processing_count": statements.filter(status=CardStatementStatus.PROCESSING).count(),
+        "statement_count": len(statements),
+        "processing_count": sum(1 for statement in statements if statement.status == CardStatementStatus.PROCESSING),
         "missing_count": sum(statement.missing_receipt_count for statement in statements),
         "review_count": sum(statement.manual_review_count for statement in statements),
+        "unused_receipt_count": sum(len(statement.unmatched_receipt_components or []) for statement in statements),
     }
     return render(
         request,
@@ -2062,6 +2117,12 @@ def staff_card_statements(request):
             "statement_form": CardStatementUploadForm(),
             "target_card_last4": target_card_last4(),
             "stats": stats,
+            "result_filter": result_filter,
+            "result_filter_label": STATEMENT_RESULT_FILTERS[result_filter],
+            "result_filter_counts": result_filter_counts,
+            "statement_result_filter_options": build_statement_result_filter_options(
+                result_filter_counts, result_filter
+            ),
         },
     )
 
@@ -2106,7 +2167,9 @@ def staff_upload_card_statement(request):
 def staff_card_statement_status(request):
     selected_month = parse_month_value(request.GET.get("month"))
     reconcile_pending_card_statement_month_semantics(period_month=selected_month)
-    statements = global_statement_queryset(selected_month)
+    result_filter = normalize_statement_result_filter(request.GET.get("result"))
+    statements = list(global_statement_queryset(selected_month))
+    result_filter_counts = prepare_statement_result_display(statements, result_filter)
     html = render_to_string(
         "receipts/_staff_card_statements.html",
         {
@@ -2114,10 +2177,16 @@ def staff_card_statement_status(request):
             "target_receipt_month": receipt_month_for_statement(selected_month),
             "statements": statements,
             "target_card_last4": target_card_last4(),
+            "result_filter": result_filter,
+            "result_filter_label": STATEMENT_RESULT_FILTERS[result_filter],
+            "result_filter_counts": result_filter_counts,
+            "statement_result_filter_options": build_statement_result_filter_options(
+                result_filter_counts, result_filter
+            ),
         },
         request=request,
     )
-    processing_count = statements.filter(status=CardStatementStatus.PROCESSING).count()
+    processing_count = sum(1 for statement in statements if statement.status == CardStatementStatus.PROCESSING)
     return JsonResponse({"ok": True, "html": html, "processing_count": processing_count, "done": processing_count == 0})
 
 
@@ -2154,16 +2223,20 @@ def staff_download_card_statement_report(request, pk: int):
 def staff_delete_card_statement(request, pk: int):
     statement = get_object_or_404(CardStatement, pk=pk)
     selected_month = statement.period_month
+    result_filter = normalize_statement_result_filter(request.POST.get("result"))
     filename = statement.original_filename or "ご利用代金明細書"
     statement.delete()
     messages.success(request, f"{filename} と全ユーザー照合履歴を削除しました。")
-    return redirect(f"{reverse('staff_card_statements')}?month={month_query(selected_month)}")
+    return redirect(
+        f"{reverse('staff_card_statements')}?month={month_query(selected_month)}&result={result_filter}"
+    )
 
 
 @staff_member_required
 @require_POST
 def staff_reconcile_card_statement(request, pk: int):
     statement = get_object_or_404(CardStatement, pk=pk)
+    result_filter = normalize_statement_result_filter(request.POST.get("result"))
     if statement.status == CardStatementStatus.PROCESSING:
         messages.info(request, "AI解析中のため、完了後に再照合してください。")
     elif statement.status == CardStatementStatus.FAILED:
@@ -2171,7 +2244,10 @@ def staff_reconcile_card_statement(request, pk: int):
     else:
         reconcile_card_statement_items(statement.pk)
         messages.success(request, "対象領収書月に提出された領収書と再照合しました。")
-    return redirect(f"{reverse('staff_card_statements')}?month={month_query(statement.period_month)}#statement-{statement.pk}")
+    return redirect(
+        f"{reverse('staff_card_statements')}?month={month_query(statement.period_month)}&result={result_filter}"
+        f"#statement-{statement.pk}"
+    )
 
 
 @staff_member_required
@@ -2182,8 +2258,9 @@ def staff_update_statement_item(request, pk: int):
         pk=pk,
     )
     action = request.POST.get("item_action") or "required"
+    result_filter = normalize_statement_result_filter(request.POST.get("result"))
     redirect_url = (
-        f"{reverse('staff_card_statements')}?month={month_query(item.statement.period_month)}"
+        f"{reverse('staff_card_statements')}?month={month_query(item.statement.period_month)}&result={result_filter}"
         f"#statement-{item.statement_id}"
     )
 

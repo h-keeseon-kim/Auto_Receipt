@@ -1,5 +1,31 @@
 # Changelog
 
+## 1.13.0 — 2026-08-05
+
+法的販売者名とサービス名を分離し、Google One等の明細照合とファイル名生成を改善するとともに、未一致結果の絞り込みと、カード明細に使われなかった提出書類の監査表示を追加した版です。
+
+### Added
+
+- 領収書へ`ai_extracted_service_label`を追加し、製品・サービス・プラン名を法的販売者名と分離
+- Google One、Google Cloud、ChatGPT、Claude、GitHub Copilot等の本文サービス名抽出
+- ご利用代金明細の結果フィルター：すべて、未一致、解析要確認、一致、対象外
+- 対象月に提出済みだが明細へ使われなかった書類の一覧、金額・日付・最も近い明細・不使用理由の表示
+- 照合結果PDFへ「明細に紐づかなかった提出書類」を追加
+
+### Changed
+
+- 本文にサービス名が明示される場合、ファイル名は法的販売者ではなくサービス名を使用
+- `Google Asia Pacific Pte. Ltd.`のGoogle One請求書を`Google One`として明細へ照合
+- 既存のGoogle系領収書をAI再検査可能な状態へ戻し、保存済み明細を新しいサービス名ルールで再照合
+- 日付が近い同一請求元で金額が異なる未使用書類は、カード明細と提出書類の双方の金額を表示
+
+### Migration
+
+- `receipts.0033_service_label_and_unmatched_receipts`
+- `Receipt.ai_extracted_service_label`
+- `CardStatement.unmatched_receipt_components`
+- `CardStatementReceiptEvidence.service_label_snapshot`
+
 ## 1.12.0 — 2026-08-05
 
 2026年7月分の全社Pカード明細61行と提出PDF63件を全件監査し、単純な1ファイル一対一照合を、取引構成要素・明示参照番号による重複排除・返金正味額照合へ再設計した実データ検証版です。
