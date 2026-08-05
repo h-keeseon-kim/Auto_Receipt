@@ -56,6 +56,7 @@
         <div class="card"><span class="label">AI判定明細月</span><strong class="{% if statement.statement_period and statement.statement_period != selected_month|date:'Y-m' %}danger{% endif %}">{{ statement.statement_period|default:"解析待ち" }}</strong></div>
         <div class="card"><span class="label">支払日</span><strong>{{ statement.payment_date|date:"Y-m-d"|default:"-" }}</strong></div>
         <div class="card"><span class="label">明細行</span><strong>{{ statement.items.count }}</strong></div>
+        <div class="card"><span class="label">推定対応</span><strong class="{% if statement.inferred_count %}inferred-text{% endif %}">{{ statement.inferred_count }}</strong></div>
         <div class="card"><span class="label">解析要確認</span><strong class="{% if statement.manual_review_count %}warning{% endif %}">{{ statement.manual_review_count }}</strong></div>
         <div class="card"><span class="label">未一致</span><strong class="{% if statement.missing_receipt_count %}danger{% endif %}">{{ statement.missing_receipt_count }}</strong></div>
         <div class="card"><span class="label">明細未使用の提出書類</span><strong class="{% if statement.unmatched_receipt_components %}warning{% endif %}">{{ statement.unmatched_receipt_components|length }}</strong></div>
@@ -72,7 +73,7 @@
             <strong>照合条件：</strong>
             通常取引は、金額・通貨完全一致、ご利用先・払先または本文上のサービス名の関連、明細利用日と領収書日付が±1日以内の候補を、明細全体で最大件数となるよう一対一割り当てします。
             法的な販売者名とサービス名は別に保持します。例えば「Google Asia Pacific Pte. Ltd.」が販売者でも、本文に「Google One」と明示されていればGoogle One明細として照合します。
-            利用者の特定は判定条件に含めません。<strong>赤色は未一致、黄色は提出ファイルの解析要確認です。</strong>
+            通常照合では利用者の特定を判定条件に含めません。直接一致しない明細に限り、当月の契約変更書類に旧プラン終了情報が明記され、同一ユーザーの前月旧プラン領収書が金額・通貨・請求周期まで一致するときは「推定対応」として管理者確認に回します。<strong>赤色は未一致、橙色は推定対応、黄色は提出ファイルの解析要確認です。</strong>
         </div>
 
         {% if statement.display_items %}
@@ -92,15 +93,42 @@
                                 {% if item.original_amount is not None %}<span>{{ item.original_amount|floatformat:-2 }} {{ item.original_currency }}</span>{% endif %}
                             </div>
                             <div class="statement-result-badges">
-                                <span class="badge {% if item.match_status == 'matched' %}submitted{% elif item.match_status == 'ignored' %}neutral{% elif item.match_status == 'needs_review' %}draft{% else %}danger{% endif %}">{{ item.get_match_status_display }}</span>
-                                <span class="badge {% if item.match_status == 'matched' %}submitted{% elif not item.receipt_required %}neutral{% elif item.match_status == 'needs_review' %}draft{% else %}danger{% endif %}">{{ item.receipt_status_label }}</span>
+                                <span class="badge {% if item.match_status == 'matched' %}submitted{% elif item.match_status == 'inferred' %}inferred{% elif item.match_status == 'ignored' %}neutral{% elif item.match_status == 'needs_review' %}draft{% else %}danger{% endif %}">{{ item.get_match_status_display }}</span>
+                                <span class="badge {% if item.match_status == 'matched' %}submitted{% elif item.match_status == 'inferred' %}inferred{% elif not item.receipt_required %}neutral{% elif item.match_status == 'needs_review' %}draft{% else %}danger{% endif %}">{{ item.receipt_status_label }}</span>
                             </div>
                         </header>
 
                         <div class="statement-simple-result-grid">
                             <section class="statement-result-panel">
                                 <h4>照合証拠</h4>
-                                {% if item.receipt_evidences.all %}
+                                {% if item.plan_change_inference %}
+                                    {% with inference=item.plan_change_inference %}
+                                    <div class="plan-change-inference-evidence{% if inference.is_confirmed %} confirmed{% elif inference.is_rejected %} rejected{% endif %}">
+                                        <div class="plan-change-inference-heading">
+                                            <span class="badge {% if inference.is_confirmed %}submitted{% elif inference.is_rejected %}danger{% else %}inferred{% endif %}">{{ inference.get_status_display }}</span>
+                                            <strong>{{ inference.user_snapshot|default:"利用者未設定" }}</strong>
+                                        </div>
+                                        <dl class="plan-change-inference-details">
+                                            <div><dt>旧プラン</dt><dd>{{ inference.previous_plan }}</dd></div>
+                                            <div><dt>新プラン</dt><dd>{{ inference.new_plan|default:"未抽出" }}</dd></div>
+                                            <div><dt>変更日</dt><dd>{{ inference.change_date|date:"Y-m-d"|default:"未抽出" }}</dd></div>
+                                            <div><dt>旧プラン終了日</dt><dd>{{ inference.previous_plan_end|date:"Y-m-d" }}</dd></div>
+                                            <div><dt>推定金額</dt><dd>{{ inference.amount|floatformat:-2 }} {{ inference.currency }}</dd></div>
+                                            <div><dt>過去請求日</dt><dd>{{ inference.historical_receipt_date|date:"Y-m-d" }}</dd></div>
+                                        </dl>
+                                        <div class="plan-change-inference-documents">
+                                            <p><strong>契約変更書類:</strong>
+                                                {% if inference.change_receipt and inference.change_receipt.file_available %}<a href="{% url 'download_receipt' inference.change_receipt.pk %}">{{ inference.change_filename_snapshot }}</a>{% else %}{{ inference.change_filename_snapshot }}{% endif %}
+                                            </p>
+                                            <p><strong>過去の旧プラン領収書:</strong>
+                                                {% if inference.historical_receipt and inference.historical_receipt.file_available %}<a href="{% url 'download_receipt' inference.historical_receipt.pk %}">{{ inference.historical_filename_snapshot }}</a>{% else %}{{ inference.historical_filename_snapshot }}{% endif %}
+                                            </p>
+                                        </div>
+                                        <p class="muted small">{{ inference.reason }}</p>
+                                        {% if inference.reviewed_by %}<p class="muted small">確認: {{ inference.reviewed_by.username }}{% if inference.reviewed_at %} / {{ inference.reviewed_at|date:"Y-m-d H:i" }}{% endif %}</p>{% endif %}
+                                    </div>
+                                    {% endwith %}
+                                {% elif item.receipt_evidences.all %}
                                     <ul class="statement-evidence-list">
                                         {% for evidence in item.receipt_evidences.all %}
                                             <li>
@@ -137,7 +165,13 @@
                                 <form method="post" action="{% url 'staff_update_statement_item' item.pk %}" class="statement-item-form statement-item-form-compact">
                                     {% csrf_token %}
                                     <input type="hidden" name="result" value="{{ result_filter }}">
-                                    {% if item.receipt_required %}
+                                    {% if item.match_status == 'inferred' and item.plan_change_inference and item.plan_change_inference.is_pending %}
+                                        <p class="muted small">契約変更書類と前月の旧プラン領収書は直接の当月領収書ではありません。内容を確認して最終判断してください。</p>
+                                        <div class="statement-result-actions">
+                                            <button type="submit" name="item_action" value="confirm_plan_change" class="button small primary" onclick="return confirm('この契約変更推定を一致として確定しますか？');">推定対応を一致として確定</button>
+                                            <button type="submit" name="item_action" value="reject_plan_change" class="button small danger-outline" onclick="return confirm('この推定を採用せず未一致に戻しますか？');">推定を採用せず未一致</button>
+                                        </div>
+                                    {% elif item.receipt_required %}
                                         <p class="muted small">この明細が領収書不要の項目である場合のみ、対象外に変更してください。</p>
                                         <button type="submit" name="item_action" value="ignore" class="button small">領収書対象外にする</button>
                                     {% else %}
@@ -200,7 +234,7 @@
             {% endif %}
         {% endif %}
 
-        <p class="muted small statement-highlight-legend"><span class="legend-swatch unmatched"></span> 赤色は未一致です。<span class="legend-swatch review"></span> 黄色は提出ファイルがあるものの、金額・日付・払先などの解析が不足し、未提出と断定していない行です。</p>
+        <p class="muted small statement-highlight-legend"><span class="legend-swatch unmatched"></span> 赤色は未一致です。<span class="legend-swatch inferred"></span> 橙色は契約変更情報による推定対応で、管理者の確定が必要です。<span class="legend-swatch review"></span> 黄色は提出ファイルがあるものの、金額・日付・払先などの解析が不足し、未提出と断定していない行です。</p>
     {% else %}
         <p class="muted center">解析結果はありません。</p>
     {% endif %}

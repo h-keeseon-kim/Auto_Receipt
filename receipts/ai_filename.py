@@ -27,6 +27,8 @@ class ReceiptTextFallback:
     text: str = ""
     payee: str = ""
     service_label: str = ""
+    plan_name: str = ""
+    plan_change_details: dict[str, Any] | None = None
     recipient_name: str = ""
     recipient_name_matches_user: bool | None = None
     recipient_name_relation_reason: str = ""
@@ -47,6 +49,8 @@ class ReceiptFilenameResult:
     admin_memo: str = ""
     payee: str = ""
     service_label: str = ""
+    plan_name: str = ""
+    plan_change_details: dict[str, Any] | None = None
     filename_label: str = ""
     payment_date: date | None = None
     amount: Decimal | None = None
@@ -399,6 +403,195 @@ def _extract_probable_service_label(text: str) -> str:
     return ""
 
 
+
+_PLAN_NAME_PATTERNS: tuple[tuple[str, str], ...] = (
+    ("Max plan - 20x", r"\bMax\s+plan\s*-\s*20x\b"),
+    ("Max plan - 5x", r"\bMax\s+plan\s*-\s*5x\b"),
+    ("Claude Pro", r"\bClaude\s+Pro\b"),
+    ("ChatGPT Plus", r"\bChatGPT\s+Plus\b"),
+    ("ChatGPT Pro", r"\bChatGPT\s+Pro\b"),
+    ("ChatGPT Team", r"\bChatGPT\s+Team\b"),
+    ("ChatGPT Business", r"\bChatGPT\s+Business\b"),
+    ("GitHub Copilot Pro", r"\bGitHub\s+Copilot\s+Pro\b"),
+    ("JetBrains AI Pro", r"\bJetBrains\s+AI\s+Pro\b"),
+    ("Google AI Ultra", r"\bGoogle\s+AI\s+Ultra\b"),
+)
+
+
+def normalize_plan_name(value: str) -> str:
+    value = unicodedata.normalize("NFKC", value or "").strip()
+    value = re.sub(r"\s+", " ", value)
+    if not value:
+        return ""
+    for label, pattern in _PLAN_NAME_PATTERNS:
+        if re.search(pattern, value, flags=re.I):
+            return label
+    return value[:160]
+
+
+def _parse_english_date_range(value: str) -> tuple[date | None, date | None]:
+    value = unicodedata.normalize("NFKC", value or "").replace("–", "-").replace("—", "-")
+    match = re.search(
+        r"\b(January|February|March|April|May|June|July|August|September|October|November|December|"
+        r"Jan|Feb|Mar|Apr|Jun|Jul|Aug|Sep|Sept|Oct|Nov|Dec)\s+(\d{1,2})\s*-\s*"
+        r"(January|February|March|April|May|June|July|August|September|October|November|December|"
+        r"Jan|Feb|Mar|Apr|Jun|Jul|Aug|Sep|Sept|Oct|Nov|Dec)\s+(\d{1,2}),?\s+(20\d{2})\b",
+        value,
+        flags=re.I,
+    )
+    if not match:
+        return None, None
+    start_text = f"{match.group(1)} {match.group(2)} {match.group(5)}"
+    end_text = f"{match.group(3)} {match.group(4)} {match.group(5)}"
+    start = _parse_labeled_date_value(start_text)
+    end = _parse_labeled_date_value(end_text)
+    if start and end and end < start:
+        try:
+            end = end.replace(year=end.year + 1)
+        except ValueError:
+            pass
+    return start, end
+
+
+def _extract_probable_plan_name(text: str) -> str:
+    normalized = unicodedata.normalize("NFKC", text or "")
+    for label, pattern in _PLAN_NAME_PATTERNS:
+        if re.search(pattern, normalized, flags=re.I):
+            return label
+    return ""
+
+
+def normalize_plan_change_details(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        return {}
+    previous_plan = normalize_plan_name(value.get("previous_plan") or "")
+    new_plan = normalize_plan_name(value.get("new_plan") or "")
+    result: dict[str, Any] = {
+        "previous_plan": previous_plan,
+        "new_plan": new_plan,
+        "change_date": "",
+        "previous_plan_unused_from": "",
+        "previous_plan_end": "",
+        "new_plan_start": "",
+        "new_plan_end": "",
+        "adjustment_amount": "",
+        "adjustment_currency": "",
+        "confidence": 0.0,
+    }
+    for field in (
+        "change_date",
+        "previous_plan_unused_from",
+        "previous_plan_end",
+        "new_plan_start",
+        "new_plan_end",
+    ):
+        parsed = parse_iso_date(value.get(field))
+        if parsed:
+            result[field] = parsed.isoformat()
+    adjustment = parse_signed_amount(value.get("adjustment_amount"))
+    if adjustment is not None:
+        result["adjustment_amount"] = format(adjustment, "f")
+    result["adjustment_currency"] = normalize_currency(value.get("adjustment_currency") or "")
+    result["confidence"] = normalize_confidence(value.get("confidence"))
+    if not previous_plan and not new_plan:
+        return {}
+    return result
+
+
+def _extract_plan_change_details(text: str) -> dict[str, Any]:
+    """Extract explicit subscription-change metadata from embedded PDF text.
+
+    The Anthropic Stripe-style receipt used in production states both
+    ``Max plan - 20x`` and ``Unused time on Claude Pro after 06 Jun 2026``.
+    We only emit a change when an explicit old-plan phrase is present; generic
+    plan mentions alone are not enough.
+    """
+
+    normalized = unicodedata.normalize("NFKC", text or "").replace("\x00", "-")
+    unused = re.search(
+        r"Unused\s+time\s+on\s+(?P<previous>.+?)\s+after\s+"
+        r"(?P<change>\d{1,2}\s+(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|"
+        r"Jul(?:y)?|Aug(?:ust)?|Sep(?:t(?:ember)?)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\s+20\d{2})",
+        normalized,
+        flags=re.I,
+    )
+    if not unused:
+        return {}
+
+    previous_plan = normalize_plan_name(unused.group("previous"))
+    change_date = _parse_labeled_date_value(unused.group("change"))
+    if change_date is None:
+        for fmt in ("%d %b %Y", "%d %B %Y"):
+            try:
+                change_date = datetime.strptime(unused.group("change"), fmt).date()
+                break
+            except ValueError:
+                continue
+    previous_start, previous_end = _parse_english_date_range(normalized[unused.end():unused.end() + 500])
+
+    before = normalized[:unused.start()]
+    new_plan = ""
+    new_plan_match = None
+    for label, pattern in _PLAN_NAME_PATTERNS:
+        matches = list(re.finditer(pattern, before, flags=re.I))
+        if matches:
+            candidate = matches[-1]
+            if label != previous_plan:
+                new_plan = label
+                new_plan_match = candidate
+                break
+    new_start = new_end = None
+    if new_plan_match:
+        new_start, new_end = _parse_english_date_range(before[new_plan_match.end():new_plan_match.end() + 500])
+
+    adjustment_amount = None
+    adjustment_currency = ""
+    adjustment_tail = normalized[unused.start():unused.end() + 500]
+    adjustment_tail = re.split(r"\bSubtotal\b", adjustment_tail, maxsplit=1, flags=re.I)[0]
+    adjustment_matches = list(
+        re.finditer(
+            rf"(?P<sign>[-−])?\s*(?P<currency>{_CURRENCY_TOKEN_PATTERN})\s*"
+            rf"(?P<amount>\d[\d,]*(?:\.\d+)?)",
+            adjustment_tail,
+            flags=re.I,
+        )
+    )
+    adjustment_match = next(
+        (match for match in adjustment_matches if match.group("sign")),
+        adjustment_matches[0] if adjustment_matches else None,
+    )
+    if adjustment_match:
+        adjustment_amount = parse_signed_amount(
+            ("-" if adjustment_match.group("sign") else "") + adjustment_match.group("amount")
+        )
+        adjustment_currency = _normalize_currency_token(adjustment_match.group("currency"))
+
+    confidence = 0.86
+    if previous_plan and new_plan:
+        confidence += 0.05
+    if change_date and previous_end:
+        confidence += 0.04
+    if new_start and new_end:
+        confidence += 0.03
+    if adjustment_amount is not None and adjustment_currency:
+        confidence += 0.02
+
+    return normalize_plan_change_details(
+        {
+            "previous_plan": previous_plan,
+            "new_plan": new_plan,
+            "change_date": change_date.isoformat() if change_date else None,
+            "previous_plan_unused_from": previous_start.isoformat() if previous_start else None,
+            "previous_plan_end": previous_end.isoformat() if previous_end else None,
+            "new_plan_start": new_start.isoformat() if new_start else None,
+            "new_plan_end": new_end.isoformat() if new_end else None,
+            "adjustment_amount": str(adjustment_amount) if adjustment_amount is not None else None,
+            "adjustment_currency": adjustment_currency or None,
+            "confidence": min(confidence, 0.99),
+        }
+    )
+
+
 def normalize_service_label(value: str) -> str:
     """既知サービスは安定した短い名称へ正規化する。
 
@@ -713,6 +906,10 @@ def extract_receipt_text_fallback(
 
     payee = _extract_probable_payee(text)
     service_label = _extract_probable_service_label(text)
+    plan_change_details = _extract_plan_change_details(text)
+    plan_name = normalize_plan_name(
+        plan_change_details.get("new_plan") if plan_change_details else _extract_probable_plan_name(text)
+    )
     financial_document_kind = _extract_financial_document_kind(text)
     payment_date = _extract_labeled_payment_date(text)
     if payment_date is None and re.search(
@@ -767,6 +964,8 @@ def extract_receipt_text_fallback(
         text=text,
         payee=payee,
         service_label=service_label,
+        plan_name=plan_name,
+        plan_change_details=plan_change_details,
         recipient_name=recipient_name,
         recipient_name_matches_user=recipient_match,
         recipient_name_relation_reason=recipient_reason,
@@ -821,6 +1020,26 @@ def merge_payload_with_text_fallback(
 
     fill("payee", fallback.payee)
     fill("service_label", fallback.service_label)
+    fill("plan_name", fallback.plan_name)
+    fallback_plan_change = normalize_plan_change_details(fallback.plan_change_details)
+    if fallback_plan_change:
+        existing_plan_change = normalize_plan_change_details(merged.get("plan_change_details"))
+        combined_plan_change = dict(existing_plan_change) if existing_plan_change else {}
+        # The embedded-text fallback only emits plan-change metadata when the
+        # document explicitly contains an old-plan adjustment phrase.  Prefer
+        # those literal dates/names over a model guess, while preserving model
+        # fields that the PDF text parser could not recover.
+        for field, value in fallback_plan_change.items():
+            if value not in (None, "", 0, 0.0):
+                combined_plan_change[field] = value
+        combined_plan_change["confidence"] = max(
+            float(existing_plan_change.get("confidence") or 0),
+            float(fallback_plan_change.get("confidence") or 0),
+        )
+        normalized_combined = normalize_plan_change_details(combined_plan_change)
+        if normalized_combined != existing_plan_change:
+            merged["plan_change_details"] = normalized_combined
+            fallback_used = True
     fill("filename_label", fallback.service_label or fallback.payee)
     fill("recipient_name", fallback.recipient_name)
     fill("payment_date", fallback.payment_date.isoformat() if fallback.payment_date else None)
@@ -1015,7 +1234,7 @@ def generate_ai_receipt_filename(
                 },
             ],
             text={"format": receipt_filename_schema()},
-            max_output_tokens=2600,
+            max_output_tokens=3200,
         )
         payload = json.loads(extract_response_text(response))
         payload, _ = merge_payload_with_text_fallback(
@@ -1042,6 +1261,13 @@ def generate_ai_receipt_filename(
             "card_last4_matches_target": None,
             "payee": text_fallback.payee or None,
             "service_label": text_fallback.service_label or None,
+            "plan_name": text_fallback.plan_name or None,
+            "plan_change_details": text_fallback.plan_change_details or {
+                "previous_plan": None, "new_plan": None, "change_date": None,
+                "previous_plan_unused_from": None, "previous_plan_end": None,
+                "new_plan_start": None, "new_plan_end": None,
+                "adjustment_amount": None, "adjustment_currency": None, "confidence": 0.0,
+            },
             "recipient_name": text_fallback.recipient_name or None,
             "recipient_name_matches_user": text_fallback.recipient_name_matches_user,
             "recipient_name_relation_reason": text_fallback.recipient_name_relation_reason,
@@ -1205,9 +1431,15 @@ def build_openai_content(
                 + "signed_amountはchargeを正、refundを負にし、transaction_dateは各イベントの日付、"
                 + "invoice_number、transaction_id、related_transaction_idを本文から読める範囲で返す。"
                 + "本文の同じ取引がTotalとPayment historyに重複表示されても1構成要素にする。\n"
-                + filename_instruction.replace("5. ", "9. ", 1)
-                + "10. ファイル名はアプリ側で YYMMDD_ユーザー名_filename_label_金額_通貨 の形式に整形する。\n"
-                + "11. can_create_filename は、払先・filename_label・日付・金額・通貨を高い確度で読め、"
+                + "9. 領収書本文に契約プラン名が明示されていれば plan_name に返す。"
+                + "プラン変更・アップグレード・ダウングレード・日割り調整がある場合は plan_change_details を埋める。"
+                + "特に『Unused time on <旧プラン> after <日付>』のような記載は、previous_plan、change_date、"
+                + "previous_plan_unused_from、previous_plan_endを返し、新しいプランと利用期間はnew_plan、new_plan_start、new_plan_endへ返す。"
+                + "日割り控除額は符号付きadjustment_amountとadjustment_currencyへ返す。"
+                + "明示されていない項目はnullにし、通常の単一プラン領収書ではprevious_plan等を推測しない。\n"
+                + filename_instruction.replace("5. ", "10. ", 1)
+                + "11. ファイル名はアプリ側で YYMMDD_ユーザー名_filename_label_金額_通貨 の形式に整形する。\n"
+                + "12. can_create_filename は、払先・filename_label・日付・金額・通貨を高い確度で読め、"
                 + f"さらに{relation_name}が関連すると確認できる場合に true にする。"
                 + f"カード末尾{target}の一致は補助証拠であり、記載なしでも他の条件が揃えば true にする。"
                 + "別のカード末尾が明記された場合は reason に記載し、管理者確認対象とする。"
@@ -1248,6 +1480,28 @@ def receipt_filename_schema() -> dict[str, Any]:
                 "card_last4_matches_target": {"type": ["boolean", "null"], "description": "カード末尾が指定された末尾4桁と一致するか。読めない場合は null。"},
                 "payee": {"type": ["string", "null"], "description": "実際の払先・販売者・請求元。登録サービス名ではなく領収書上の法的な相手先。"},
                 "service_label": {"type": ["string", "null"], "description": "領収書本文に明示された製品・サービス・プラン名。例: Google One、Google Cloud、ChatGPT、Claude。法的販売者名とは分ける。"},
+                "plan_name": {"type": ["string", "null"], "description": "領収書本文に明示された具体的な契約プラン名。例: Claude Pro、Max plan - 20x。"},
+                "plan_change_details": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "properties": {
+                        "previous_plan": {"type": ["string", "null"]},
+                        "new_plan": {"type": ["string", "null"]},
+                        "change_date": {"type": ["string", "null"], "description": "YYYY-MM-DD"},
+                        "previous_plan_unused_from": {"type": ["string", "null"], "description": "YYYY-MM-DD"},
+                        "previous_plan_end": {"type": ["string", "null"], "description": "YYYY-MM-DD"},
+                        "new_plan_start": {"type": ["string", "null"], "description": "YYYY-MM-DD"},
+                        "new_plan_end": {"type": ["string", "null"], "description": "YYYY-MM-DD"},
+                        "adjustment_amount": {"type": ["number", "string", "null"]},
+                        "adjustment_currency": {"type": ["string", "null"]},
+                        "confidence": {"type": "number", "minimum": 0, "maximum": 1}
+                    },
+                    "required": [
+                        "previous_plan", "new_plan", "change_date", "previous_plan_unused_from",
+                        "previous_plan_end", "new_plan_start", "new_plan_end",
+                        "adjustment_amount", "adjustment_currency", "confidence"
+                    ]
+                },
                 "recipient_name": {"type": ["string", "null"], "description": "領収書の利用者名、宛名、ご使用者氏名、購入者名、Billed to、Customer、Account holder。払先名ではない。"},
                 "recipient_name_matches_user": {"type": ["boolean", "null"], "description": "領収書の利用者名・宛名が対象ユーザー情報と明確に対応するか。曖昧・記載なしの場合は null。"},
                 "recipient_name_relation_reason": {"type": "string", "description": "利用者名・宛名と対象ユーザーの対応について、管理者が確認すべき根拠または不足情報。"},
@@ -1297,6 +1551,8 @@ def receipt_filename_schema() -> dict[str, Any]:
                 "card_last4_matches_target",
                 "payee",
                 "service_label",
+                "plan_name",
+                "plan_change_details",
                 "recipient_name",
                 "recipient_name_matches_user",
                 "recipient_name_relation_reason",
@@ -1373,6 +1629,10 @@ def build_result_from_payload(
 
     payee = normalize_payee(payload.get("payee") or "")
     service_label = normalize_service_label(payload.get("service_label") or "")
+    plan_name = normalize_plan_name(payload.get("plan_name") or "")
+    plan_change_details = normalize_plan_change_details(payload.get("plan_change_details"))
+    if plan_change_details.get("new_plan") and not plan_name:
+        plan_name = plan_change_details["new_plan"]
     # PDF本文に製品・サービス名が明示されている場合は、モデルが法的販売者名を
     # filename_labelに返しても、サービス名を決定的に優先する。
     filename_label = normalize_filename_label(service_label or payload.get("filename_label") or payee)
@@ -1486,6 +1746,8 @@ def build_result_from_payload(
         suggested_filename=suggested_filename if can_create and not issues else "",
         payee=payee,
         service_label=service_label,
+        plan_name=plan_name,
+        plan_change_details=plan_change_details,
         filename_label=filename_label,
         payment_date=payment_date,
         amount=amount,

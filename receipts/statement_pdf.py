@@ -28,6 +28,7 @@ BORDER = colors.HexColor("#D7DFEA")
 HEADER_BG = colors.HexColor("#EEF3FF")
 UNMATCHED_BG = colors.HexColor("#FFD8D4")
 REVIEW_BG = colors.HexColor("#FFF0C7")
+INFERRED_BG = colors.HexColor("#FFE4BD")
 MATCHED_BG = colors.HexColor("#F0FAF2")
 NEUTRAL_BG = colors.HexColor("#F5F7FA")
 WHITE = colors.white
@@ -87,9 +88,24 @@ def _is_review(item: CardStatementItem) -> bool:
     return bool(item.receipt_required and item.match_status == StatementMatchStatus.NEEDS_REVIEW)
 
 
+def _is_inferred(item: CardStatementItem) -> bool:
+    return bool(item.receipt_required and item.match_status == StatementMatchStatus.INFERRED)
+
+
 def _evidence_text(item: CardStatementItem) -> str:
     evidences = list(item.receipt_evidences.all())
     if not evidences:
+        inference = getattr(item, "plan_change_inference", None)
+        if inference is not None:
+            parts = [
+                f"契約変更: {inference.change_filename_snapshot}",
+                f"過去実績: {inference.historical_filename_snapshot}",
+                f"{inference.previous_plan} → {inference.new_plan or '新プラン未抽出'}",
+                f"旧プラン終了: {inference.previous_plan_end:%Y-%m-%d}",
+                f"過去請求: {inference.historical_receipt_date:%Y-%m-%d} / "
+                f"{_decimal_text(inference.amount)} {inference.currency}",
+            ]
+            return "\n".join(parts)
         return "-"
     filenames = list(dict.fromkeys(evidence.filename_snapshot for evidence in evidences if evidence.filename_snapshot))
     text = " / ".join(filenames) or "-"
@@ -101,6 +117,8 @@ def _evidence_text(item: CardStatementItem) -> str:
 def _row_background(item: CardStatementItem):
     if _is_unmatched(item):
         return UNMATCHED_BG
+    if _is_inferred(item):
+        return INFERRED_BG
     if _is_review(item):
         return REVIEW_BG
     if item.match_status == StatementMatchStatus.MATCHED:
@@ -240,7 +258,7 @@ def _metadata_table(statement: CardStatement, styles: dict[str, ParagraphStyle])
 
 def _action_items_table(items: list[CardStatementItem], styles: dict[str, ParagraphStyle]) -> Table | Paragraph:
     if not items:
-        return Paragraph("未一致・解析要確認の明細行はありません。", styles["notice"])
+        return Paragraph("未一致・推定対応・解析要確認の明細行はありません。", styles["notice"])
 
     rows = [[
         _paragraph("No.", styles["header"]),
@@ -407,7 +425,7 @@ def build_card_statement_reconciliation_pdf(statement: CardStatement) -> bytes:
     _register_fonts()
     styles = _styles()
     items = list(statement.items.all())
-    action_items = [item for item in items if _is_unmatched(item) or _is_review(item)]
+    action_items = [item for item in items if _is_unmatched(item) or _is_inferred(item) or _is_review(item)]
 
     buffer = BytesIO()
     document = SimpleDocTemplate(
@@ -430,7 +448,7 @@ def build_card_statement_reconciliation_pdf(statement: CardStatement) -> bytes:
         ),
         _metadata_table(statement, styles),
         Spacer(1, 3 * mm),
-        Paragraph("未一致・解析要確認", styles["section"]),
+        Paragraph("未一致・推定対応・解析要確認", styles["section"]),
         _action_items_table(action_items, styles),
     ]
     unused_entries = list(statement.unmatched_receipt_components or [])

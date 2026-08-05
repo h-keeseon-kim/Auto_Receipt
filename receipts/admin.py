@@ -3,6 +3,7 @@ from django.contrib import admin
 from .models import (
     CardStatement,
     CardStatementItem,
+    CardStatementPlanChangeInference,
     CardStatementReceiptEvidence,
     EmailDeliveryLog,
     EmailReminderSchedule,
@@ -31,6 +32,9 @@ class ReceiptInline(admin.TabularInline):
         "ai_filename_checked_at",
         "ai_extracted_payee",
         "ai_extracted_service_label",
+        "ai_extracted_plan_name",
+        "plan_change_details",
+        "plan_change_metadata_checked_at",
         "ai_extracted_recipient_name",
         "ai_extracted_card_last4",
         "financial_document_kind",
@@ -79,6 +83,9 @@ class ReceiptInline(admin.TabularInline):
         "ai_filename_admin_memo",
         "ai_extracted_payee",
         "ai_extracted_service_label",
+        "ai_extracted_plan_name",
+        "plan_change_details",
+        "plan_change_metadata_checked_at",
         "financial_document_kind",
         "financial_transaction_reference",
         "financial_related_reference",
@@ -193,7 +200,7 @@ class ReceiptAdmin(admin.ModelAdmin):
         "file_status",
     )
     list_filter = ("is_extra", "p_card_usage_snapshot", "financial_document_kind", "upload_source", "admin_review_status", "ai_resubmission_recommended", "billing_type_snapshot", "currency", "ai_filename_status", "ai_period_check_status", "ai_check_recipient_name", "ai_check_service_payee_related", "ai_check_period_match", "submission__period_month", "file_deleted_at")
-    search_fields = ("service_name_snapshot", "memo", "submission__user__username", "uploaded_by__username", "uploaded_by__email", "original_filename", "generated_filename", "ai_extracted_payee", "ai_extracted_service_label", "ai_extracted_recipient_name", "financial_transaction_reference", "financial_related_reference", "ai_filename_admin_memo", "ai_period_check_memo", "ai_recipient_name_check_memo", "ai_service_payee_check_memo", "ai_resubmission_recommendation_memo")
+    search_fields = ("service_name_snapshot", "memo", "submission__user__username", "uploaded_by__username", "uploaded_by__email", "original_filename", "generated_filename", "ai_extracted_payee", "ai_extracted_service_label", "ai_extracted_plan_name", "ai_extracted_recipient_name", "financial_transaction_reference", "financial_related_reference", "ai_filename_admin_memo", "ai_period_check_memo", "ai_recipient_name_check_memo", "ai_service_payee_check_memo", "ai_resubmission_recommendation_memo")
     readonly_fields = (
         "service_name_snapshot",
         "billing_type_snapshot",
@@ -205,6 +212,9 @@ class ReceiptAdmin(admin.ModelAdmin):
         "ai_filename_checked_at",
         "ai_extracted_payee",
         "ai_extracted_service_label",
+        "ai_extracted_plan_name",
+        "plan_change_details",
+        "plan_change_metadata_checked_at",
         "ai_extracted_recipient_name",
         "ai_extracted_card_last4",
         "financial_document_kind",
@@ -324,6 +334,21 @@ class CardStatementReceiptEvidenceInline(admin.TabularInline):
     can_delete = False
 
 
+class CardStatementPlanChangeInferenceInline(admin.StackedInline):
+    model = CardStatementPlanChangeInference
+    extra = 0
+    max_num = 1
+    can_delete = False
+    fields = (
+        "status", "user", "user_snapshot", "change_receipt", "historical_receipt",
+        "previous_plan", "new_plan", "change_date", "previous_plan_end",
+        "historical_receipt_date", "amount", "currency", "confidence",
+        "reason", "candidate_fingerprint", "reviewed_by", "reviewed_at",
+        "created_at", "updated_at",
+    )
+    readonly_fields = fields
+
+
 class CardStatementItemInline(admin.TabularInline):
     model = CardStatementItem
     extra = 0
@@ -387,7 +412,27 @@ class CardStatementItemAdmin(admin.ModelAdmin):
     )
     list_filter = ("match_status", "receipt_required", "statement__period_month")
     search_fields = ("merchant_name", "line_reference", "matched_user__username", "matched_service__name", "match_memo", "receipt_evidences__filename_snapshot", "receipt_evidences__transaction_reference_snapshot")
-    inlines = [CardStatementReceiptEvidenceInline]
+    inlines = [CardStatementPlanChangeInferenceInline, CardStatementReceiptEvidenceInline]
+
+
+@admin.register(CardStatementPlanChangeInference)
+class CardStatementPlanChangeInferenceAdmin(admin.ModelAdmin):
+    list_display = (
+        "statement_item", "user_snapshot", "previous_plan", "new_plan",
+        "amount", "currency", "status", "reviewed_by", "reviewed_at",
+    )
+    list_filter = ("status", "currency", "statement_item__statement__period_month")
+    search_fields = (
+        "statement_item__merchant_name", "statement_item__line_reference",
+        "user_snapshot", "previous_plan", "new_plan",
+        "change_filename_snapshot", "historical_filename_snapshot", "reason",
+    )
+    readonly_fields = (
+        "statement_item", "user", "user_snapshot", "change_receipt", "historical_receipt",
+        "change_filename_snapshot", "historical_filename_snapshot", "previous_plan", "new_plan",
+        "change_date", "previous_plan_end", "historical_receipt_date", "amount", "currency",
+        "confidence", "reason", "candidate_fingerprint", "created_at", "updated_at",
+    )
 
 
 @admin.register(CardStatementReceiptEvidence)

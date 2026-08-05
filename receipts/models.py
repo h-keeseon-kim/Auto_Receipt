@@ -164,6 +164,7 @@ class CardStatementStatus(models.TextChoices):
 
 class StatementMatchStatus(models.TextChoices):
     MATCHED = "matched", "一致"
+    INFERRED = "inferred", "推定対応"
     NEEDS_REVIEW = "needs_review", "解析要確認"
     AMBIGUOUS = "ambiguous", "旧曖昧（再照合対象）"
     UNMATCHED = "unmatched", "未一致"
@@ -172,6 +173,8 @@ class StatementMatchStatus(models.TextChoices):
 
 class StatementMatchReason(models.TextChoices):
     AUTO_STRONG = "auto_strong", "直接一致"
+    PLAN_CHANGE_INFERRED = "plan_change_inferred", "契約変更情報による推定"
+    PLAN_CHANGE_CONFIRMED = "plan_change_confirmed", "契約変更推定を管理者確定"
     ORIGINAL_CHARGE = "original_charge", "返金書内の元決済確認"
     LINKED_REFUND_NET = "linked_refund_net", "紐付返金相殺"
     MERCHANT_REFUND_NET = "merchant_refund_net", "同一請求元内の近接返金相殺"
@@ -186,6 +189,14 @@ class StatementMatchReason(models.TextChoices):
     NO_COMPATIBLE_RECEIPT = "no_compatible_receipt", "領収書未提出"
     MANUAL_CONFIRMED = "manual_confirmed", "管理者確定"
     IGNORED = "ignored", "対象外"
+
+
+
+
+class PlanChangeInferenceStatus(models.TextChoices):
+    PENDING = "pending", "管理者確認待ち"
+    CONFIRMED = "confirmed", "一致として確定"
+    REJECTED = "rejected", "推定不採用"
 
 
 class ServiceRegistrationSource(models.TextChoices):
@@ -790,6 +801,21 @@ class Receipt(models.Model):
         max_length=160,
         blank=True,
         help_text="領収書本文に明示された製品・サービス・プラン名。法的な払先名とは分けて保存します。",
+    )
+    ai_extracted_plan_name = models.CharField(
+        "AI抽出プラン名",
+        max_length=160,
+        blank=True,
+        help_text="領収書本文に明示された契約プラン名。例: Claude Pro、Max plan - 20x。",
+    )
+    plan_change_details = models.JSONField(
+        "契約・プラン変更情報",
+        default=dict,
+        blank=True,
+        help_text="旧プラン、新プラン、変更日、旧プラン終了日、日割り調整額等を構造化して保存します。",
+    )
+    plan_change_metadata_checked_at = models.DateTimeField(
+        "契約変更メタデータ確認日時", null=True, blank=True
     )
     ai_extracted_recipient_name = models.CharField("AI抽出利用者名（宛名）", max_length=160, blank=True)
     ai_extracted_card_last4 = models.CharField("AI抽出カード下4桁", max_length=4, blank=True)
@@ -1425,6 +1451,13 @@ class CardStatement(models.Model):
             match_status=StatementMatchStatus.NEEDS_REVIEW,
         ).count()
 
+    @property
+    def inferred_count(self) -> int:
+        return self.items.filter(
+            receipt_required=True,
+            match_status=StatementMatchStatus.INFERRED,
+        ).count()
+
     def purge_file(self, reason: str = "expired") -> bool:
         if not self.file_available:
             return False
@@ -1515,6 +1548,8 @@ class CardStatementItem(models.Model):
             return "対象外"
         if self.match_status == StatementMatchStatus.MATCHED:
             return "提出済み"
+        if self.match_status == StatementMatchStatus.INFERRED:
+            return "推定対応"
         if self.match_status == StatementMatchStatus.NEEDS_REVIEW:
             return "解析要確認"
         return "未提出"
@@ -1568,6 +1603,8 @@ class CardStatementItem(models.Model):
     def row_class(self) -> str:
         if self.match_status == StatementMatchStatus.UNMATCHED and self.receipt_required:
             return "statement-unmatched-row"
+        if self.match_status == StatementMatchStatus.INFERRED:
+            return "statement-inferred-row"
         if self.match_status == StatementMatchStatus.NEEDS_REVIEW:
             return "statement-review-row"
         if self.match_status == StatementMatchStatus.IGNORED:
@@ -1576,6 +1613,95 @@ class CardStatementItem(models.Model):
 
     def __str__(self) -> str:
         return f"{self.statement} / {self.line_reference or self.sequence} / {self.merchant_name}"
+
+
+class CardStatementPlanChangeInference(models.Model):
+    """契約変更書類と過去契約実績を用いた、管理者確認前の推定対応。"""
+
+    statement_item = models.OneToOneField(
+        CardStatementItem,
+        on_delete=models.CASCADE,
+        related_name="plan_change_inference",
+        verbose_name="カード明細項目",
+    )
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="statement_plan_change_inferences",
+        verbose_name="推定利用者",
+    )
+    user_snapshot = models.CharField("利用者スナップショット", max_length=255, blank=True)
+    change_receipt = models.ForeignKey(
+        Receipt,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="plan_change_inferences_as_change_document",
+        verbose_name="契約変更書類",
+    )
+    historical_receipt = models.ForeignKey(
+        Receipt,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="plan_change_inferences_as_history",
+        verbose_name="過去契約実績",
+    )
+    change_filename_snapshot = models.CharField("契約変更書類名", max_length=255, blank=True)
+    historical_filename_snapshot = models.CharField("過去領収書名", max_length=255, blank=True)
+    previous_plan = models.CharField("旧プラン", max_length=160)
+    new_plan = models.CharField("新プラン", max_length=160, blank=True)
+    change_date = models.DateField("変更日", null=True, blank=True)
+    previous_plan_end = models.DateField("旧プラン終了日")
+    historical_receipt_date = models.DateField("過去領収書日")
+    amount = models.DecimalField("推定金額", max_digits=14, decimal_places=2)
+    currency = models.CharField("通貨", max_length=3)
+    confidence = models.FloatField("推定信頼度", default=0)
+    reason = models.TextField("推定根拠")
+    candidate_fingerprint = models.CharField("候補指紋", max_length=255)
+    status = models.CharField(
+        "確認状態",
+        max_length=20,
+        choices=PlanChangeInferenceStatus.choices,
+        default=PlanChangeInferenceStatus.PENDING,
+    )
+    reviewed_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="reviewed_statement_plan_change_inferences",
+        verbose_name="確認管理者",
+    )
+    reviewed_at = models.DateTimeField("確認日時", null=True, blank=True)
+    created_at = models.DateTimeField("作成日時", auto_now_add=True)
+    updated_at = models.DateTimeField("更新日時", auto_now=True)
+
+    class Meta:
+        ordering = ["statement_item__sequence", "pk"]
+        indexes = [models.Index(fields=["status", "updated_at"], name="stmt_plan_inf_status_idx")]
+        verbose_name = "契約変更推定対応"
+        verbose_name_plural = "契約変更推定対応"
+
+    @property
+    def is_pending(self) -> bool:
+        return self.status == PlanChangeInferenceStatus.PENDING
+
+    @property
+    def is_confirmed(self) -> bool:
+        return self.status == PlanChangeInferenceStatus.CONFIRMED
+
+    @property
+    def is_rejected(self) -> bool:
+        return self.status == PlanChangeInferenceStatus.REJECTED
+
+    def __str__(self) -> str:
+        return (
+            f"{self.statement_item} / {self.previous_plan} -> {self.new_plan or '-'} / "
+            f"{self.get_status_display()}"
+        )
 
 
 class CardStatementReceiptEvidence(models.Model):

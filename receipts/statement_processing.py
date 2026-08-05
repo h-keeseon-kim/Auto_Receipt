@@ -18,9 +18,11 @@ from .ai_filename import extract_embedded_pdf_text, extract_receipt_text_fallbac
 from .models import (
     CardStatement,
     CardStatementItem,
+    CardStatementPlanChangeInference,
     CardStatementReceiptEvidence,
     CardStatementStatus,
     MonthlyServiceDeclaration,
+    PlanChangeInferenceStatus,
     Receipt,
     ReceiptAdminReviewStatus,
     ReceiptFilenameStatus,
@@ -30,9 +32,18 @@ from .models import (
     StatementMatchReason,
     StatementMatchStatus,
     StatementReceiptEvidenceRole,
+    add_months,
     receipt_month_for_statement,
 )
 from .statement_ai import generate_card_statement_analysis
+from .plan_change_matching import (
+    HistoricalPlanReceipt,
+    PlanAmountOption,
+    PlanChangeDocument,
+    PlanStatementLine,
+    allocate_unique_plan_change_candidates,
+    infer_plan_change_candidate,
+)
 from .statement_matching import (
     AmountOption,
     EvidenceComponent,
@@ -71,6 +82,9 @@ EMPIRICAL_MATCHING_RECONCILE_MARKER = (
 SERVICE_LABEL_RECONCILE_MARKER = (
     "【照合ルール更新】法的な払先と領収書本文のサービス名を分離し、Google One等をサービス名で照合するため再照合します。"
 )
+PLAN_CHANGE_INFERENCE_RECONCILE_MARKER = (
+    "【照合ルール更新】契約変更書類と過去の旧プラン実績による推定対応を追加したため再照合します。"
+)
 
 # 実データでは通常一致56件がすべて同日または1日差だった。
 DATE_MATCH_TOLERANCE_DAYS = 1
@@ -108,6 +122,7 @@ def reconcile_pending_card_statement_month_semantics(*, period_month=None, state
         | Q(ai_admin_memo__contains=SIMPLE_RECEIPT_MATCHING_RECONCILE_MARKER)
         | Q(ai_admin_memo__contains=EMPIRICAL_MATCHING_RECONCILE_MARKER)
         | Q(ai_admin_memo__contains=SERVICE_LABEL_RECONCILE_MARKER)
+        | Q(ai_admin_memo__contains=PLAN_CHANGE_INFERENCE_RECONCILE_MARKER)
     ).exclude(status__in=[CardStatementStatus.PROCESSING, CardStatementStatus.FAILED])
     if period_month is not None:
         queryset = queryset.filter(period_month=period_month)
@@ -281,11 +296,16 @@ def _enrich_receipt_financial_metadata(receipt: Receipt) -> None:
     ファイル名は使わない。画像PDFではOpenAI保存値を維持し、推測で補完しない。
     """
 
-    if receipt.financial_metadata_checked_at is not None:
+    if (
+        receipt.financial_metadata_checked_at is not None
+        and receipt.plan_change_metadata_checked_at is not None
+    ):
         return
 
-    update_fields = ["financial_metadata_checked_at", "updated_at"]
-    receipt.financial_metadata_checked_at = timezone.now()
+    update_fields = ["financial_metadata_checked_at", "plan_change_metadata_checked_at", "updated_at"]
+    checked_at = timezone.now()
+    receipt.financial_metadata_checked_at = checked_at
+    receipt.plan_change_metadata_checked_at = checked_at
     fallback = None
     if receipt.file_available:
         try:
@@ -319,6 +339,12 @@ def _enrich_receipt_financial_metadata(receipt: Receipt) -> None:
         if fallback.service_label and not receipt.ai_extracted_service_label:
             receipt.ai_extracted_service_label = fallback.service_label[:160]
             update_fields.append("ai_extracted_service_label")
+        if fallback.plan_name and not receipt.ai_extracted_plan_name:
+            receipt.ai_extracted_plan_name = fallback.plan_name[:160]
+            update_fields.append("ai_extracted_plan_name")
+        if fallback.plan_change_details:
+            receipt.plan_change_details = dict(fallback.plan_change_details)
+            update_fields.append("plan_change_details")
         if fallback.payment_date and (receipt.issued_on is None or fallback.financial_document_kind == ReceiptFinancialDocumentKind.REFUND):
             receipt.issued_on = fallback.payment_date
             update_fields.append("issued_on")
@@ -427,6 +453,118 @@ def _receipt_components(
         if valid_count == 0:
             unresolved.append(receipt)
     return components, unresolved
+
+
+def _historical_receipts_for_statement_month(statement_month: date) -> list[Receipt]:
+    """契約変更推定に使う過去3提出サイクルの領収書メタデータ。
+
+    ファイル保存期限を過ぎても、抽出済みの日付・金額・プラン名はDBに残るため、
+    available_files() では絞らない。
+    """
+
+    start_month = add_months(statement_month, -3)
+    return list(
+        Receipt.objects.filter(
+            submission__period_month__gte=start_month,
+            submission__period_month__lt=statement_month,
+            submission__user__is_staff=False,
+            submission__user__is_superuser=False,
+        )
+        .filter(Q(is_extra=True) | Q(p_card_usage_snapshot=True))
+        .select_related("submission__user", "service", "service__catalog_service")
+        .order_by("submission__period_month", "issued_on", "uploaded_at", "pk")
+    )
+
+
+def _plan_change_documents(
+    receipts: list[Receipt],
+    catalogs: list[ServiceCatalog],
+) -> list[PlanChangeDocument]:
+    documents: list[PlanChangeDocument] = []
+    for receipt in receipts:
+        details = receipt.plan_change_details or {}
+        previous_plan = str(details.get("previous_plan") or "").strip()
+        previous_end = _parse_date(details.get("previous_plan_end"))
+        if not previous_plan or previous_end is None:
+            continue
+        context = receipt.ai_extracted_service_label or receipt.ai_extracted_payee
+        merchant_key = _known_merchant_key(context) or _canonical_merchant_key(context, catalogs)
+        if not merchant_key:
+            continue
+        try:
+            confidence = float(details.get("confidence") or 0)
+        except (TypeError, ValueError):
+            confidence = 0.0
+        documents.append(
+            PlanChangeDocument(
+                receipt_id=receipt.pk,
+                user_id=receipt.submission.user_id,
+                filename=receipt.display_filename,
+                merchant_key=merchant_key,
+                previous_plan=previous_plan,
+                new_plan=str(details.get("new_plan") or receipt.ai_extracted_plan_name or "").strip(),
+                change_date=_parse_date(details.get("change_date")),
+                previous_plan_end=previous_end,
+                confidence=confidence,
+            )
+        )
+    return documents
+
+
+def _historical_plan_evidences(
+    receipts: list[Receipt],
+    catalogs: list[ServiceCatalog],
+) -> list[HistoricalPlanReceipt]:
+    evidences: list[HistoricalPlanReceipt] = []
+    for receipt in receipts:
+        _enrich_receipt_financial_metadata(receipt)
+        plan_name = (receipt.ai_extracted_plan_name or "").strip()
+        if not plan_name or receipt.amount is None or not receipt.currency or not receipt.issued_on:
+            continue
+        context = receipt.ai_extracted_service_label or receipt.ai_extracted_payee
+        merchant_key = _known_merchant_key(context) or _canonical_merchant_key(context, catalogs)
+        if not merchant_key:
+            continue
+        document_quality = 0 if receipt.financial_document_kind == ReceiptFinancialDocumentKind.CHARGE else 1
+        if receipt.admin_review_status != ReceiptAdminReviewStatus.CONFIRMED:
+            document_quality += 1
+        evidences.append(
+            HistoricalPlanReceipt(
+                receipt_id=receipt.pk,
+                user_id=receipt.submission.user_id,
+                filename=receipt.display_filename,
+                merchant_key=merchant_key,
+                plan_name=plan_name,
+                event_date=receipt.issued_on,
+                amount=receipt.amount,
+                currency=receipt.currency,
+                document_quality=document_quality,
+            )
+        )
+    return evidences
+
+
+def _plan_statement_line(line: StatementLine) -> PlanStatementLine:
+    return PlanStatementLine(
+        key=line.key,
+        transaction_date=line.transaction_date,
+        merchant_key=line.merchant_key,
+        amount_options=tuple(PlanAmountOption(option.amount, option.currency) for option in line.amount_options),
+    )
+
+
+def _plan_inference_reason(candidate) -> str:
+    change_date = candidate.change_date.isoformat() if candidate.change_date else "未抽出"
+    return (
+        "契約変更情報による推定対応です。"
+        f"同一ユーザーの契約変更書類「{candidate.change_filename}」に、旧プラン "
+        f"{candidate.previous_plan}、新プラン {candidate.new_plan or '未抽出'}、変更日 {change_date}、"
+        f"旧プラン終了日 {candidate.previous_plan_end.isoformat()} が明記されています。"
+        f"過去領収書「{candidate.historical_filename}」は旧プラン {candidate.previous_plan}、"
+        f"{candidate.historical_date.isoformat()}、{candidate.amount} {candidate.currency} で、"
+        "今回の明細の請求元・金額・通貨・請求周期と一致します。"
+        "当月の直接領収書ではないため、管理者が根拠を確認して一致確定または不採用を選択してください。"
+    )
 
 
 def _statement_line(item: CardStatementItem, catalogs: list[ServiceCatalog]) -> StatementLine:
@@ -770,12 +908,23 @@ def reconcile_card_statement_items(statement_id: int, *, preserve_manual: bool =
         statement.items.select_related(
             "matched_user", "matched_catalog_service", "matched_service", "matched_receipt",
             "matched_receipt__submission__user", "matched_receipt__service__catalog_service",
+            "plan_change_inference__change_receipt",
+            "plan_change_inference__historical_receipt",
+            "plan_change_inference__user",
         ).order_by("sequence", "id")
     )
     receipts = _available_receipts_for_statement_month(statement.period_month)
     receipt_by_id = {receipt.pk: receipt for receipt in receipts}
     catalogs = list(ServiceCatalog.objects.all().order_by("pk"))
     components, unresolved_receipts = _receipt_components(receipts, catalogs)
+    historical_receipts = _historical_receipts_for_statement_month(statement.period_month)
+    plan_change_documents = _plan_change_documents(receipts, catalogs)
+    historical_plan_evidences = _historical_plan_evidences(historical_receipts, catalogs)
+    existing_inferences = {
+        inference.statement_item_id: inference
+        for inference in CardStatementPlanChangeInference.objects.filter(statement_item__statement=statement)
+        .select_related("change_receipt", "historical_receipt", "user")
+    }
     statement_errors = _statement_gate_errors(statement)
 
     manual_item_ids = {item.pk for item in items if preserve_manual and _is_manual_override(item)}
@@ -855,11 +1004,84 @@ def reconcile_card_statement_items(statement_id: int, *, preserve_manual: bool =
         ).strip()
         evidence_components_by_item[item.pk] = matched_components
 
+    historical_receipt_by_id = {receipt.pk: receipt for receipt in historical_receipts}
+    inferred_candidates_by_item: dict[int, Any] = {}
     unresolved_pool = list(unresolved_receipts)
-    for item in auto_items:
-        if str(item.pk) in reconciliation.assignments:
-            continue
+    unassigned_items = [
+        item for item in auto_items if str(item.pk) not in reconciliation.assignments
+    ]
+
+    # Build candidates for every still-unmatched line first, then allocate them
+    # globally.  The same plan-change document or historical old-plan receipt
+    # must never explain more than one statement line, and an exact old-plan
+    # end-date match must be preferred over a merely adjacent line.
+    ranked_plan_candidates: list[tuple[tuple, CardStatementItem, Any]] = []
+    for item in unassigned_items:
         line = line_by_key[str(item.pk)]
+        candidate = infer_plan_change_candidate(
+            _plan_statement_line(line),
+            plan_change_documents,
+            historical_plan_evidences,
+            date_tolerance_days=1,
+            billing_day_tolerance_days=1,
+            minimum_confidence=0.75,
+        )
+        existing_inference = existing_inferences.get(item.pk)
+        if (
+            candidate is not None
+            and existing_inference is not None
+            and existing_inference.status == PlanChangeInferenceStatus.REJECTED
+            and existing_inference.candidate_fingerprint == candidate.fingerprint
+        ):
+            candidate = None
+        if candidate is None:
+            continue
+        if (
+            candidate.change_receipt_id not in receipt_by_id
+            or candidate.historical_receipt_id not in historical_receipt_by_id
+        ):
+            continue
+        ranked_plan_candidates.append(
+            (
+                (
+                    candidate.end_date_distance,
+                    candidate.billing_day_distance,
+                    -round(candidate.confidence, 4),
+                    item.sequence,
+                    item.pk,
+                ),
+                item,
+                candidate,
+            )
+        )
+
+    allocated_plan_candidates = allocate_unique_plan_change_candidates(
+        [(item.sequence, item.pk, candidate) for _, item, candidate in ranked_plan_candidates]
+    )
+    inferred_candidates_by_item = {
+        int(line_key): candidate for line_key, candidate in allocated_plan_candidates.items()
+    }
+
+    for item in unassigned_items:
+        line = line_by_key[str(item.pk)]
+        candidate = inferred_candidates_by_item.get(item.pk)
+        if candidate is not None:
+            change_receipt = receipt_by_id[candidate.change_receipt_id]
+            historical_receipt = historical_receipt_by_id[candidate.historical_receipt_id]
+            _clear_item_match(item)
+            item.matched_user = change_receipt.submission.user
+            item.matched_service = historical_receipt.service or change_receipt.service
+            item.matched_catalog_service = (
+                item.matched_service.catalog_service
+                if item.matched_service_id and item.matched_service.catalog_service_id
+                else None
+            )
+            item.match_status = StatementMatchStatus.INFERRED
+            item.match_reason_code = StatementMatchReason.PLAN_CHANGE_INFERRED
+            item.match_confidence = candidate.confidence
+            item.match_memo = _plan_inference_reason(candidate)
+            continue
+
         related_index = next(
             (
                 index
@@ -919,6 +1141,45 @@ def reconcile_card_statement_items(statement_id: int, *, preserve_manual: bool =
         CardStatementReceiptEvidence.objects.filter(statement_item__statement=statement).exclude(
             statement_item_id__in=manual_item_ids
         ).delete()
+
+        for item in items:
+            candidate = inferred_candidates_by_item.get(item.pk)
+            existing = existing_inferences.get(item.pk)
+            if candidate is not None:
+                change_receipt = receipt_by_id[candidate.change_receipt_id]
+                historical_receipt = historical_receipt_by_id[candidate.historical_receipt_id]
+                defaults = {
+                    "user": change_receipt.submission.user,
+                    "user_snapshot": change_receipt.submission.user.username,
+                    "change_receipt": change_receipt,
+                    "historical_receipt": historical_receipt,
+                    "change_filename_snapshot": candidate.change_filename[:255],
+                    "historical_filename_snapshot": candidate.historical_filename[:255],
+                    "previous_plan": candidate.previous_plan[:160],
+                    "new_plan": candidate.new_plan[:160],
+                    "change_date": candidate.change_date,
+                    "previous_plan_end": candidate.previous_plan_end,
+                    "historical_receipt_date": candidate.historical_date,
+                    "amount": candidate.amount,
+                    "currency": candidate.currency[:3],
+                    "confidence": candidate.confidence,
+                    "reason": _plan_inference_reason(candidate),
+                    "candidate_fingerprint": candidate.fingerprint[:255],
+                    "status": PlanChangeInferenceStatus.PENDING,
+                    "reviewed_by": None,
+                    "reviewed_at": None,
+                }
+                CardStatementPlanChangeInference.objects.update_or_create(
+                    statement_item=item,
+                    defaults=defaults,
+                )
+            elif existing is not None and item.pk not in manual_item_ids:
+                if not (
+                    existing.status == PlanChangeInferenceStatus.REJECTED
+                    and item.match_status == StatementMatchStatus.UNMATCHED
+                ):
+                    existing.delete()
+
         for item in items:
             item.save(
                 update_fields=[
@@ -938,6 +1199,7 @@ def reconcile_card_statement_items(statement_id: int, *, preserve_manual: bool =
 
         missing_count = sum(1 for item in items if item.receipt_required and item.match_status == StatementMatchStatus.UNMATCHED)
         review_count = sum(1 for item in items if item.receipt_required and item.match_status == StatementMatchStatus.NEEDS_REVIEW)
+        inferred_count = sum(1 for item in items if item.receipt_required and item.match_status == StatementMatchStatus.INFERRED)
         direct_count = sum(1 for item in items if item.match_reason_code == StatementMatchReason.AUTO_STRONG)
         original_count = sum(1 for item in items if item.match_reason_code == StatementMatchReason.ORIGINAL_CHARGE)
         linked_count = sum(1 for item in items if item.match_reason_code == StatementMatchReason.LINKED_REFUND_NET)
@@ -947,7 +1209,7 @@ def reconcile_card_statement_items(statement_id: int, *, preserve_manual: bool =
         if statement.status != CardStatementStatus.FAILED:
             statement.status = (
                 CardStatementStatus.NEEDS_REVIEW
-                if card_or_period_problem or not items or missing_count or review_count
+                if card_or_period_problem or not items or missing_count or review_count or inferred_count
                 else CardStatementStatus.COMPLETED
             )
 
@@ -960,6 +1222,7 @@ def reconcile_card_statement_items(statement_id: int, *, preserve_manual: bool =
             SIMPLE_RECEIPT_MATCHING_RECONCILE_MARKER,
             EMPIRICAL_MATCHING_RECONCILE_MARKER,
             SERVICE_LABEL_RECONCILE_MARKER,
+            PLAN_CHANGE_INFERENCE_RECONCILE_MARKER,
         ):
             extraction_memo = extraction_memo.replace(marker, "")
         extraction_memo = extraction_memo.strip()
@@ -968,10 +1231,12 @@ def reconcile_card_statement_items(statement_id: int, *, preserve_manual: bool =
             f"【照合結果】明細月{statement.period_month:%Y-%m}（対象領収書月{target_receipt_month:%Y-%m}）の"
             f"提出PDF{len(receipts)}件を、ファイル名や利用者ではなくPDF本文の取引構成要素で照合しました。"
             f"直接一致{direct_count}件、返金書内の元決済{original_count}件、紐付返金相殺{linked_count}件、"
-            f"同一請求元内の近接返金相殺{merchant_net_count}件、解析要確認{review_count}件、未一致{missing_count}件、"
+            f"同一請求元内の近接返金相殺{merchant_net_count}件、推定対応{inferred_count}件、解析要確認{review_count}件、未一致{missing_count}件、"
             f"明細未使用の提出証拠{len(unmatched_receipt_snapshot)}件です。"
             f"通常取引は金額・通貨完全一致、請求元一致、利用日±{DATE_MATCH_TOLERANCE_DAYS}日を全体最適化で一対一割当し、"
-            "明示Invoice/Transaction IDが同じ重複書類は1取引として扱っています。利用者特定は条件に含めません。"
+            "明示Invoice/Transaction IDが同じ重複書類は1取引として扱っています。通常照合では利用者特定を条件に含めません。"
+            "直接一致しない明細についてのみ、当月の契約変更書類に明記された旧プラン終了情報と、同一ユーザーの前月旧プラン領収書が"
+            "金額・通貨・請求周期まで一致する場合に限り、管理者確認前の推定対応として提示します。"
         )
         if reconciliation.deduplicated_component_keys:
             reconciliation_memo += f" 重複証拠{len(reconciliation.deduplicated_component_keys)}件を二重計上から除外しました。"

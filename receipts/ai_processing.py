@@ -47,6 +47,9 @@ AI_RESET_FIELDS = [
     "ai_filename_checked_at",
     "ai_extracted_payee",
     "ai_extracted_service_label",
+    "ai_extracted_plan_name",
+    "plan_change_details",
+    "plan_change_metadata_checked_at",
     "ai_extracted_recipient_name",
     "ai_extracted_card_last4",
     "financial_document_kind",
@@ -126,6 +129,9 @@ def reset_ai_processing_state(receipt: Receipt, *, save: bool = False, clear_ext
     receipt.ai_filename_checked_at = None
     receipt.ai_extracted_payee = ""
     receipt.ai_extracted_service_label = ""
+    receipt.ai_extracted_plan_name = ""
+    receipt.plan_change_details = {}
+    receipt.plan_change_metadata_checked_at = None
     receipt.ai_extracted_recipient_name = ""
     receipt.ai_extracted_card_last4 = ""
     receipt.financial_document_kind = ReceiptFinancialDocumentKind.UNKNOWN
@@ -341,6 +347,9 @@ def apply_ai_filename_to_receipt(receipt: Receipt):
     receipt.ai_filename_checked_at = timezone.now()
     receipt.ai_extracted_payee = result.payee[:160] if result.payee else ""
     receipt.ai_extracted_service_label = result.service_label[:160] if result.service_label else ""
+    receipt.ai_extracted_plan_name = result.plan_name[:160] if result.plan_name else ""
+    receipt.plan_change_details = dict(result.plan_change_details or {})
+    receipt.plan_change_metadata_checked_at = timezone.now()
     receipt.ai_extracted_recipient_name = result.recipient_name[:160] if result.recipient_name else ""
     receipt.ai_extracted_card_last4 = result.card_last4[-4:] if result.card_last4 else ""
     receipt.financial_document_kind = result.financial_document_kind or ReceiptFinancialDocumentKind.UNKNOWN
@@ -356,6 +365,9 @@ def apply_ai_filename_to_receipt(receipt: Receipt):
         "ai_filename_checked_at",
         "ai_extracted_payee",
         "ai_extracted_service_label",
+        "ai_extracted_plan_name",
+        "plan_change_details",
+        "plan_change_metadata_checked_at",
         "ai_extracted_recipient_name",
         "ai_extracted_card_last4",
         "financial_document_kind",

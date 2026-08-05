@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import json
 import zipfile
 from datetime import timedelta
 from io import BytesIO, StringIO
@@ -61,9 +62,11 @@ from .models import (
     BillingType,
     CardStatement,
     CardStatementItem,
+    CardStatementPlanChangeInference,
     CardStatementReceiptEvidence,
     CardStatementStatus,
     MonthlyServiceDeclaration,
+    PlanChangeInferenceStatus,
     Receipt,
     ReceiptAdminReviewStatus,
     EmailDeliveryLog,
@@ -2013,6 +2016,7 @@ def staff_user_month_status(request, user_id: int):
 STATEMENT_RESULT_FILTERS = {
     "all": "すべて",
     "unmatched": "未一致",
+    "inferred": "推定対応",
     "needs_review": "解析要確認",
     "matched": "一致",
     "ignored": "対象外",
@@ -2044,6 +2048,8 @@ def prepare_statement_result_display(statements, result_filter: str):
             return True
         if key == "unmatched":
             return item.receipt_required and item.match_status == StatementMatchStatus.UNMATCHED
+        if key == "inferred":
+            return item.receipt_required and item.match_status == StatementMatchStatus.INFERRED
         if key == "needs_review":
             return item.receipt_required and item.match_status == StatementMatchStatus.NEEDS_REVIEW
         if key == "matched":
@@ -2075,6 +2081,12 @@ def global_statement_queryset(period_month):
             "matched_service__catalog_service",
             "matched_receipt__submission__user",
             "matched_receipt__service__catalog_service",
+            "plan_change_inference__user",
+            "plan_change_inference__change_receipt__submission__user",
+            "plan_change_inference__change_receipt__service__catalog_service",
+            "plan_change_inference__historical_receipt__submission__user",
+            "plan_change_inference__historical_receipt__service__catalog_service",
+            "plan_change_inference__reviewed_by",
         )
         .prefetch_related(Prefetch("receipt_evidences", queryset=evidence_queryset))
         .order_by("sequence", "pk")
@@ -2103,6 +2115,7 @@ def staff_card_statements(request):
         "statement_count": len(statements),
         "processing_count": sum(1 for statement in statements if statement.status == CardStatementStatus.PROCESSING),
         "missing_count": sum(statement.missing_receipt_count for statement in statements),
+        "inferred_count": sum(statement.inferred_count for statement in statements),
         "review_count": sum(statement.manual_review_count for statement in statements),
         "unused_receipt_count": sum(len(statement.unmatched_receipt_components or []) for statement in statements),
     }
@@ -2254,7 +2267,16 @@ def staff_reconcile_card_statement(request, pk: int):
 @require_POST
 def staff_update_statement_item(request, pk: int):
     item = get_object_or_404(
-        CardStatementItem.objects.select_related("statement", "matched_receipt"),
+        CardStatementItem.objects.select_related(
+            "statement",
+            "matched_receipt",
+            "plan_change_inference__user",
+            "plan_change_inference__change_receipt__submission__user",
+            "plan_change_inference__change_receipt__service__catalog_service",
+            "plan_change_inference__historical_receipt__submission__user",
+            "plan_change_inference__historical_receipt__service__catalog_service",
+            "plan_change_inference__reviewed_by",
+        ),
         pk=pk,
     )
     action = request.POST.get("item_action") or "required"
@@ -2264,7 +2286,80 @@ def staff_update_statement_item(request, pk: int):
         f"#statement-{item.statement_id}"
     )
 
-    if action == "ignore":
+    inference = getattr(item, "plan_change_inference", None)
+
+    if action == "confirm_plan_change":
+        if inference is None or inference.status != PlanChangeInferenceStatus.PENDING:
+            messages.error(request, "確認待ちの契約変更推定がありません。最新の領収書と再照合してください。")
+            return redirect(redirect_url)
+        service = None
+        if inference.historical_receipt_id and inference.historical_receipt:
+            service = inference.historical_receipt.service
+        if service is None and inference.change_receipt_id and inference.change_receipt:
+            service = inference.change_receipt.service
+        with transaction.atomic():
+            inference.status = PlanChangeInferenceStatus.CONFIRMED
+            inference.reviewed_by = request.user
+            inference.reviewed_at = timezone.now()
+            inference.save(update_fields=["status", "reviewed_by", "reviewed_at", "updated_at"])
+
+            item.receipt_required = True
+            item.matched_user = inference.user
+            item.matched_service = service
+            item.matched_catalog_service = (
+                service.catalog_service if service is not None and service.catalog_service_id else None
+            )
+            item.matched_receipt = None
+            item.match_status = StatementMatchStatus.MATCHED
+            item.match_reason_code = StatementMatchReason.PLAN_CHANGE_CONFIRMED
+            item.match_confidence = 1.0
+            item.match_memo = (
+                "管理者確認: 契約変更書類と過去の旧プラン領収書による推定対応を一致として確定しました。 "
+                + inference.reason
+            )[:4000]
+            item.save(update_fields=[
+                "receipt_required", "matched_user", "matched_service", "matched_catalog_service",
+                "matched_receipt", "match_status", "match_reason_code", "match_confidence", "match_memo",
+            ])
+            CardStatementReceiptEvidence.objects.filter(statement_item=item).delete()
+        reconcile_card_statement_items(item.statement_id, preserve_manual=True)
+        messages.success(
+            request,
+            f"明細 {item.line_reference or item.pk} の契約変更推定を一致として確定しました。",
+        )
+    elif action == "reject_plan_change":
+        if inference is None or inference.status != PlanChangeInferenceStatus.PENDING:
+            messages.error(request, "確認待ちの契約変更推定がありません。最新の領収書と再照合してください。")
+            return redirect(redirect_url)
+        with transaction.atomic():
+            inference.status = PlanChangeInferenceStatus.REJECTED
+            inference.reviewed_by = request.user
+            inference.reviewed_at = timezone.now()
+            inference.save(update_fields=["status", "reviewed_by", "reviewed_at", "updated_at"])
+
+            item.receipt_required = True
+            item.matched_user = None
+            item.matched_catalog_service = None
+            item.matched_service = None
+            item.matched_receipt = None
+            item.match_status = StatementMatchStatus.UNMATCHED
+            item.match_reason_code = StatementMatchReason.NO_COMPATIBLE_RECEIPT
+            item.match_confidence = 0.0
+            item.match_memo = (
+                "管理者が契約変更情報による推定対応を採用せず、未一致として確定しました。 "
+                + inference.reason
+            )[:4000]
+            item.save(update_fields=[
+                "receipt_required", "matched_user", "matched_catalog_service", "matched_service",
+                "matched_receipt", "match_status", "match_reason_code", "match_confidence", "match_memo",
+            ])
+            CardStatementReceiptEvidence.objects.filter(statement_item=item).delete()
+        reconcile_card_statement_items(item.statement_id, preserve_manual=True)
+        messages.success(
+            request,
+            f"明細 {item.line_reference or item.pk} の推定を採用せず、未一致として確定しました。",
+        )
+    elif action == "ignore":
         item.matched_user = None
         item.matched_catalog_service = None
         item.matched_service = None
@@ -2288,6 +2383,7 @@ def staff_update_statement_item(request, pk: int):
             ]
         )
         CardStatementReceiptEvidence.objects.filter(statement_item=item).delete()
+        CardStatementPlanChangeInference.objects.filter(statement_item=item).delete()
         reconcile_card_statement_items(item.statement_id, preserve_manual=True)
         messages.success(request, f"明細 {item.line_reference or item.pk} を領収書管理対象外にしました。")
     elif action == "required":
@@ -2306,6 +2402,7 @@ def staff_update_statement_item(request, pk: int):
             ]
         )
         CardStatementReceiptEvidence.objects.filter(statement_item=item).delete()
+        CardStatementPlanChangeInference.objects.filter(statement_item=item).delete()
         reconcile_card_statement_items(item.statement_id, preserve_manual=True)
         messages.success(request, f"明細 {item.line_reference or item.pk} を領収書照合対象へ戻しました。")
     else:
@@ -2801,6 +2898,9 @@ def receipt_manifest_csv(submissions) -> str:
         "ai_filename_status",
         "ai_filename_admin_memo",
         "ai_extracted_payee",
+        "ai_extracted_service_label",
+        "ai_extracted_plan_name",
+        "plan_change_details",
         "ai_extracted_recipient_name",
         "ai_extracted_card_last4",
         "ai_receipt_month",
@@ -2851,6 +2951,9 @@ def receipt_manifest_csv(submissions) -> str:
                 receipt.get_ai_filename_status_display(),
                 receipt.ai_filename_admin_memo,
                 receipt.ai_extracted_payee,
+                receipt.ai_extracted_service_label,
+                receipt.ai_extracted_plan_name,
+                json.dumps(receipt.plan_change_details or {}, ensure_ascii=False, sort_keys=True),
                 receipt.ai_extracted_recipient_name,
                 receipt.ai_extracted_card_last4,
                 receipt.ai_receipt_month,

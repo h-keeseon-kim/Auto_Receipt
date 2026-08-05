@@ -43,11 +43,13 @@ from .statement_processing import (
     _known_merchant_key,
     _registered_services_for_period,
     process_card_statement,
+    reconcile_card_statement_items,
 )
 from .models import (
     BillingType,
     CardStatement,
     CardStatementItem,
+    CardStatementPlanChangeInference,
     CardStatementStatus,
     EmailDeliveryLog,
     EmailReminderSchedule,
@@ -61,6 +63,7 @@ from .models import (
     ReceiptResubmissionRequest,
     RegisteredService,
     MonthlyServiceDeclaration,
+    PlanChangeInferenceStatus,
     ResubmissionRequestStatus,
     ServiceCatalog,
     ServiceDeactivationSource,
@@ -273,6 +276,35 @@ PAID: 15,400.00 JPY
         self.assertTrue(used)
         self.assertEqual(result.status, ReceiptFilenameStatus.GENERATED)
         self.assertEqual(result.suggested_filename, "260606_mametani_JetBrains_15400_JPY.pdf")
+
+    def test_plan_change_receipt_text_extracts_old_and_new_plan_dates(self):
+        embedded_text = """
+Receipt
+Date paid June 6, 2026
+Anthropic, PBC
+$218.01 paid on June 6, 2026
+Description Qty Unit price Tax Amount
+Max plan - 20x
+Jun 6–Jul 6, 2026
+1 $200.00 10% $200.00
+Unused time on Claude Pro after 06 Jun 2026
+Jun 6–Jun 8, 2026
+1 10% -$1.81
+Subtotal $198.19
+Total $218.01
+Amount paid $218.01
+"""
+        fallback = extract_receipt_text_fallback(embedded_text)
+
+        self.assertEqual(fallback.plan_name, "Max plan - 20x")
+        self.assertEqual(fallback.plan_change_details["previous_plan"], "Claude Pro")
+        self.assertEqual(fallback.plan_change_details["new_plan"], "Max plan - 20x")
+        self.assertEqual(fallback.plan_change_details["change_date"], "2026-06-06")
+        self.assertEqual(fallback.plan_change_details["previous_plan_end"], "2026-06-08")
+        self.assertEqual(fallback.plan_change_details["new_plan_start"], "2026-06-06")
+        self.assertEqual(fallback.plan_change_details["new_plan_end"], "2026-07-06")
+        self.assertEqual(fallback.plan_change_details["adjustment_amount"], "-1.81")
+        self.assertEqual(fallback.plan_change_details["adjustment_currency"], "USD")
 
     def test_google_one_service_label_is_separate_from_legal_seller_and_used_in_filename(self):
         embedded_text = """
@@ -4934,8 +4966,152 @@ class FinalWorkflowAcceptanceTests(TestCase):
         self.assertIn("GitHub_Copilot_11_USD", rendered_text)
         self.assertIn("明細0385は1.10 USD", rendered_text)
 
+    def _create_plan_change_inference_fixture(self):
+        claude_catalog = ServiceCatalog.objects.create(
+            name="Claude",
+            billing_type=BillingType.SUBSCRIPTION,
+            merchant_aliases="ANTHROPIC, CLAUDE.AI SUBSCR, ANTHROPIC.COM",
+            created_by=self.superuser,
+        )
+        claude_service = RegisteredService.objects.create(
+            user=self.user,
+            catalog_service=claude_catalog,
+            name=claude_catalog.name,
+            billing_type=claude_catalog.billing_type,
+            registered_by=self.superuser,
+        )
+        historical = self.create_receipt(
+            service=claude_service,
+            month=date(2026, 6, 1),
+            filename="260508_uchiyama_Claude_Pro_22_USD.pdf",
+        )
+        historical.amount = Decimal("22.00")
+        historical.currency = "USD"
+        historical.issued_on = date(2026, 5, 8)
+        historical.ai_extracted_payee = "Anthropic, PBC"
+        historical.ai_extracted_service_label = "Claude"
+        historical.ai_extracted_plan_name = "Claude Pro"
+        historical.financial_metadata_checked_at = timezone.now()
+        historical.plan_change_metadata_checked_at = timezone.now()
+        historical.save()
+
+        change = self.create_receipt(
+            service=claude_service,
+            month=date(2026, 7, 1),
+            filename="260606_uchiyama_Claude_Max_218.01_USD.pdf",
+        )
+        change.amount = Decimal("218.01")
+        change.currency = "USD"
+        change.issued_on = date(2026, 6, 6)
+        change.ai_extracted_payee = "Anthropic, PBC"
+        change.ai_extracted_service_label = "Claude"
+        change.ai_extracted_plan_name = "Max plan - 20x"
+        change.plan_change_details = {
+            "previous_plan": "Claude Pro",
+            "new_plan": "Max plan - 20x",
+            "change_date": "2026-06-06",
+            "previous_plan_unused_from": "2026-06-06",
+            "previous_plan_end": "2026-06-08",
+            "new_plan_start": "2026-06-06",
+            "new_plan_end": "2026-07-06",
+            "adjustment_amount": "-1.81",
+            "adjustment_currency": "USD",
+            "confidence": 0.99,
+        }
+        change.financial_metadata_checked_at = timezone.now()
+        change.plan_change_metadata_checked_at = timezone.now()
+        change.save()
+
+        statement = CardStatement.objects.create(
+            period_month=date(2026, 7, 1),
+            file=SimpleUploadedFile("company-statement.pdf", b"%PDF-1.4 statement", content_type="application/pdf"),
+            original_filename="company-statement.pdf",
+            status=CardStatementStatus.NEEDS_REVIEW,
+            card_last4="7210",
+            statement_period="2026-07",
+            uploaded_by=self.superuser,
+            expires_at=timezone.now() + timedelta(days=30),
+        )
+        item = CardStatementItem.objects.create(
+            statement=statement,
+            sequence=1,
+            line_reference="0343",
+            transaction_date=date(2026, 6, 8),
+            merchant_name="ANTHROPIC* CLAUD / ANTHROPIC.COM",
+            amount_jpy=Decimal("3663"),
+            original_amount=Decimal("22.00"),
+            original_currency="USD",
+            match_status=StatementMatchStatus.UNMATCHED,
+            receipt_required=True,
+        )
+        reconcile_card_statement_items(statement.pk)
+        item.refresh_from_db()
+        return statement, item, historical, change
+
+    def test_plan_change_and_prior_plan_receipt_create_admin_review_inference(self):
+        statement, item, historical, change = self._create_plan_change_inference_fixture()
+
+        self.assertEqual(item.match_status, StatementMatchStatus.INFERRED)
+        self.assertEqual(item.match_reason_code, StatementMatchReason.PLAN_CHANGE_INFERRED)
+        inference = CardStatementPlanChangeInference.objects.get(statement_item=item)
+        self.assertEqual(inference.status, PlanChangeInferenceStatus.PENDING)
+        self.assertEqual(inference.change_receipt, change)
+        self.assertEqual(inference.historical_receipt, historical)
+        self.assertEqual(inference.previous_plan, "Claude Pro")
+        self.assertEqual(inference.previous_plan_end, date(2026, 6, 8))
+        self.assertEqual(inference.amount, Decimal("22.00"))
+
+        self.client.login(username="admin", password="admin-password-123")
+        response = self.client.get(reverse("staff_card_statements") + "?month=2026-07&result=inferred")
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "推定対応を表示中")
+        self.assertContains(response, "推定対応を一致として確定")
+        self.assertContains(response, "Claude Pro")
+        self.assertContains(response, "Max plan - 20x")
+
+    def test_staff_can_confirm_plan_change_inference(self):
+        statement, item, _, _ = self._create_plan_change_inference_fixture()
+        self.client.login(username="admin", password="admin-password-123")
+
+        response = self.client.post(
+            reverse("staff_update_statement_item", args=[item.pk]),
+            {"item_action": "confirm_plan_change", "result": "inferred"},
+        )
+
+        self.assertEqual(response.status_code, 302)
+        item.refresh_from_db()
+        inference = CardStatementPlanChangeInference.objects.get(statement_item=item)
+        self.assertEqual(item.match_status, StatementMatchStatus.MATCHED)
+        self.assertEqual(item.match_reason_code, StatementMatchReason.PLAN_CHANGE_CONFIRMED)
+        self.assertEqual(item.match_confidence, 1.0)
+        self.assertTrue(item.match_memo.startswith("管理者確認:"))
+        self.assertEqual(inference.status, PlanChangeInferenceStatus.CONFIRMED)
+        self.assertEqual(inference.reviewed_by, self.superuser)
+
+    def test_staff_can_reject_plan_change_inference_without_guessing_again(self):
+        statement, item, _, _ = self._create_plan_change_inference_fixture()
+        self.client.login(username="admin", password="admin-password-123")
+
+        response = self.client.post(
+            reverse("staff_update_statement_item", args=[item.pk]),
+            {"item_action": "reject_plan_change", "result": "inferred"},
+        )
+
+        self.assertEqual(response.status_code, 302)
+        item.refresh_from_db()
+        inference = CardStatementPlanChangeInference.objects.get(statement_item=item)
+        self.assertEqual(item.match_status, StatementMatchStatus.UNMATCHED)
+        self.assertEqual(inference.status, PlanChangeInferenceStatus.REJECTED)
+        reconcile_card_statement_items(statement.pk)
+        item.refresh_from_db()
+        self.assertEqual(item.match_status, StatementMatchStatus.UNMATCHED)
+        self.assertEqual(
+            CardStatementPlanChangeInference.objects.get(statement_item=item).status,
+            PlanChangeInferenceStatus.REJECTED,
+        )
+
     def test_version_file_is_present_without_web_display_requirement(self):
-        self.assertEqual(Path("VERSION").read_text(encoding="utf-8").strip(), "1.13.0")
+        self.assertEqual(Path("VERSION").read_text(encoding="utf-8").strip(), "1.14.0")
 
 
 @override_settings(PASSWORD_HASHERS=FAST_PASSWORD_HASHERS)
