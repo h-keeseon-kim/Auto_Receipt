@@ -4966,7 +4966,7 @@ class FinalWorkflowAcceptanceTests(TestCase):
         self.assertIn("GitHub_Copilot_11_USD", rendered_text)
         self.assertIn("明細0385は1.10 USD", rendered_text)
 
-    def _create_plan_change_inference_fixture(self):
+    def _create_plan_change_inference_fixture(self, *, historical_plan_name="Claude Pro"):
         claude_catalog = ServiceCatalog.objects.create(
             name="Claude",
             billing_type=BillingType.SUBSCRIPTION,
@@ -4990,7 +4990,7 @@ class FinalWorkflowAcceptanceTests(TestCase):
         historical.issued_on = date(2026, 5, 8)
         historical.ai_extracted_payee = "Anthropic, PBC"
         historical.ai_extracted_service_label = "Claude"
-        historical.ai_extracted_plan_name = "Claude Pro"
+        historical.ai_extracted_plan_name = historical_plan_name
         historical.financial_metadata_checked_at = timezone.now()
         historical.plan_change_metadata_checked_at = timezone.now()
         historical.save()
@@ -5069,6 +5069,17 @@ class FinalWorkflowAcceptanceTests(TestCase):
         self.assertContains(response, "Claude Pro")
         self.assertContains(response, "Max plan - 20x")
 
+    def test_plan_change_inference_can_use_same_users_recurring_history_when_plan_label_missing(self):
+        statement, item, historical, _change = self._create_plan_change_inference_fixture(
+            historical_plan_name=""
+        )
+
+        self.assertEqual(item.match_status, StatementMatchStatus.INFERRED)
+        inference = CardStatementPlanChangeInference.objects.get(statement_item=item)
+        self.assertEqual(inference.historical_receipt, historical)
+        self.assertIn("旧プラン名を抽出できませんでした", inference.reason)
+        self.assertIn("同一ユーザーの定期契約サービス", inference.reason)
+
     def test_staff_can_confirm_plan_change_inference(self):
         statement, item, _, _ = self._create_plan_change_inference_fixture()
         self.client.login(username="admin", password="admin-password-123")
@@ -5111,7 +5122,7 @@ class FinalWorkflowAcceptanceTests(TestCase):
         )
 
     def test_version_file_is_present_without_web_display_requirement(self):
-        self.assertEqual(Path("VERSION").read_text(encoding="utf-8").strip(), "1.14.0")
+        self.assertEqual(Path("VERSION").read_text(encoding="utf-8").strip(), "1.14.1")
 
 
 @override_settings(PASSWORD_HASHERS=FAST_PASSWORD_HASHERS)
@@ -5308,6 +5319,38 @@ class DragDropAndStaffReceiptReviewTests(TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertFalse(response.json()["started"])
         self.assertIn("すでにAI確認済み", response.json()["message"])
+
+    @mock.patch("receipts.views.start_background_ai_processing")
+    def test_processed_receipt_can_be_explicitly_reanalysed_for_new_metadata(self, start_background):
+        self.receipt.ai_filename_status = ReceiptFilenameStatus.GENERATED
+        self.receipt.ai_filename_checked_at = timezone.now()
+        self.receipt.ai_extracted_plan_name = "old-value"
+        self.receipt.plan_change_details = {"new_plan": "old-value"}
+        self.receipt.plan_change_metadata_checked_at = timezone.now()
+        self.receipt.save(
+            update_fields=[
+                "ai_filename_status",
+                "ai_filename_checked_at",
+                "ai_extracted_plan_name",
+                "plan_change_details",
+                "plan_change_metadata_checked_at",
+            ]
+        )
+        self.client.login(username=self.admin.username, password="admin-password-123")
+        response = self.client.post(
+            reverse("staff_start_receipt_ai_processing", args=[self.receipt.pk]),
+            {"force_reanalysis": "1"},
+            HTTP_X_REQUESTED_WITH="XMLHttpRequest",
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.json()["started"])
+        self.assertIn("契約変更情報を含めて再解析中", response.json()["message"])
+        self.receipt.refresh_from_db()
+        self.assertEqual(self.receipt.ai_filename_status, ReceiptFilenameStatus.PROCESSING)
+        self.assertEqual(self.receipt.ai_extracted_plan_name, "")
+        self.assertEqual(self.receipt.plan_change_details, {})
+        self.assertIsNone(self.receipt.plan_change_metadata_checked_at)
+        start_background.assert_called_once_with([self.receipt.pk])
 
     @mock.patch("receipts.views.start_background_ai_processing")
     def test_unprocessed_receipt_can_start_single_ai_check(self, start_background):

@@ -73,7 +73,7 @@
             <strong>照合条件：</strong>
             通常取引は、金額・通貨完全一致、ご利用先・払先または本文上のサービス名の関連、明細利用日と領収書日付が±1日以内の候補を、明細全体で最大件数となるよう一対一割り当てします。
             法的な販売者名とサービス名は別に保持します。例えば「Google Asia Pacific Pte. Ltd.」が販売者でも、本文に「Google One」と明示されていればGoogle One明細として照合します。
-            通常照合では利用者の特定を判定条件に含めません。直接一致しない明細に限り、当月の契約変更書類に旧プラン終了情報が明記され、同一ユーザーの前月旧プラン領収書が金額・通貨・請求周期まで一致するときは「推定対応」として管理者確認に回します。<strong>赤色は未一致、橙色は推定対応、黄色は提出ファイルの解析要確認です。</strong>
+            通常照合では利用者の特定を判定条件に含めません。直接一致しない明細に限り、当月の契約変更書類に旧プラン終了情報が明記され、同一ユーザーの前月定期契約実績が金額・通貨・請求周期まで一致するときは「推定対応」として管理者確認に回します。旧プラン名を過去領収書から抽出できない場合も、定期契約・同一ユーザー・同一請求元・完全金額一致・請求周期一致をすべて満たす場合だけ候補化します。<strong>赤色は未一致、橙色は推定対応、黄色は提出ファイルの解析要確認です。</strong>
         </div>
 
         {% if statement.display_items %}
@@ -120,7 +120,7 @@
                                             <p><strong>契約変更書類:</strong>
                                                 {% if inference.change_receipt and inference.change_receipt.file_available %}<a href="{% url 'download_receipt' inference.change_receipt.pk %}">{{ inference.change_filename_snapshot }}</a>{% else %}{{ inference.change_filename_snapshot }}{% endif %}
                                             </p>
-                                            <p><strong>過去の旧プラン領収書:</strong>
+                                            <p><strong>過去の定期契約実績:</strong>
                                                 {% if inference.historical_receipt and inference.historical_receipt.file_available %}<a href="{% url 'download_receipt' inference.historical_receipt.pk %}">{{ inference.historical_filename_snapshot }}</a>{% else %}{{ inference.historical_filename_snapshot }}{% endif %}
                                             </p>
                                         </div>
@@ -166,7 +166,7 @@
                                     {% csrf_token %}
                                     <input type="hidden" name="result" value="{{ result_filter }}">
                                     {% if item.match_status == 'inferred' and item.plan_change_inference and item.plan_change_inference.is_pending %}
-                                        <p class="muted small">契約変更書類と前月の旧プラン領収書は直接の当月領収書ではありません。内容を確認して最終判断してください。</p>
+                                        <p class="muted small">契約変更書類と前月の定期契約実績は直接の当月領収書ではありません。内容を確認して最終判断してください。</p>
                                         <div class="statement-result-actions">
                                             <button type="submit" name="item_action" value="confirm_plan_change" class="button small primary" onclick="return confirm('この契約変更推定を一致として確定しますか？');">推定対応を一致として確定</button>
                                             <button type="submit" name="item_action" value="reject_plan_change" class="button small danger-outline" onclick="return confirm('この推定を採用せず未一致に戻しますか？');">推定を採用せず未一致</button>

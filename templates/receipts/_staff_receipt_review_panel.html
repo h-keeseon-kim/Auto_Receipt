@@ -2,7 +2,7 @@
     <div class="section-header">
         <div>
             <h2>確認・ファイル名修正</h2>
-            <p class="muted">AI未確認の領収書だけAI検査できます。処理済み項目は再検査せず、管理者が下の項目を補正します。</p>
+            <p class="muted">通常はAI未確認の領収書だけを検査します。処理済み項目は管理者が補正でき、抽出ルール更新時はこの画面から1件だけ明示的に再検査できます。</p>
         </div>
         <div class="ai-check-status">
             <span class="badge {{ receipt.ai_filename_badge_class }}">AI: {{ receipt.get_ai_filename_status_display }}</span>
@@ -19,7 +19,15 @@
     {% elif receipt.ai_is_queued or receipt.is_ai_processing %}
         <div class="message notice processing-text">AIで情報を抽出中です。完了後、この画面へ自動反映します。</div>
     {% else %}
-        <p class="muted small">AI処理済みです。次回ボタン操作でも再検査しません。ファイル差し替え時だけ未確認へ戻ります。</p>
+        <p class="muted small">通常の一括AI処理では、AI確認済みの領収書を再検査しません。抽出ルール更新後に契約・プラン変更情報を取り直す必要がある場合だけ、下の再検査を使用してください。</p>
+        {% if receipt.file_available %}
+            <form method="post" action="{% url 'staff_start_receipt_ai_processing' receipt.pk %}" data-single-receipt-ai-form onsubmit="return confirm('この領収書のAI抽出結果と管理者確認状態をリセットし、最新ルールで再検査しますか？');">
+                {% csrf_token %}
+                <input type="hidden" name="force_reanalysis" value="1">
+                <button type="submit" class="button">AIで再検査（契約変更情報を更新）</button>
+                <span class="muted small" data-single-receipt-ai-message>この領収書1件だけを再解析します。</span>
+            </form>
+        {% endif %}
     {% endif %}
 
     <div class="receipt-ai-details">
@@ -28,9 +36,24 @@
             <div><dt>元ファイル名</dt><dd>{{ receipt.original_filename|default:"-" }}</dd></div>
             <div><dt>AI抽出払先</dt><dd>{{ receipt.ai_extracted_payee|default:"-" }}</dd></div>
             <div><dt>AI抽出利用者名（宛名）</dt><dd>{{ receipt.ai_extracted_recipient_name|default:"-" }}</dd></div>
+            <div><dt>AI抽出プラン名</dt><dd>{{ receipt.ai_extracted_plan_name|default:"-" }}</dd></div>
             <div><dt>カード下4桁</dt><dd>{{ receipt.ai_extracted_card_last4|default:"-" }}</dd></div>
             <div><dt>AI判定領収書月</dt><dd>{{ receipt.ai_receipt_month|default:"-" }}</dd></div>
         </dl>
+        {% if receipt.plan_change_details %}
+            <div class="message notice small plan-change-metadata-panel">
+                <strong>保存済みの契約・プラン変更情報</strong>
+                <dl class="detail-list compact">
+                    <div><dt>旧プラン</dt><dd>{{ receipt.plan_change_details.previous_plan|default:"-" }}</dd></div>
+                    <div><dt>新プラン</dt><dd>{{ receipt.plan_change_details.new_plan|default:"-" }}</dd></div>
+                    <div><dt>変更日</dt><dd>{{ receipt.plan_change_details.change_date|default:"-" }}</dd></div>
+                    <div><dt>旧プラン終了日</dt><dd>{{ receipt.plan_change_details.previous_plan_end|default:"-" }}</dd></div>
+                    <div><dt>新プラン期間</dt><dd>{{ receipt.plan_change_details.new_plan_start|default:"-" }} ～ {{ receipt.plan_change_details.new_plan_end|default:"-" }}</dd></div>
+                    <div><dt>日割り調整</dt><dd>{{ receipt.plan_change_details.adjustment_amount|default:"-" }} {{ receipt.plan_change_details.adjustment_currency|default:"" }}</dd></div>
+                </dl>
+                <p class="muted small">この情報はAIファイル名修正・検査時に領収書レコードへ保存され、ご利用代金明細の推定対応で使用されます。</p>
+            </div>
+        {% endif %}
         {% if receipt.ai_recipient_name_check_memo %}<div class="message notice small">{{ receipt.ai_recipient_name_check_memo|linebreaksbr }}</div>{% endif %}
         {% if receipt.ai_service_payee_check_memo %}<div class="message notice small">{{ receipt.ai_service_payee_check_memo|linebreaksbr }}</div>{% endif %}
         {% if receipt.ai_filename_admin_memo %}<div class="message notice small">{{ receipt.ai_filename_admin_memo|linebreaksbr }}</div>{% endif %}
