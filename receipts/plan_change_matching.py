@@ -58,7 +58,6 @@ class HistoricalPlanReceipt:
     amount: Decimal | None
     currency: str
     document_quality: int = 9
-    recurring_service: bool = False
 
     def __post_init__(self):
         if self.amount is not None:
@@ -84,14 +83,12 @@ class PlanChangeInferenceCandidate:
     confidence: float
     end_date_distance: int
     billing_day_distance: int
-    historical_plan_explicit: bool = False
 
     @property
     def fingerprint(self) -> str:
         return (
             f"line={self.line_key};change={self.change_receipt_id};"
-            f"history={self.historical_receipt_id};amount={self.amount};currency={self.currency};"
-            f"plan_explicit={int(self.historical_plan_explicit)}"
+            f"history={self.historical_receipt_id};amount={self.amount};currency={self.currency}"
         )
 
 
@@ -137,7 +134,6 @@ def _candidate_core_rank(candidate: PlanChangeInferenceCandidate, historical_qua
     # true ties across users instead of silently choosing one person.
     return (
         candidate.end_date_distance,
-        0 if candidate.historical_plan_explicit else 1,
         candidate.billing_day_distance,
         -round(candidate.confidence, 4),
         historical_quality,
@@ -160,9 +156,7 @@ def infer_plan_change_candidate(
     - an explicit previous plan and previous-plan end date;
     - statement date within ±1 day of that end date;
     - same user in the plan-change and historical receipts;
-    - historical receipt either explicitly names the old plan, or belongs to the
-      same user's recurring-subscription service when the old plan label was
-      not extractable;
+    - historical receipt explicitly names the old plan;
     - exact amount and currency equality;
     - historical receipt belongs to the previous calendar month and follows the
       same billing day within ±1 day.
@@ -200,14 +194,7 @@ def infer_plan_change_candidate(
                 continue
             if historical.event_date.year != expected_year or historical.event_date.month != expected_month:
                 continue
-            historical_plan_explicit = bool((historical.plan_name or "").strip())
-            if historical_plan_explicit:
-                if not plans_related(change.previous_plan, historical.plan_name):
-                    continue
-            elif not historical.recurring_service:
-                # A missing plan label is acceptable only for a recurring
-                # subscription assigned to the same user.  This keeps one-time
-                # credit/API purchases from being used as old-plan evidence.
+            if not plans_related(change.previous_plan, historical.plan_name):
                 continue
             amount_option = _matching_amount(line, historical)
             if amount_option is None:
@@ -219,12 +206,6 @@ def infer_plan_change_candidate(
                 continue
 
             confidence = min(0.99, max(0.0, float(change.confidence or 0)))
-            if not historical_plan_explicit:
-                # The inference still requires same user, merchant, exact
-                # amount/currency, previous month and matching billing day, but
-                # the missing old-plan label must lower confidence and remain
-                # an administrator-reviewed inference.
-                confidence = max(0.0, confidence - 0.08)
             if end_distance == 0:
                 confidence += 0.005
             if billing_day_distance == 0:
@@ -247,7 +228,6 @@ def infer_plan_change_candidate(
                 confidence=confidence,
                 end_date_distance=end_distance,
                 billing_day_distance=billing_day_distance,
-                historical_plan_explicit=historical_plan_explicit,
             )
             candidates.append((_candidate_core_rank(candidate, historical.document_quality), candidate))
 
@@ -277,7 +257,6 @@ def allocate_unique_plan_change_candidates(
         candidates,
         key=lambda entry: (
             entry[2].end_date_distance,
-            0 if entry[2].historical_plan_explicit else 1,
             entry[2].billing_day_distance,
             -round(entry[2].confidence, 4),
             entry[0],

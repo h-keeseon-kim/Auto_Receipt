@@ -1518,23 +1518,13 @@ def reconcile_card_statement_items_for_submission_month(period_month):
 @require_POST
 def staff_start_receipt_ai_processing(request, pk: int):
     receipt = get_object_or_404(staff_receipt_queryset(), pk=pk)
-    force_reanalysis = request.POST.get("force_reanalysis") == "1"
-    if force_reanalysis and not (receipt.ai_is_queued or receipt.is_ai_processing):
-        # 通常の一括処理は従来どおりAI確認済みを再検査しない。
-        # 管理者が領収書確認画面から明示的に実行した場合だけ、
-        # 契約変更情報を含む最新スキーマでこの1件を再解析する。
-        reset_ai_processing_state(receipt, save=True, clear_extracted_values=False)
     claimed_ids = claim_pending_receipts_for_ai_processing(
         Receipt.objects.filter(pk=receipt.pk).available_files(),
         limit=1,
     )
     if claimed_ids:
         start_background_ai_processing(claimed_ids)
-        message = (
-            "AIで契約変更情報を含めて再解析中です。完了後、この画面へ自動反映します。"
-            if force_reanalysis
-            else "AIで情報を抽出中です。完了後、この画面へ自動反映します。"
-        )
+        message = "AIで情報を抽出中です。完了後、この画面へ自動反映します。"
     elif receipt.ai_is_queued or receipt.is_ai_processing:
         message = "この領収書はAIで情報を抽出中です。"
     else:
@@ -2324,7 +2314,7 @@ def staff_update_statement_item(request, pk: int):
             item.match_reason_code = StatementMatchReason.PLAN_CHANGE_CONFIRMED
             item.match_confidence = 1.0
             item.match_memo = (
-                "管理者確認: 契約変更書類と過去の定期契約実績による推定対応を一致として確定しました。 "
+                "管理者確認: 契約変更書類と過去の旧プラン領収書による推定対応を一致として確定しました。 "
                 + inference.reason
             )[:4000]
             item.save(update_fields=[

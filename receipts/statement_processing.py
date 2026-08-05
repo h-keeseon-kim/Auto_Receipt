@@ -21,7 +21,6 @@ from .models import (
     CardStatementPlanChangeInference,
     CardStatementReceiptEvidence,
     CardStatementStatus,
-    BillingType,
     MonthlyServiceDeclaration,
     PlanChangeInferenceStatus,
     Receipt,
@@ -86,9 +85,6 @@ SERVICE_LABEL_RECONCILE_MARKER = (
 PLAN_CHANGE_INFERENCE_RECONCILE_MARKER = (
     "【照合ルール更新】契約変更書類と過去の旧プラン実績による推定対応を追加したため再照合します。"
 )
-PLAN_CHANGE_METADATA_REFRESH_RECONCILE_MARKER = (
-    "【照合ルール更新】契約変更メタデータを再抽出し、旧プラン名を抽出できない定期契約も厳格条件で推定候補へ含めるため再照合します。"
-)
 
 # 実データでは通常一致56件がすべて同日または1日差だった。
 DATE_MATCH_TOLERANCE_DAYS = 1
@@ -127,7 +123,6 @@ def reconcile_pending_card_statement_month_semantics(*, period_month=None, state
         | Q(ai_admin_memo__contains=EMPIRICAL_MATCHING_RECONCILE_MARKER)
         | Q(ai_admin_memo__contains=SERVICE_LABEL_RECONCILE_MARKER)
         | Q(ai_admin_memo__contains=PLAN_CHANGE_INFERENCE_RECONCILE_MARKER)
-        | Q(ai_admin_memo__contains=PLAN_CHANGE_METADATA_REFRESH_RECONCILE_MARKER)
     ).exclude(status__in=[CardStatementStatus.PROCESSING, CardStatementStatus.FAILED])
     if period_month is not None:
         queryset = queryset.filter(period_month=period_month)
@@ -524,13 +519,7 @@ def _historical_plan_evidences(
     for receipt in receipts:
         _enrich_receipt_financial_metadata(receipt)
         plan_name = (receipt.ai_extracted_plan_name or "").strip()
-        if receipt.amount is None or not receipt.currency or not receipt.issued_on:
-            continue
-        billing_type = (receipt.billing_type_snapshot or "").strip()
-        if receipt.service_id and receipt.service:
-            billing_type = receipt.service.billing_type or billing_type
-        recurring_service = billing_type == BillingType.SUBSCRIPTION
-        if not plan_name and not recurring_service:
+        if not plan_name or receipt.amount is None or not receipt.currency or not receipt.issued_on:
             continue
         context = receipt.ai_extracted_service_label or receipt.ai_extracted_payee
         merchant_key = _known_merchant_key(context) or _canonical_merchant_key(context, catalogs)
@@ -550,7 +539,6 @@ def _historical_plan_evidences(
                 amount=receipt.amount,
                 currency=receipt.currency,
                 document_quality=document_quality,
-                recurring_service=recurring_service,
             )
         )
     return evidences
@@ -567,23 +555,13 @@ def _plan_statement_line(line: StatementLine) -> PlanStatementLine:
 
 def _plan_inference_reason(candidate) -> str:
     change_date = candidate.change_date.isoformat() if candidate.change_date else "未抽出"
-    if candidate.historical_plan_explicit:
-        historical_basis = (
-            f"過去領収書「{candidate.historical_filename}」には旧プラン "
-            f"{candidate.previous_plan} が明記され、"
-        )
-    else:
-        historical_basis = (
-            f"過去領収書「{candidate.historical_filename}」では旧プラン名を抽出できませんでしたが、"
-            "同一ユーザーの定期契約サービスとして、"
-        )
     return (
         "契約変更情報による推定対応です。"
         f"同一ユーザーの契約変更書類「{candidate.change_filename}」に、旧プラン "
         f"{candidate.previous_plan}、新プラン {candidate.new_plan or '未抽出'}、変更日 {change_date}、"
         f"旧プラン終了日 {candidate.previous_plan_end.isoformat()} が明記されています。"
-        + historical_basis
-        + f"{candidate.historical_date.isoformat()}、{candidate.amount} {candidate.currency} の実績があり、"
+        f"過去領収書「{candidate.historical_filename}」は旧プラン {candidate.previous_plan}、"
+        f"{candidate.historical_date.isoformat()}、{candidate.amount} {candidate.currency} で、"
         "今回の明細の請求元・金額・通貨・請求周期と一致します。"
         "当月の直接領収書ではないため、管理者が根拠を確認して一致確定または不採用を選択してください。"
     )
@@ -1245,7 +1223,6 @@ def reconcile_card_statement_items(statement_id: int, *, preserve_manual: bool =
             EMPIRICAL_MATCHING_RECONCILE_MARKER,
             SERVICE_LABEL_RECONCILE_MARKER,
             PLAN_CHANGE_INFERENCE_RECONCILE_MARKER,
-            PLAN_CHANGE_METADATA_REFRESH_RECONCILE_MARKER,
         ):
             extraction_memo = extraction_memo.replace(marker, "")
         extraction_memo = extraction_memo.strip()
@@ -1258,9 +1235,8 @@ def reconcile_card_statement_items(statement_id: int, *, preserve_manual: bool =
             f"明細未使用の提出証拠{len(unmatched_receipt_snapshot)}件です。"
             f"通常取引は金額・通貨完全一致、請求元一致、利用日±{DATE_MATCH_TOLERANCE_DAYS}日を全体最適化で一対一割当し、"
             "明示Invoice/Transaction IDが同じ重複書類は1取引として扱っています。通常照合では利用者特定を条件に含めません。"
-            "直接一致しない明細についてのみ、当月の契約変更書類に明記された旧プラン終了情報と、同一ユーザーの前月定期契約実績が"
+            "直接一致しない明細についてのみ、当月の契約変更書類に明記された旧プラン終了情報と、同一ユーザーの前月旧プラン領収書が"
             "金額・通貨・請求周期まで一致する場合に限り、管理者確認前の推定対応として提示します。"
-            "過去領収書から旧プラン名を抽出できない場合も、定期契約・同一ユーザー・同一請求元・金額通貨完全一致・前月同請求日の条件をすべて満たす場合だけ候補化します。"
         )
         if reconciliation.deduplicated_component_keys:
             reconciliation_memo += f" 重複証拠{len(reconciliation.deduplicated_component_keys)}件を二重計上から除外しました。"
