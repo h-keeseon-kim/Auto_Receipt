@@ -89,6 +89,9 @@ PLAN_CHANGE_INFERENCE_RECONCILE_MARKER = (
 PLAN_CHANGE_METADATA_REFRESH_RECONCILE_MARKER = (
     "【照合ルール更新】契約変更メタデータを再抽出し、旧プラン名を抽出できない定期契約も厳格条件で推定候補へ含めるため再照合します。"
 )
+RECEIPT_CHANGE_RECONCILE_MARKER = (
+    "【領収書更新】領収書の追加・差し替え・AI解析結果更新があったため、最新状態で再照合します。"
+)
 
 # 実データでは通常一致56件がすべて同日または1日差だった。
 DATE_MATCH_TOLERANCE_DAYS = 1
@@ -128,6 +131,7 @@ def reconcile_pending_card_statement_month_semantics(*, period_month=None, state
         | Q(ai_admin_memo__contains=SERVICE_LABEL_RECONCILE_MARKER)
         | Q(ai_admin_memo__contains=PLAN_CHANGE_INFERENCE_RECONCILE_MARKER)
         | Q(ai_admin_memo__contains=PLAN_CHANGE_METADATA_REFRESH_RECONCILE_MARKER)
+        | Q(ai_admin_memo__contains=RECEIPT_CHANGE_RECONCILE_MARKER)
     ).exclude(status__in=[CardStatementStatus.PROCESSING, CardStatementStatus.FAILED])
     if period_month is not None:
         queryset = queryset.filter(period_month=period_month)
@@ -383,7 +387,21 @@ def _enrich_receipt_financial_metadata(receipt: Receipt) -> None:
         ]
         update_fields.append("financial_transaction_components")
 
-    receipt.save(update_fields=list(dict.fromkeys(update_fields)))
+    # 明細再照合中のメタデータ補完で Receipt.save() を呼ぶと、Receipt の
+    # post_save シグナルから同じ明細再照合が再帰的に起動する。特に
+    # v1.14.1 の既存メタデータ再抽出後は、多数の領収書で再帰が連鎖し、
+    # 新規アップロード要求までタイムアウトさせるため、ここではシグナルを
+    # 発火しない QuerySet.update() で永続化する。
+    unique_fields = list(dict.fromkeys(update_fields))
+    updated_at = timezone.now()
+    update_values = {
+        field_name: getattr(receipt, field_name)
+        for field_name in unique_fields
+        if field_name != "updated_at"
+    }
+    update_values["updated_at"] = updated_at
+    Receipt.objects.filter(pk=receipt.pk).update(**update_values)
+    receipt.updated_at = updated_at
 
 
 def _receipt_components(
@@ -1246,6 +1264,7 @@ def reconcile_card_statement_items(statement_id: int, *, preserve_manual: bool =
             SERVICE_LABEL_RECONCILE_MARKER,
             PLAN_CHANGE_INFERENCE_RECONCILE_MARKER,
             PLAN_CHANGE_METADATA_REFRESH_RECONCILE_MARKER,
+            RECEIPT_CHANGE_RECONCILE_MARKER,
         ):
             extraction_memo = extraction_memo.replace(marker, "")
         extraction_memo = extraction_memo.strip()

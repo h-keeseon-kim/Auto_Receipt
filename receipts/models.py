@@ -7,7 +7,7 @@ from uuid import uuid4
 from django.conf import settings
 from django.core.exceptions import ValidationError
 from django.core.validators import FileExtensionValidator, MinValueValidator
-from django.db import models
+from django.db import models, transaction
 from django.db.models import Q
 from django.db.models.functions import Lower
 from django.db.models.signals import post_delete, post_save
@@ -1931,23 +1931,41 @@ def sync_user_account_status_after_service_delete(sender, instance: RegisteredSe
 
 
 @receiver(post_save, sender=Receipt)
-def sync_statement_items_after_receipt_save(sender, instance: Receipt, **kwargs):
+def mark_statement_reconciliation_pending_after_receipt_save(sender, instance: Receipt, **kwargs):
+    """領収書保存を明細再照合から切り離す。
+
+    以前は Receipt.save() の post_save 内で全明細を同期再照合していたため、
+    再照合中のメタデータ保存がさらに post_save を発火し、再帰的な再照合と
+    アップロード要求のタイムアウトを引き起こし得た。領収書保存は先に完了させ、
+    管理者が明細ページを開いた時または「最新の領収書と再照合」を押した時に
+    一度だけ最新状態で再照合する。
+    """
+
     if not instance.file_available:
         return
-    # カード明細月と提出月は同じ月を使い、その前月分の領収書を照合する。
-    # 例: 7月分明細 ↔ 7月提出サイクルに保存された6月分領収書。
-    # OpenAI APIは呼ばず、保存済みの明細行に対してローカル照合だけを行う。
-    from .statement_processing import reconcile_card_statement_items
 
-    statement_ids = list(
-        CardStatement.objects.filter(
-            period_month=month_start(instance.submission.period_month)
+    period_month = month_start(instance.submission.period_month)
+
+    def mark_pending():
+        from .statement_processing import RECEIPT_CHANGE_RECONCILE_MARKER
+
+        statements = list(
+            CardStatement.objects.filter(period_month=period_month)
+            .exclude(status__in=[CardStatementStatus.PROCESSING, CardStatementStatus.FAILED])
+            .only("pk", "ai_admin_memo")
         )
-        .exclude(status__in=[CardStatementStatus.PROCESSING, CardStatementStatus.FAILED])
-        .values_list("pk", flat=True)
-    )
-    for statement_id in statement_ids:
-        reconcile_card_statement_items(statement_id)
+        for statement in statements:
+            memo = statement.ai_admin_memo or ""
+            if RECEIPT_CHANGE_RECONCILE_MARKER not in memo:
+                memo = f"{memo} {RECEIPT_CHANGE_RECONCILE_MARKER}".strip()
+            CardStatement.objects.filter(pk=statement.pk).update(
+                ai_admin_memo=memo[:5000],
+                reconciled_at=None,
+                updated_at=timezone.now(),
+            )
+
+    # 外側の領収書保存トランザクションが成功した場合だけ再照合待ちにする。
+    transaction.on_commit(mark_pending)
 
 
 @receiver(post_delete, sender=Receipt)

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import logging
 import json
 import zipfile
 from datetime import timedelta
@@ -101,6 +102,9 @@ from .statement_processing import (
     start_background_statement_processing,
 )
 from .statement_pdf import build_card_statement_reconciliation_pdf, reconciliation_report_filename
+
+
+logger = logging.getLogger(__name__)
 
 
 def safe_part(value: str, fallback: str = "item") -> str:
@@ -439,6 +443,17 @@ def dashboard(request):
                     )
                 except ValidationError as exc:
                     add_validation_errors(upload_form, exc)
+                except Exception:
+                    logger.exception(
+                        "Receipt upload failed for user=%s period_month=%s",
+                        request.user.pk,
+                        selected_month,
+                    )
+                    messages.error(
+                        request,
+                        "領収書ファイルの保存に失敗しました。ファイルは登録されていません。"
+                        "管理者はRailwayのDeploy Logsで『Receipt upload failed』直後のエラーを確認してください。",
+                    )
                 else:
                     count = len(created_receipts)
                     selected_label = "その他" if upload_form.is_extra else upload_form.selected_service.display_name
@@ -1907,6 +1922,18 @@ def staff_user_month_status(request, user_id: int):
                 )
             except ValidationError as exc:
                 add_validation_errors(staff_upload_form, exc)
+            except Exception:
+                logger.exception(
+                    "Staff proxy receipt upload failed staff=%s target_user=%s period_month=%s",
+                    request.user.pk,
+                    managed_user.pk,
+                    selected_month,
+                )
+                messages.error(
+                    request,
+                    "領収書ファイルの代理保存に失敗しました。ファイルは登録されていません。"
+                    "RailwayのDeploy Logsで『Staff proxy receipt upload failed』直後のエラーを確認してください。",
+                )
             else:
                 count = len(created_receipts)
                 selected_label = (

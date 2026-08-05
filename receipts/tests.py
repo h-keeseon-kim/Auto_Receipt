@@ -37,6 +37,7 @@ from .monthly_status import build_user_month_summary
 from .statement_ai import StatementAnalysisItem, StatementAnalysisResult, build_statement_result_from_payload
 from .statement_processing import (
     CARD_STATEMENT_MONTH_SEMANTICS_RECONCILE_MARKER,
+    RECEIPT_CHANGE_RECONCILE_MARKER,
     DATE_MATCH_TOLERANCE_DAYS,
     _available_receipts_for_statement_month,
     _catalog_ids_for_text,
@@ -1591,6 +1592,42 @@ Google AI Ultra (30 TB) (Google One)
         self.assertIn("登録氏名=Alice Example", prompt)
         self.assertIn("recipient_name_matches_user", prompt)
         self.assertIn("ご使用者氏名", prompt)
+
+    def test_receipt_upload_marks_statement_pending_without_synchronous_reconcile(self):
+        statement = CardStatement.objects.create(
+            period_month=date(2026, 6, 1),
+            file=SimpleUploadedFile(
+                "statement.pdf", b"%PDF-1.4 statement", content_type="application/pdf"
+            ),
+            original_filename="statement.pdf",
+            status=CardStatementStatus.COMPLETED,
+            ai_admin_memo="解析済み",
+            reconciled_at=timezone.now(),
+        )
+        self.client.login(username="alice", password="password123")
+
+        with mock.patch("receipts.statement_processing.reconcile_card_statement_items") as reconcile_mock:
+            with self.captureOnCommitCallbacks(execute=True):
+                response = self.client.post(
+                    reverse("dashboard") + "?month=2026-06",
+                    {
+                        "action": "add_receipts",
+                        "service": str(self.service.id),
+                        "files": [
+                            SimpleUploadedFile(
+                                "receipt.pdf", b"%PDF-1.4 receipt", content_type="application/pdf"
+                            )
+                        ],
+                    },
+                )
+
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(Receipt.objects.filter(submission__user=self.user).count(), 1)
+        reconcile_mock.assert_not_called()
+        statement.refresh_from_db()
+        self.assertIn(RECEIPT_CHANGE_RECONCILE_MARKER, statement.ai_admin_memo)
+        self.assertIsNone(statement.reconciled_at)
+
 
 
 class HealthcheckTests(TestCase):
