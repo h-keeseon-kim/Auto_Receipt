@@ -122,6 +122,45 @@ class PlanChangeInferenceTests(unittest.TestCase):
         change = PlanChangeDocument(**{**self.change.__dict__, "confidence": 0.5})
         self.assertIsNone(infer_plan_change_candidate(self.line, [change], [self.history]))
 
+
+    def test_previous_statement_can_support_admin_reviewed_inference(self):
+        statement_history = HistoricalPlanReceipt(
+            receipt_id=None,
+            user_id=None,
+            filename="前月カード明細 0285",
+            merchant_key="ANTHROPIC",
+            plan_name="",
+            event_date=date(2026, 5, 8),
+            amount=Decimal("22.00"),
+            currency="USD",
+            document_quality=5,
+            recurring_service=True,
+            evidence_key="statement:285:USD:22.00",
+            source_type="statement",
+        )
+        candidate = infer_plan_change_candidate(self.line, [self.change], [statement_history])
+        self.assertIsNotNone(candidate)
+        self.assertEqual(candidate.user_id, self.change.user_id)
+        self.assertIsNone(candidate.historical_receipt_id)
+        self.assertEqual(candidate.historical_source_type, "statement")
+        self.assertLess(candidate.confidence, self.change.confidence)
+
+    def test_previous_statement_still_requires_exact_amount_and_billing_day(self):
+        wrong_amount = HistoricalPlanReceipt(
+            receipt_id=None, user_id=None, filename="前月カード明細 0285",
+            merchant_key="ANTHROPIC", plan_name="", event_date=date(2026, 5, 8),
+            amount=Decimal("22.01"), currency="USD", recurring_service=True,
+            evidence_key="statement:285:USD:22.01", source_type="statement",
+        )
+        wrong_day = HistoricalPlanReceipt(
+            receipt_id=None, user_id=None, filename="前月カード明細 0280",
+            merchant_key="ANTHROPIC", plan_name="", event_date=date(2026, 5, 5),
+            amount=Decimal("22.00"), currency="USD", recurring_service=True,
+            evidence_key="statement:280:USD:22.00", source_type="statement",
+        )
+        self.assertIsNone(infer_plan_change_candidate(self.line, [self.change], [wrong_amount]))
+        self.assertIsNone(infer_plan_change_candidate(self.line, [self.change], [wrong_day]))
+
     def test_global_allocation_uses_same_evidence_once_and_prefers_exact_end_date(self):
         exact = infer_plan_change_candidate(self.line, [self.change], [self.history])
         adjacent_line = PlanStatementLine(

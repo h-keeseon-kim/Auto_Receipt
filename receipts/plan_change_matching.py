@@ -49,8 +49,15 @@ class PlanChangeDocument:
 
 @dataclass(frozen=True)
 class HistoricalPlanReceipt:
-    receipt_id: int
-    user_id: int
+    """過去の旧プラン実績。
+
+    通常は過去領収書を使うが、領収書メタデータが未整備でも、前月の
+    カード明細に同一請求元・同額・同請求日の実績がある場合は、
+    管理者確認前の推定候補を作るための補助証拠として利用できる。
+    """
+
+    receipt_id: int | None
+    user_id: int | None
     filename: str
     merchant_key: str
     plan_name: str
@@ -59,11 +66,16 @@ class HistoricalPlanReceipt:
     currency: str
     document_quality: int = 9
     recurring_service: bool = False
+    evidence_key: str = ""
+    source_type: str = "receipt"
 
     def __post_init__(self):
         if self.amount is not None:
             object.__setattr__(self, "amount", Decimal(str(self.amount)))
         object.__setattr__(self, "currency", (self.currency or "").upper())
+        if not self.evidence_key:
+            identifier = self.receipt_id if self.receipt_id is not None else self.filename
+            object.__setattr__(self, "evidence_key", f"{self.source_type}:{identifier}")
 
 
 @dataclass(frozen=True)
@@ -71,7 +83,9 @@ class PlanChangeInferenceCandidate:
     line_key: str
     user_id: int
     change_receipt_id: int
-    historical_receipt_id: int
+    historical_receipt_id: int | None
+    historical_evidence_key: str
+    historical_source_type: str
     change_filename: str
     historical_filename: str
     previous_plan: str
@@ -90,7 +104,7 @@ class PlanChangeInferenceCandidate:
     def fingerprint(self) -> str:
         return (
             f"line={self.line_key};change={self.change_receipt_id};"
-            f"history={self.historical_receipt_id};amount={self.amount};currency={self.currency};"
+            f"history={self.historical_evidence_key};amount={self.amount};currency={self.currency};"
             f"plan_explicit={int(self.historical_plan_explicit)}"
         )
 
@@ -159,10 +173,13 @@ def infer_plan_change_candidate(
     - direct merchant group equality;
     - an explicit previous plan and previous-plan end date;
     - statement date within ±1 day of that end date;
-    - same user in the plan-change and historical receipts;
+    - same user in the plan-change and historical receipt when a receipt is used;
     - historical receipt either explicitly names the old plan, or belongs to the
       same user's recurring-subscription service when the old plan label was
       not extractable;
+    - when the historical receipt cannot be used, the previous month's card
+      statement may serve as cadence evidence, but only for an administrator-
+      reviewed inference and never as direct receipt evidence;
     - exact amount and currency equality;
     - historical receipt belongs to the previous calendar month and follows the
       same billing day within ±1 day.
@@ -192,7 +209,7 @@ def infer_plan_change_candidate(
             continue
 
         for historical in historical_receipts:
-            if historical.user_id != change.user_id:
+            if historical.user_id is not None and historical.user_id != change.user_id:
                 continue
             if historical.merchant_key != line.merchant_key:
                 continue
@@ -206,8 +223,9 @@ def infer_plan_change_candidate(
                     continue
             elif not historical.recurring_service:
                 # A missing plan label is acceptable only for a recurring
-                # subscription assigned to the same user.  This keeps one-time
-                # credit/API purchases from being used as old-plan evidence.
+                # subscription receipt or a previous-card-statement cadence
+                # record. This keeps one-time credit/API purchases from being
+                # used as old-plan evidence.
                 continue
             amount_option = _matching_amount(line, historical)
             if amount_option is None:
@@ -219,7 +237,12 @@ def infer_plan_change_candidate(
                 continue
 
             confidence = min(0.99, max(0.0, float(change.confidence or 0)))
-            if not historical_plan_explicit:
+            if historical.source_type == "statement":
+                # A previous card statement proves the recurring amount/cadence,
+                # not that a receipt was submitted. Keep it as a lower-confidence
+                # administrator-reviewed inference.
+                confidence = max(0.0, confidence - 0.12)
+            elif not historical_plan_explicit:
                 # The inference still requires same user, merchant, exact
                 # amount/currency, previous month and matching billing day, but
                 # the missing old-plan label must lower confidence and remain
@@ -235,6 +258,8 @@ def infer_plan_change_candidate(
                 user_id=change.user_id,
                 change_receipt_id=change.receipt_id,
                 historical_receipt_id=historical.receipt_id,
+                historical_evidence_key=historical.evidence_key,
+                historical_source_type=historical.source_type,
                 change_filename=change.filename,
                 historical_filename=historical.filename,
                 previous_plan=change.previous_plan,
@@ -254,7 +279,7 @@ def infer_plan_change_candidate(
     if not candidates:
         return None
 
-    candidates.sort(key=lambda pair: (pair[0], pair[1].user_id, pair[1].change_receipt_id, pair[1].historical_receipt_id))
+    candidates.sort(key=lambda pair: (pair[0], pair[1].user_id, pair[1].change_receipt_id, pair[1].historical_evidence_key))
     best_rank = candidates[0][0]
     equally_best = [candidate for rank, candidate in candidates if rank == best_rank]
     if len({candidate.user_id for candidate in equally_best}) > 1:
@@ -283,20 +308,20 @@ def allocate_unique_plan_change_candidates(
             entry[0],
             entry[1],
             entry[2].change_receipt_id,
-            entry[2].historical_receipt_id,
+            entry[2].historical_evidence_key,
         ),
     )
     allocated: dict[str, PlanChangeInferenceCandidate] = {}
     used_change_receipts: set[int] = set()
-    used_historical_receipts: set[int] = set()
+    used_historical_evidence: set[str] = set()
     for _, _, candidate in ranked:
         if candidate.line_key in allocated:
             continue
         if candidate.change_receipt_id in used_change_receipts:
             continue
-        if candidate.historical_receipt_id in used_historical_receipts:
+        if candidate.historical_evidence_key in used_historical_evidence:
             continue
         allocated[candidate.line_key] = candidate
         used_change_receipts.add(candidate.change_receipt_id)
-        used_historical_receipts.add(candidate.historical_receipt_id)
+        used_historical_evidence.add(candidate.historical_evidence_key)
     return allocated

@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from django.conf import settings
+from django.contrib.auth import get_user_model
 from django.db import close_old_connections, transaction
 from django.db.models import Q
 from django.utils import timezone
@@ -89,6 +90,9 @@ PLAN_CHANGE_INFERENCE_RECONCILE_MARKER = (
 PLAN_CHANGE_METADATA_REFRESH_RECONCILE_MARKER = (
     "【照合ルール更新】契約変更メタデータを再抽出し、旧プラン名を抽出できない定期契約も厳格条件で推定候補へ含めるため再照合します。"
 )
+PLAN_CHANGE_USER_INFERENCE_RECONCILE_MARKER = (
+    "【照合ルール更新】契約変更書類のBill to利用者と前月カード明細の請求周期を推定対応に利用するため再照合します。"
+)
 RECEIPT_CHANGE_RECONCILE_MARKER = (
     "【領収書更新】領収書の追加・差し替え・AI解析結果更新があったため、最新状態で再照合します。"
 )
@@ -131,6 +135,7 @@ def reconcile_pending_card_statement_month_semantics(*, period_month=None, state
         | Q(ai_admin_memo__contains=SERVICE_LABEL_RECONCILE_MARKER)
         | Q(ai_admin_memo__contains=PLAN_CHANGE_INFERENCE_RECONCILE_MARKER)
         | Q(ai_admin_memo__contains=PLAN_CHANGE_METADATA_REFRESH_RECONCILE_MARKER)
+        | Q(ai_admin_memo__contains=PLAN_CHANGE_USER_INFERENCE_RECONCILE_MARKER)
         | Q(ai_admin_memo__contains=RECEIPT_CHANGE_RECONCILE_MARKER)
     ).exclude(status__in=[CardStatementStatus.PROCESSING, CardStatementStatus.FAILED])
     if period_month is not None:
@@ -499,11 +504,37 @@ def _historical_receipts_for_statement_month(statement_month: date) -> list[Rece
     )
 
 
+def _recipient_email(value: str) -> str:
+    match = re.search(r"[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}", value or "", flags=re.I)
+    return match.group(0).lower() if match else ""
+
+
+def _plan_change_user_map() -> dict[str, int]:
+    user_model = get_user_model()
+    mapping: dict[str, int] = {}
+    collisions: set[str] = set()
+    for user in user_model.objects.filter(is_active=True, is_staff=False, is_superuser=False).only(
+        "id", "username", "email"
+    ):
+        for raw in (user.username, user.email):
+            key = (raw or "").strip().lower()
+            if not key:
+                continue
+            if key in mapping and mapping[key] != user.pk:
+                collisions.add(key)
+            else:
+                mapping[key] = user.pk
+    for key in collisions:
+        mapping.pop(key, None)
+    return mapping
+
+
 def _plan_change_documents(
     receipts: list[Receipt],
     catalogs: list[ServiceCatalog],
 ) -> list[PlanChangeDocument]:
     documents: list[PlanChangeDocument] = []
+    user_map = _plan_change_user_map()
     for receipt in receipts:
         details = receipt.plan_change_details or {}
         previous_plan = str(details.get("previous_plan") or "").strip()
@@ -518,10 +549,28 @@ def _plan_change_documents(
             confidence = float(details.get("confidence") or 0)
         except (TypeError, ValueError):
             confidence = 0.0
+
+        # 管理者代理アップロード先が誤っていても、AIがBill toのメールを
+        # 明確に読み取れている場合は、そのメールと一意に一致する一般ユーザーを
+        # 推定利用者として優先する。曖昧な表示名だけではユーザーを変更しない。
+        user_id = receipt.submission.user_id
+        recipient_email = _recipient_email(
+            " ".join(
+                part
+                for part in (
+                    receipt.ai_extracted_recipient_name,
+                    receipt.ai_recipient_name_check_memo,
+                )
+                if part
+            )
+        )
+        if recipient_email and receipt.ai_check_recipient_name:
+            user_id = user_map.get(recipient_email, user_id)
+
         documents.append(
             PlanChangeDocument(
                 receipt_id=receipt.pk,
-                user_id=receipt.submission.user_id,
+                user_id=user_id,
                 filename=receipt.display_filename,
                 merchant_key=merchant_key,
                 previous_plan=previous_plan,
@@ -533,6 +582,106 @@ def _plan_change_documents(
         )
     return documents
 
+
+def _service_for_inferred_user(
+    *,
+    user_id: int,
+    change_receipt: Receipt,
+    historical_receipt: Receipt | None,
+) -> RegisteredService | None:
+    """推定利用者に属するサービスだけを明細行へ紐付ける。
+
+    Bill toメールから推定した利用者と、管理者代理アップロード時に選択された
+    ユーザーが異なる場合でも、別ユーザーのRegisteredServiceを保存しない。
+    """
+
+    for candidate in (historical_receipt.service if historical_receipt else None, change_receipt.service):
+        if candidate is not None and candidate.user_id == user_id:
+            return candidate
+
+    catalog_id = None
+    for candidate in (historical_receipt.service if historical_receipt else None, change_receipt.service):
+        if candidate is not None and candidate.catalog_service_id:
+            catalog_id = candidate.catalog_service_id
+            break
+    if catalog_id:
+        service = (
+            RegisteredService.objects.filter(user_id=user_id, catalog_service_id=catalog_id)
+            .order_by("-is_active", "pk")
+            .first()
+        )
+        if service is not None:
+            return service
+
+    # カタログ紐付けがない旧データ向けの安全なフォールバック。
+    source = (historical_receipt.service if historical_receipt else None) or change_receipt.service
+    if source is None:
+        return None
+    return (
+        RegisteredService.objects.filter(
+            user_id=user_id,
+            name__iexact=source.name,
+            billing_type=source.billing_type,
+        )
+        .order_by("-is_active", "pk")
+        .first()
+    )
+
+
+def _historical_statement_plan_evidences(
+    statement_month: date,
+    catalogs: list[ServiceCatalog],
+) -> list[HistoricalPlanReceipt]:
+    """前月カード明細から旧プランの金額・請求周期だけを補助証拠化する。
+
+    これは領収書提出の証拠ではない。契約変更書類が利用者、旧プラン、
+    終了日を明示している場合に限り、管理者確認前の「推定対応」を作る
+    ための補助証拠として使用する。
+    """
+
+    previous_statement_month = add_months(statement_month, -1)
+    items = (
+        CardStatementItem.objects.filter(
+            statement__period_month=previous_statement_month,
+            statement__status__in=[CardStatementStatus.COMPLETED, CardStatementStatus.NEEDS_REVIEW],
+            receipt_required=True,
+            transaction_date__isnull=False,
+        )
+        .exclude(match_status=StatementMatchStatus.IGNORED)
+        .select_related("statement")
+        .order_by("transaction_date", "sequence", "pk")
+    )
+    evidences: list[HistoricalPlanReceipt] = []
+    for item in items:
+        merchant_key = _canonical_merchant_key(item.merchant_name, catalogs)
+        if not merchant_key:
+            continue
+        options: list[tuple[Decimal, str]] = []
+        if item.original_amount is not None and item.original_currency:
+            options.append((item.original_amount, item.original_currency.upper()))
+        if item.amount_jpy is not None:
+            jpy = (item.amount_jpy, "JPY")
+            if jpy not in options:
+                options.append(jpy)
+        for amount, currency in options:
+            reference = item.line_reference or str(item.sequence)
+            evidences.append(
+                HistoricalPlanReceipt(
+                    receipt_id=None,
+                    user_id=None,
+                    filename=f"前月カード明細 {reference}",
+                    merchant_key=merchant_key,
+                    plan_name="",
+                    event_date=item.transaction_date,
+                    amount=amount,
+                    currency=currency,
+                    document_quality=5,
+                    recurring_service=True,
+                    evidence_key=f"statement:{item.pk}:{currency}:{amount}",
+                    source_type="statement",
+                )
+            )
+    return evidences
 
 def _historical_plan_evidences(
     receipts: list[Receipt],
@@ -585,24 +734,30 @@ def _plan_statement_line(line: StatementLine) -> PlanStatementLine:
 
 def _plan_inference_reason(candidate) -> str:
     change_date = candidate.change_date.isoformat() if candidate.change_date else "未抽出"
-    if candidate.historical_plan_explicit:
+    if candidate.historical_source_type == "statement":
+        historical_basis = (
+            f"前月のカード明細「{candidate.historical_filename}」に "
+            f"{candidate.historical_date.isoformat()}、{candidate.amount} {candidate.currency} の同一請求周期があり、"
+        )
+    elif candidate.historical_plan_explicit:
         historical_basis = (
             f"過去領収書「{candidate.historical_filename}」には旧プラン "
             f"{candidate.previous_plan} が明記され、"
+            f"{candidate.historical_date.isoformat()}、{candidate.amount} {candidate.currency} の実績があり、"
         )
     else:
         historical_basis = (
             f"過去領収書「{candidate.historical_filename}」では旧プラン名を抽出できませんでしたが、"
             "同一ユーザーの定期契約サービスとして、"
+            f"{candidate.historical_date.isoformat()}、{candidate.amount} {candidate.currency} の実績があり、"
         )
     return (
         "契約変更情報による推定対応です。"
-        f"同一ユーザーの契約変更書類「{candidate.change_filename}」に、旧プラン "
+        f"契約変更書類「{candidate.change_filename}」に、旧プラン "
         f"{candidate.previous_plan}、新プラン {candidate.new_plan or '未抽出'}、変更日 {change_date}、"
         f"旧プラン終了日 {candidate.previous_plan_end.isoformat()} が明記されています。"
         + historical_basis
-        + f"{candidate.historical_date.isoformat()}、{candidate.amount} {candidate.currency} の実績があり、"
-        "今回の明細の請求元・金額・通貨・請求周期と一致します。"
+        + "今回の明細の請求元・金額・通貨・請求周期と一致します。"
         "当月の直接領収書ではないため、管理者が根拠を確認して一致確定または不採用を選択してください。"
     )
 
@@ -959,7 +1114,10 @@ def reconcile_card_statement_items(statement_id: int, *, preserve_manual: bool =
     components, unresolved_receipts = _receipt_components(receipts, catalogs)
     historical_receipts = _historical_receipts_for_statement_month(statement.period_month)
     plan_change_documents = _plan_change_documents(receipts, catalogs)
-    historical_plan_evidences = _historical_plan_evidences(historical_receipts, catalogs)
+    historical_plan_evidences = [
+        *_historical_plan_evidences(historical_receipts, catalogs),
+        *_historical_statement_plan_evidences(statement.period_month, catalogs),
+    ]
     existing_inferences = {
         inference.statement_item_id: inference
         for inference in CardStatementPlanChangeInference.objects.filter(statement_item__statement=statement)
@@ -1076,9 +1234,11 @@ def reconcile_card_statement_items(statement_id: int, *, preserve_manual: bool =
             candidate = None
         if candidate is None:
             continue
+        if candidate.change_receipt_id not in receipt_by_id:
+            continue
         if (
-            candidate.change_receipt_id not in receipt_by_id
-            or candidate.historical_receipt_id not in historical_receipt_by_id
+            candidate.historical_receipt_id is not None
+            and candidate.historical_receipt_id not in historical_receipt_by_id
         ):
             continue
         ranked_plan_candidates.append(
@@ -1107,10 +1267,18 @@ def reconcile_card_statement_items(statement_id: int, *, preserve_manual: bool =
         candidate = inferred_candidates_by_item.get(item.pk)
         if candidate is not None:
             change_receipt = receipt_by_id[candidate.change_receipt_id]
-            historical_receipt = historical_receipt_by_id[candidate.historical_receipt_id]
+            historical_receipt = (
+                historical_receipt_by_id.get(candidate.historical_receipt_id)
+                if candidate.historical_receipt_id is not None
+                else None
+            )
             _clear_item_match(item)
-            item.matched_user = change_receipt.submission.user
-            item.matched_service = historical_receipt.service or change_receipt.service
+            item.matched_user_id = candidate.user_id
+            item.matched_service = _service_for_inferred_user(
+                user_id=candidate.user_id,
+                change_receipt=change_receipt,
+                historical_receipt=historical_receipt,
+            )
             item.matched_catalog_service = (
                 item.matched_service.catalog_service
                 if item.matched_service_id and item.matched_service.catalog_service_id
@@ -1187,10 +1355,16 @@ def reconcile_card_statement_items(statement_id: int, *, preserve_manual: bool =
             existing = existing_inferences.get(item.pk)
             if candidate is not None:
                 change_receipt = receipt_by_id[candidate.change_receipt_id]
-                historical_receipt = historical_receipt_by_id[candidate.historical_receipt_id]
+                historical_receipt = (
+                    historical_receipt_by_id.get(candidate.historical_receipt_id)
+                    if candidate.historical_receipt_id is not None
+                    else None
+                )
+                user_model = get_user_model()
+                inferred_user = user_model.objects.filter(pk=candidate.user_id).first()
                 defaults = {
-                    "user": change_receipt.submission.user,
-                    "user_snapshot": change_receipt.submission.user.username,
+                    "user": inferred_user,
+                    "user_snapshot": inferred_user.get_username() if inferred_user else str(candidate.user_id),
                     "change_receipt": change_receipt,
                     "historical_receipt": historical_receipt,
                     "change_filename_snapshot": candidate.change_filename[:255],
@@ -1264,6 +1438,7 @@ def reconcile_card_statement_items(statement_id: int, *, preserve_manual: bool =
             SERVICE_LABEL_RECONCILE_MARKER,
             PLAN_CHANGE_INFERENCE_RECONCILE_MARKER,
             PLAN_CHANGE_METADATA_REFRESH_RECONCILE_MARKER,
+            PLAN_CHANGE_USER_INFERENCE_RECONCILE_MARKER,
             RECEIPT_CHANGE_RECONCILE_MARKER,
         ):
             extraction_memo = extraction_memo.replace(marker, "")
@@ -1277,9 +1452,9 @@ def reconcile_card_statement_items(statement_id: int, *, preserve_manual: bool =
             f"明細未使用の提出証拠{len(unmatched_receipt_snapshot)}件です。"
             f"通常取引は金額・通貨完全一致、請求元一致、利用日±{DATE_MATCH_TOLERANCE_DAYS}日を全体最適化で一対一割当し、"
             "明示Invoice/Transaction IDが同じ重複書類は1取引として扱っています。通常照合では利用者特定を条件に含めません。"
-            "直接一致しない明細についてのみ、当月の契約変更書類に明記された旧プラン終了情報と、同一ユーザーの前月定期契約実績が"
-            "金額・通貨・請求周期まで一致する場合に限り、管理者確認前の推定対応として提示します。"
-            "過去領収書から旧プラン名を抽出できない場合も、定期契約・同一ユーザー・同一請求元・金額通貨完全一致・前月同請求日の条件をすべて満たす場合だけ候補化します。"
+            "直接一致しない明細についてのみ、当月の契約変更書類に明記されたBill to利用者・旧プラン終了情報と、"
+            "過去領収書または前月カード明細の同一請求元・金額通貨完全一致・前月同請求日の実績が揃う場合に限り、"
+            "管理者確認前の推定対応として提示します。前月カード明細は領収書提出証拠ではなく、旧プランの請求周期を裏付ける補助証拠です。"
         )
         if reconciliation.deduplicated_component_keys:
             reconciliation_memo += f" 重複証拠{len(reconciliation.deduplicated_component_keys)}件を二重計上から除外しました。"

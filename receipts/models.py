@@ -1445,6 +1445,15 @@ class CardStatement(models.Model):
         ).count()
 
     @property
+    def unresolved_count(self) -> int:
+        """未一致と管理者確認前の推定対応をまとめた件数。"""
+
+        return self.items.filter(
+            receipt_required=True,
+            match_status__in=[StatementMatchStatus.UNMATCHED, StatementMatchStatus.INFERRED],
+        ).count()
+
+    @property
     def manual_review_count(self) -> int:
         return self.items.filter(
             receipt_required=True,

@@ -1706,10 +1706,6 @@ STAFF_RECEIPT_STATUS_FILTERS = (
     ("resubmission_decision", "再提出判断待ち"),
     ("manual_review", "確認が必要"),
     ("ai_unprocessed", "AI未確認"),
-    ("ai_processing", "AI処理中"),
-    ("ai_ok", "AI確認済み"),
-    ("admin_confirmed", "管理者確認済み"),
-    ("file_unavailable", "ファイルなし"),
 )
 STAFF_RECEIPT_STATUS_KEYS = {key for key, _label in STAFF_RECEIPT_STATUS_FILTERS}
 
@@ -1726,7 +1722,9 @@ def build_staff_receipt_status_view(receipts, selected_status: str):
     counts = {key: 0 for key, _label in STAFF_RECEIPT_STATUS_FILTERS}
     counts["all"] = len(receipt_list)
     for receipt in receipt_list:
-        counts[receipt.staff_review_status_key] += 1
+        status_key = receipt.staff_review_status_key
+        if status_key in counts:
+            counts[status_key] += 1
 
     filtered_receipts = (
         receipt_list
@@ -2030,7 +2028,7 @@ def staff_user_month_status(request, user_id: int):
         {
             "managed_user": managed_user,
             "selected_month": selected_month,
-            "target_receipt_month": receipt_month_for_submission(selected_month),
+            "target_receipt_month": target_receipt_month,
             "month_form": month_form,
             "monthly_summary": monthly_summary,
             "available_services": available_services,
@@ -2055,9 +2053,8 @@ STATEMENT_RESULT_FILTERS = {
     "unmatched": "未一致",
     "inferred": "推定対応",
     "needs_review": "解析要確認",
-    "matched": "一致",
-    "ignored": "対象外",
 }
+STATEMENT_RESULT_VISIBLE_FILTER_KEYS = ("unmatched", "inferred", "needs_review")
 
 
 def normalize_statement_result_filter(value: str | None) -> str:
@@ -2069,11 +2066,13 @@ def build_statement_result_filter_options(counts: dict[str, int], current: str) 
     return [
         {
             "key": key,
-            "label": label,
+            "label": STATEMENT_RESULT_FILTERS[key],
             "count": counts.get(key, 0),
             "active": key == current,
+            # 「すべて」ボタンは置かず、選択中のボタンを再度押すと解除する。
+            "target_key": "all" if key == current else key,
         }
-        for key, label in STATEMENT_RESULT_FILTERS.items()
+        for key in STATEMENT_RESULT_VISIBLE_FILTER_KEYS
     ]
 
 
@@ -2084,15 +2083,14 @@ def prepare_statement_result_display(statements, result_filter: str):
         if key == "all":
             return True
         if key == "unmatched":
-            return item.receipt_required and item.match_status == StatementMatchStatus.UNMATCHED
+            return item.receipt_required and item.match_status in {
+                StatementMatchStatus.UNMATCHED,
+                StatementMatchStatus.INFERRED,
+            }
         if key == "inferred":
             return item.receipt_required and item.match_status == StatementMatchStatus.INFERRED
         if key == "needs_review":
             return item.receipt_required and item.match_status == StatementMatchStatus.NEEDS_REVIEW
-        if key == "matched":
-            return item.match_status == StatementMatchStatus.MATCHED
-        if key == "ignored":
-            return not item.receipt_required or item.match_status == StatementMatchStatus.IGNORED
         return True
 
     for statement in statements:
@@ -2149,10 +2147,8 @@ def staff_card_statements(request):
     statements = list(statement_queryset)
     result_filter_counts = prepare_statement_result_display(statements, result_filter)
     stats = {
-        "statement_count": len(statements),
-        "processing_count": sum(1 for statement in statements if statement.status == CardStatementStatus.PROCESSING),
-        "missing_count": sum(statement.missing_receipt_count for statement in statements),
-        "inferred_count": sum(statement.inferred_count for statement in statements),
+        "line_count": sum(statement.items.count() for statement in statements),
+        "unresolved_count": sum(statement.unresolved_count for statement in statements),
         "review_count": sum(statement.manual_review_count for statement in statements),
         "unused_receipt_count": sum(len(statement.unmatched_receipt_components or []) for statement in statements),
     }
@@ -2170,6 +2166,7 @@ def staff_card_statements(request):
             "result_filter": result_filter,
             "result_filter_label": STATEMENT_RESULT_FILTERS[result_filter],
             "result_filter_counts": result_filter_counts,
+            "result_filter_count": result_filter_counts.get(result_filter, result_filter_counts.get("all", 0)),
             "statement_result_filter_options": build_statement_result_filter_options(
                 result_filter_counts, result_filter
             ),
@@ -2230,6 +2227,7 @@ def staff_card_statement_status(request):
             "result_filter": result_filter,
             "result_filter_label": STATEMENT_RESULT_FILTERS[result_filter],
             "result_filter_counts": result_filter_counts,
+            "result_filter_count": result_filter_counts.get(result_filter, result_filter_counts.get("all", 0)),
             "statement_result_filter_options": build_statement_result_filter_options(
                 result_filter_counts, result_filter
             ),
@@ -2450,7 +2448,7 @@ def staff_update_statement_item(request, pk: int):
 
 
 def staff_history(request):
-    selected_month, month_form = parse_month_from_request(request)
+    target_receipt_month, selected_month, month_form = parse_receipt_month_from_request(request)
     users = list(
         managed_users_queryset().annotate(
             active_service_count=Count(
@@ -2565,6 +2563,7 @@ def staff_history(request):
         "incomplete_users": sum(1 for row in rows if not row["monthly_summary"].is_complete),
         "missing_service_count": sum(row["monthly_summary"].missing_required_count for row in rows),
         "api_pending_count": sum(row["monthly_summary"].api_pending_count for row in rows),
+        "api_pending_user_count": sum(1 for row in rows if row["monthly_summary"].api_pending_count > 0),
         "receipt_count": sum(row["receipt_count"] for row in rows),
         "available_file_count": sum(row["available_file_count"] for row in rows),
         "active_service_count": sum(row["active_service_count"] for row in rows),
@@ -2593,7 +2592,7 @@ def staff_history(request):
             "stats": stats,
             "month_form": month_form,
             "selected_month": selected_month,
-            "target_receipt_month": receipt_month_for_submission(selected_month),
+            "target_receipt_month": target_receipt_month,
             "receipts": receipts,
             "receipt_status_options": receipt_status_view["options"],
             "selected_receipt_status": receipt_status_view["selected_key"],

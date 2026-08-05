@@ -1996,6 +1996,10 @@ class StaffServiceAssignmentTests(TestCase):
 
         self.assertContains(response, "アップロード済み領収書")
         self.assertContains(response, "アップロード日時の新しい順")
+        self.assertContains(response, "領収書発行月")
+        self.assertNotContains(response, '<span class="label">提出月</span>', html=True)
+        self.assertContains(response, "未提出ユーザー（API利用確認待ちを含む）")
+        self.assertNotContains(response, '<span class="label">領収書数</span>', html=True)
         self.assertContains(response, "receipt-review-table")
         self.assertContains(response, "<th>利用者 / 領収書月</th>", html=True)
         self.assertContains(response, "<th>サービス / ファイル</th>", html=True)
@@ -2010,6 +2014,7 @@ class StaffServiceAssignmentTests(TestCase):
         self.assertLess(status_section.index("other@example.com"), status_section.index("user@example.com"))
         self.assertContains(response, "other.pdf")
         self.assertContains(response, "user.pdf")
+        self.assertNotContains(response, "ユーザー本人アップロード")
 
         response = self.client.post(
             reverse("staff_delete_receipt", args=[user_receipt.pk]),
@@ -2105,9 +2110,10 @@ class StaffServiceAssignmentTests(TestCase):
         self.assertContains(response, "再提出判断待ち")
         self.assertContains(response, "確認が必要")
         self.assertContains(response, "AI未確認")
-        self.assertContains(response, "AI処理中")
-        self.assertContains(response, "AI確認済み")
-        self.assertContains(response, "管理者確認済み")
+        self.assertNotContains(response, "receipt_status=ai_processing")
+        self.assertNotContains(response, "receipt_status=ai_ok")
+        self.assertNotContains(response, "receipt_status=admin_confirmed")
+        self.assertNotContains(response, "receipt_status=file_unavailable")
         self.assertContains(response, 'data-ai-summary="receipt_status_count_all">6</strong>')
         self.assertContains(response, 'class="receipt-review-list-summary-label"')
         self.assertContains(response, '<strong>すべて</strong><span>を表示中</span>', html=True)
@@ -4924,6 +4930,18 @@ class FinalWorkflowAcceptanceTests(TestCase):
             match_status=StatementMatchStatus.MATCHED,
             receipt_required=True,
         )
+        CardStatementItem.objects.create(
+            statement=statement,
+            sequence=3,
+            line_reference="0343",
+            transaction_date=date(2026, 6, 8),
+            merchant_name="INFERRED CLAUDE LINE",
+            original_amount=Decimal("22.00"),
+            original_currency="USD",
+            match_status=StatementMatchStatus.INFERRED,
+            match_reason_code=StatementMatchReason.PLAN_CHANGE_INFERRED,
+            receipt_required=True,
+        )
 
         self.client.login(username="admin", password="admin-password-123")
         response = self.client.get(
@@ -4932,18 +4950,29 @@ class FinalWorkflowAcceptanceTests(TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertContains(response, "未一致を表示中")
         self.assertContains(response, "UNMATCHED GITHUB LINE")
+        self.assertContains(response, "INFERRED CLAUDE LINE")
         self.assertNotContains(response, "MATCHED GOOGLE ONE LINE")
         self.assertContains(response, "明細に紐づかなかった提出書類")
+        self.assertContains(response, '<span class="label">明細行</span>', html=True)
+        self.assertContains(response, '<span class="label">解析要確認</span>', html=True)
+        self.assertContains(response, '<span class="label">未一致</span>', html=True)
+        self.assertNotContains(response, '<span class="label">AI解析中</span>', html=True)
+        self.assertNotContains(response, '<span class="label">推定対応</span>', html=True)
         self.assertContains(response, "260621_keeseon.kim_GitHub_Copilot_11_USD.pdf")
         self.assertContains(response, "1.10 USD")
         self.assertContains(response, "11.00 USD")
 
-        matched_response = self.client.get(
-            reverse("staff_card_statements") + "?month=2026-07&result=matched"
+        self.assertContains(response, "result=inferred")
+        self.assertContains(response, "result=needs_review")
+        self.assertNotContains(response, "result=matched")
+        self.assertNotContains(response, "result=ignored")
+        self.assertNotContains(response, ">すべて</a>")
+
+        inferred_response = self.client.get(
+            reverse("staff_card_statements") + "?month=2026-07&result=inferred"
         )
-        self.assertContains(matched_response, "MATCHED GOOGLE ONE LINE")
-        self.assertNotContains(matched_response, "UNMATCHED GITHUB LINE")
-        self.assertNotContains(matched_response, "明細に紐づかなかった提出書類")
+        self.assertContains(inferred_response, "INFERRED CLAUDE LINE")
+        self.assertNotContains(inferred_response, "UNMATCHED GITHUB LINE")
 
     def test_statement_pdf_includes_submitted_documents_not_used_by_statement(self):
         from . import statement_pdf
@@ -5106,6 +5135,110 @@ class FinalWorkflowAcceptanceTests(TestCase):
         self.assertContains(response, "Claude Pro")
         self.assertContains(response, "Max plan - 20x")
 
+    def test_plan_change_inference_uses_bill_to_user_and_previous_statement_cadence(self):
+        claude_catalog = ServiceCatalog.objects.create(
+            name="Claude",
+            billing_type=BillingType.SUBSCRIPTION,
+            merchant_aliases="ANTHROPIC, CLAUDE.AI SUBSCR, ANTHROPIC.COM",
+            created_by=self.superuser,
+        )
+        claude_service = RegisteredService.objects.create(
+            user=self.user,
+            catalog_service=claude_catalog,
+            name=claude_catalog.name,
+            billing_type=claude_catalog.billing_type,
+            registered_by=self.superuser,
+        )
+
+        # 前月の全社明細に、旧Claude Proの請求周期・金額と一致する実績がある。
+        previous_statement = CardStatement.objects.create(
+            period_month=date(2026, 6, 1),
+            file=SimpleUploadedFile("statement-2026-06.pdf", b"%PDF-1.4 statement", content_type="application/pdf"),
+            original_filename="statement-2026-06.pdf",
+            status=CardStatementStatus.COMPLETED,
+            card_last4="7210",
+            statement_period="2026-06",
+            uploaded_by=self.superuser,
+            expires_at=timezone.now() + timedelta(days=30),
+        )
+        CardStatementItem.objects.create(
+            statement=previous_statement,
+            sequence=15,
+            line_reference="0285",
+            transaction_date=date(2026, 5, 8),
+            merchant_name="CLAUDE.AI SUBSCR / ANTHROPIC.COM",
+            amount_jpy=Decimal("3585"),
+            original_amount=Decimal("22.00"),
+            original_currency="USD",
+            match_status=StatementMatchStatus.MATCHED,
+            receipt_required=True,
+        )
+
+        change = self.create_receipt(
+            service=claude_service,
+            month=date(2026, 7, 1),
+            filename="260606_uchiyama_Claude_Max_218.01_USD.pdf",
+        )
+        change.amount = Decimal("218.01")
+        change.currency = "USD"
+        change.issued_on = date(2026, 6, 6)
+        change.ai_extracted_payee = "Anthropic, PBC"
+        change.ai_extracted_service_label = "Claude"
+        change.ai_extracted_plan_name = "Max plan - 20x"
+        change.ai_extracted_recipient_name = ""
+        change.ai_recipient_name_check_memo = (
+            f"Bill to欄に対象アカウントと完全に一致するメールアドレス「{self.user.email}」が記載されています。"
+        )
+        change.ai_check_recipient_name = True
+        change.plan_change_details = {
+            "previous_plan": "Claude Pro",
+            "new_plan": "Max plan - 20x",
+            "change_date": "2026-06-06",
+            "previous_plan_unused_from": "2026-06-06",
+            "previous_plan_end": "2026-06-08",
+            "new_plan_start": "2026-06-06",
+            "new_plan_end": "2026-07-06",
+            "adjustment_amount": "-1.81",
+            "adjustment_currency": "USD",
+            "confidence": 0.99,
+        }
+        change.financial_metadata_checked_at = timezone.now()
+        change.plan_change_metadata_checked_at = timezone.now()
+        change.save()
+
+        statement = CardStatement.objects.create(
+            period_month=date(2026, 7, 1),
+            file=SimpleUploadedFile("statement-2026-07.pdf", b"%PDF-1.4 statement", content_type="application/pdf"),
+            original_filename="statement-2026-07.pdf",
+            status=CardStatementStatus.NEEDS_REVIEW,
+            card_last4="7210",
+            statement_period="2026-07",
+            uploaded_by=self.superuser,
+            expires_at=timezone.now() + timedelta(days=30),
+        )
+        item = CardStatementItem.objects.create(
+            statement=statement,
+            sequence=22,
+            line_reference="0343",
+            transaction_date=date(2026, 6, 8),
+            merchant_name="ANTHROPIC* CLAUD / ANTHROPIC.COM",
+            amount_jpy=Decimal("3663"),
+            original_amount=Decimal("22.00"),
+            original_currency="USD",
+            match_status=StatementMatchStatus.UNMATCHED,
+            receipt_required=True,
+        )
+
+        reconcile_card_statement_items(statement.pk)
+        item.refresh_from_db()
+        self.assertEqual(item.match_status, StatementMatchStatus.INFERRED)
+        self.assertEqual(item.matched_user, self.user)
+        inference = CardStatementPlanChangeInference.objects.get(statement_item=item)
+        self.assertEqual(inference.user, self.user)
+        self.assertIsNone(inference.historical_receipt)
+        self.assertIn("前月カード明細 0285", inference.historical_filename_snapshot)
+        self.assertIn("前月のカード明細", inference.reason)
+
     def test_plan_change_inference_can_use_same_users_recurring_history_when_plan_label_missing(self):
         statement, item, historical, _change = self._create_plan_change_inference_fixture(
             historical_plan_name=""
@@ -5159,7 +5292,7 @@ class FinalWorkflowAcceptanceTests(TestCase):
         )
 
     def test_version_file_is_present_without_web_display_requirement(self):
-        self.assertEqual(Path("VERSION").read_text(encoding="utf-8").strip(), "1.14.1")
+        self.assertEqual(Path("VERSION").read_text(encoding="utf-8").strip(), "1.15.0")
 
 
 @override_settings(PASSWORD_HASHERS=FAST_PASSWORD_HASHERS)
