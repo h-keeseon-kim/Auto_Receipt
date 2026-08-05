@@ -2,7 +2,7 @@
     {% for option in statement_result_filter_options %}
         <a
             class="statement-result-filter-tab{% if option.active %} active{% endif %}"
-            href="{% url 'staff_card_statements' %}?month={{ selected_month|date:'Y-m' }}&result={{ option.key }}"
+            href="{% url 'staff_card_statements' %}?month={{ selected_month|date:'Y-m' }}&result={{ option.target_key }}"
             {% if option.active %}aria-current="page"{% endif %}
         >
             <span>{{ option.label }}</span>
@@ -12,9 +12,7 @@
 </nav>
 <div class="statement-result-filter-summary">
     <strong>{{ result_filter_label }}を表示中</strong>
-    {% for option in statement_result_filter_options %}
-        {% if option.active %}<span>{{ option.count }}件 / 全{{ result_filter_counts.all }}件</span>{% endif %}
-    {% endfor %}
+    <span>{{ result_filter_count }}件 / 全{{ result_filter_counts.all }}件</span>
 </div>
 
 {% for statement in statements %}
@@ -49,16 +47,10 @@
         </div>
     </div>
 
-    <section class="status-grid compact-grid">
-        <div class="card"><span class="label">明細月</span><strong>{{ statement.period_month|date:"Y年m月" }}</strong></div>
-        <div class="card"><span class="label">対象領収書月</span><strong>{{ statement.target_receipt_month|date:"Y年m月" }}</strong></div>
-        <div class="card"><span class="label">カード下4桁（{{ target_card_last4 }}）</span><strong class="{% if statement.card_last4 and statement.card_last4 != target_card_last4 %}danger{% endif %}">{{ statement.card_last4|default:"解析待ち" }}</strong></div>
-        <div class="card"><span class="label">AI判定明細月</span><strong class="{% if statement.statement_period and statement.statement_period != selected_month|date:'Y-m' %}danger{% endif %}">{{ statement.statement_period|default:"解析待ち" }}</strong></div>
-        <div class="card"><span class="label">支払日</span><strong>{{ statement.payment_date|date:"Y-m-d"|default:"-" }}</strong></div>
+    <section class="status-grid compact-grid compact-statement-result-stats">
         <div class="card"><span class="label">明細行</span><strong>{{ statement.items.count }}</strong></div>
-        <div class="card"><span class="label">推定対応</span><strong class="{% if statement.inferred_count %}inferred-text{% endif %}">{{ statement.inferred_count }}</strong></div>
         <div class="card"><span class="label">解析要確認</span><strong class="{% if statement.manual_review_count %}warning{% endif %}">{{ statement.manual_review_count }}</strong></div>
-        <div class="card"><span class="label">未一致</span><strong class="{% if statement.missing_receipt_count %}danger{% endif %}">{{ statement.missing_receipt_count }}</strong></div>
+        <div class="card"><span class="label">未一致</span><strong class="{% if statement.unresolved_count %}danger{% endif %}">{{ statement.unresolved_count }}</strong><span class="muted small">推定対応を含む</span></div>
         <div class="card"><span class="label">明細未使用の提出書類</span><strong class="{% if statement.unmatched_receipt_components %}warning{% endif %}">{{ statement.unmatched_receipt_components|length }}</strong></div>
     </section>
 
@@ -73,7 +65,7 @@
             <strong>照合条件：</strong>
             通常取引は、金額・通貨完全一致、ご利用先・払先または本文上のサービス名の関連、明細利用日と領収書日付が±1日以内の候補を、明細全体で最大件数となるよう一対一割り当てします。
             法的な販売者名とサービス名は別に保持します。例えば「Google Asia Pacific Pte. Ltd.」が販売者でも、本文に「Google One」と明示されていればGoogle One明細として照合します。
-            通常照合では利用者の特定を判定条件に含めません。直接一致しない明細に限り、当月の契約変更書類に旧プラン終了情報が明記され、同一ユーザーの前月定期契約実績が金額・通貨・請求周期まで一致するときは「推定対応」として管理者確認に回します。旧プラン名を過去領収書から抽出できない場合も、定期契約・同一ユーザー・同一請求元・完全金額一致・請求周期一致をすべて満たす場合だけ候補化します。<strong>赤色は未一致、橙色は推定対応、黄色は提出ファイルの解析要確認です。</strong>
+            通常照合では利用者の特定を判定条件に含めません。直接一致しない明細に限り、当月の契約変更書類にBill to利用者・旧プラン終了情報が明記され、過去領収書または前月カード明細の同一請求元・完全一致金額・請求周期が揃うときは「推定対応」として管理者確認に回します。前月カード明細は領収書提出の証拠ではなく、旧プランの定期請求実績を裏付ける補助証拠です。<strong>赤色は未一致、橙色は推定対応、黄色は提出ファイルの解析要確認です。</strong>
         </div>
 
         {% if statement.display_items %}

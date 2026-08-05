@@ -13,12 +13,10 @@
     </form>
 </div>
 
-<section class="status-grid">
-    <div class="card"><span class="label">明細書</span><strong>{{ stats.statement_count }}</strong></div>
-    <div class="card"><span class="label">AI解析中</span><strong class="{% if stats.processing_count %}danger{% endif %}">{{ stats.processing_count }}</strong></div>
-    <div class="card"><span class="label">推定対応</span><strong class="{% if stats.inferred_count %}inferred-text{% endif %}">{{ stats.inferred_count }}</strong></div>
+<section class="status-grid compact-statement-result-stats">
+    <div class="card"><span class="label">明細行</span><strong>{{ stats.line_count }}</strong></div>
     <div class="card"><span class="label">解析要確認</span><strong class="{% if stats.review_count %}warning{% endif %}">{{ stats.review_count }}</strong></div>
-    <div class="card"><span class="label">未一致</span><strong class="{% if stats.missing_count %}danger{% endif %}">{{ stats.missing_count }}</strong></div>
+    <div class="card"><span class="label">未一致</span><strong class="{% if stats.unresolved_count %}danger{% endif %}">{{ stats.unresolved_count }}</strong><span class="muted small">推定対応を含む</span></div>
     <div class="card"><span class="label">明細未使用の提出書類</span><strong class="{% if stats.unused_receipt_count %}warning{% endif %}">{{ stats.unused_receipt_count }}</strong></div>
 </section>
 
@@ -26,7 +24,7 @@
     <div class="section-header">
         <div>
             <h2>{{ selected_month|date:"Y年m月" }}分の全社明細書をアップロード</h2>
-            <p class="muted">ユーザーは選択しません。AIが全明細行を抽出した後、対象領収書月 {{ target_receipt_month|date:"Y年m月" }}の全ユーザー領収書を全体一対一で照合します。通常取引に加え、請求・支払額から返金額を差し引いた純額も確認します。直接一致しない明細では、明示的なプラン変更情報と同一ユーザーの前月定期契約実績が揃う場合だけ推定対応として提示します。過去領収書の旧プラン名を抽出できない場合も、定期契約・請求元・金額・通貨・請求周期が厳格に一致する場合だけ管理者確認候補にします。未一致は赤色、推定対応は橙色、領収書は存在するものの解析項目が不足する場合は黄色で表示します。</p>
+            <p class="muted">ユーザーは選択しません。AIが全明細行を抽出した後、対象領収書月 {{ target_receipt_month|date:"Y年m月" }}の全ユーザー領収書を全体一対一で照合します。通常取引に加え、請求・支払額から返金額を差し引いた純額も確認します。直接一致しない明細では、契約変更書類のBill to利用者・旧プラン終了日と、過去領収書または前月カード明細の完全一致金額・請求周期が揃う場合だけ推定対応として提示します。前月カード明細は提出領収書の代わりではなく、旧プラン実績を裏付ける補助証拠として使用します。未一致は赤色、推定対応は橙色、領収書は存在するものの解析項目が不足する場合は黄色で表示します。</p>
         </div>
     </div>
     <form method="post" enctype="multipart/form-data" action="{% url 'staff_upload_card_statement' %}" class="statement-upload-form">

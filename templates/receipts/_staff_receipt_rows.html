@@ -24,7 +24,6 @@
             <div class="receipt-review-file-meta">
                 <span>{{ receipt.file_size|filesizeformat }}</span>
                 <span class="badge {% if receipt.file_available %}submitted{% else %}neutral{% endif %}">{{ receipt.file_status_label }}</span>
-                <span>{{ receipt.uploader_label }}</span>
                 {% if receipt.uploaded_by_label != "-" %}<span>実行者: {{ receipt.uploaded_by_label }}</span>{% endif %}
             </div>
         </td>
