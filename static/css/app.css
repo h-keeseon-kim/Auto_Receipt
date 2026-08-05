@@ -2116,7 +2116,7 @@ body.tutorial-open { overflow-x: hidden; }
     }
 }
 
-/* v1.14.0: subscription plan-change inference requiring administrator review */
+/* v1.14.1: subscription plan-change inference requiring administrator review */
 .badge.inferred {
     background: #fff0d8;
     color: #a45100;
@@ -2212,4 +2212,19 @@ body.tutorial-open { overflow-x: hidden; }
     .plan-change-inference-details {
         grid-template-columns: 1fr;
     }
+}
+
+/* v1.14.1: AI再解析時に保存された契約変更メタデータを読みやすく表示する。 */
+.plan-change-metadata-panel { margin-top: 0.85rem; }
+.plan-change-metadata-panel .detail-list.compact {
+    margin-top: 0.65rem;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 0.55rem 1rem;
+}
+.plan-change-metadata-panel .detail-list.compact > div {
+    min-width: 0;
+    grid-template-columns: minmax(110px, auto) minmax(0, 1fr);
+}
+@media (max-width: 760px) {
+    .plan-change-metadata-panel .detail-list.compact { grid-template-columns: 1fr; }
 }

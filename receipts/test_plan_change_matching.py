@@ -60,6 +60,36 @@ class PlanChangeInferenceTests(unittest.TestCase):
         history = HistoricalPlanReceipt(**{**self.history.__dict__, "plan_name": "Claude Max"})
         self.assertIsNone(infer_plan_change_candidate(self.line, [self.change], [history]))
 
+
+    def test_missing_historical_plan_name_is_allowed_for_same_users_subscription(self):
+        history = HistoricalPlanReceipt(
+            **{**self.history.__dict__, "plan_name": "", "recurring_service": True}
+        )
+        candidate = infer_plan_change_candidate(self.line, [self.change], [history])
+        self.assertIsNotNone(candidate)
+        self.assertFalse(candidate.historical_plan_explicit)
+        self.assertLess(candidate.confidence, self.change.confidence + 0.01)
+
+    def test_missing_historical_plan_name_is_rejected_for_non_subscription(self):
+        history = HistoricalPlanReceipt(
+            **{**self.history.__dict__, "plan_name": "", "recurring_service": False}
+        )
+        self.assertIsNone(infer_plan_change_candidate(self.line, [self.change], [history]))
+
+    def test_explicit_old_plan_candidate_is_preferred_over_implicit_candidate(self):
+        implicit = HistoricalPlanReceipt(
+            **{
+                **self.history.__dict__,
+                "receipt_id": 999,
+                "plan_name": "",
+                "recurring_service": True,
+            }
+        )
+        candidate = infer_plan_change_candidate(self.line, [self.change], [implicit, self.history])
+        self.assertIsNotNone(candidate)
+        self.assertEqual(candidate.historical_receipt_id, self.history.receipt_id)
+        self.assertTrue(candidate.historical_plan_explicit)
+
     def test_history_must_be_previous_calendar_month(self):
         history = HistoricalPlanReceipt(**{**self.history.__dict__, "event_date": date(2026, 4, 8)})
         self.assertIsNone(infer_plan_change_candidate(self.line, [self.change], [history]))
