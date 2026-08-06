@@ -4962,17 +4962,25 @@ class FinalWorkflowAcceptanceTests(TestCase):
         self.assertContains(response, "1.10 USD")
         self.assertContains(response, "11.00 USD")
 
-        self.assertContains(response, "result=inferred")
+        self.assertNotContains(response, "result=inferred")
         self.assertContains(response, "result=needs_review")
         self.assertNotContains(response, "result=matched")
         self.assertNotContains(response, "result=ignored")
         self.assertNotContains(response, ">すべて</a>")
+        self.assertContains(response, f'id="inferred-group-{statement.pk}"', html=False)
+        self.assertContains(response, f'id="unmatched-group-{statement.pk}"', html=False)
+        self.assertContains(response, "推定対応 1件・未一致 1件・明細未使用 1件")
+        content = response.content.decode()
+        self.assertLess(content.index(f'id="inferred-group-{statement.pk}"'), content.index(f'id="unmatched-group-{statement.pk}"'))
+        self.assertLess(content.index(f'id="unmatched-group-{statement.pk}"'), content.index(f'id="unused-receipts-{statement.pk}"'))
 
+        # v1.15.0までのURLは互換性のため未一致画面へ統合する。
         inferred_response = self.client.get(
             reverse("staff_card_statements") + "?month=2026-07&result=inferred"
         )
+        self.assertContains(inferred_response, "未一致を表示中")
         self.assertContains(inferred_response, "INFERRED CLAUDE LINE")
-        self.assertNotContains(inferred_response, "UNMATCHED GITHUB LINE")
+        self.assertContains(inferred_response, "UNMATCHED GITHUB LINE")
 
     def test_statement_pdf_includes_submitted_documents_not_used_by_statement(self):
         from . import statement_pdf
@@ -5128,10 +5136,12 @@ class FinalWorkflowAcceptanceTests(TestCase):
         self.assertEqual(inference.amount, Decimal("22.00"))
 
         self.client.login(username="admin", password="admin-password-123")
-        response = self.client.get(reverse("staff_card_statements") + "?month=2026-07&result=inferred")
+        response = self.client.get(reverse("staff_card_statements") + "?month=2026-07&result=unmatched")
         self.assertEqual(response.status_code, 200)
-        self.assertContains(response, "推定対応を表示中")
+        self.assertContains(response, "未一致を表示中")
+        self.assertContains(response, "推定対応")
         self.assertContains(response, "推定対応を一致として確定")
+        self.assertNotContains(response, "result=inferred")
         self.assertContains(response, "Claude Pro")
         self.assertContains(response, "Max plan - 20x")
 

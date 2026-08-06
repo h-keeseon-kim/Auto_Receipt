@@ -11,8 +11,9 @@
     function updateSummary(stats) {
         if (!stats) return;
         Object.keys(stats).forEach(function (key) {
-            const element = document.querySelector("[data-ai-summary='" + key + "']");
-            if (element) element.textContent = stats[key];
+            document.querySelectorAll("[data-ai-summary='" + key + "']").forEach(function (element) {
+                element.textContent = stats[key];
+            });
         });
     }
 

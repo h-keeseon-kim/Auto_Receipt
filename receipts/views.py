@@ -2051,14 +2051,16 @@ def staff_user_month_status(request, user_id: int):
 STATEMENT_RESULT_FILTERS = {
     "all": "すべて",
     "unmatched": "未一致",
-    "inferred": "推定対応",
     "needs_review": "解析要確認",
 }
-STATEMENT_RESULT_VISIBLE_FILTER_KEYS = ("unmatched", "inferred", "needs_review")
+STATEMENT_RESULT_VISIBLE_FILTER_KEYS = ("unmatched", "needs_review")
 
 
 def normalize_statement_result_filter(value: str | None) -> str:
     value = (value or "all").strip().lower()
+    # v1.15.0までの「推定対応」リンクは、統合後の「未一致」へ寄せる。
+    if value == "inferred":
+        return "unmatched"
     return value if value in STATEMENT_RESULT_FILTERS else "all"
 
 
@@ -2077,28 +2079,63 @@ def build_statement_result_filter_options(counts: dict[str, int], current: str) 
 
 
 def prepare_statement_result_display(statements, result_filter: str):
-    counts = {key: 0 for key in STATEMENT_RESULT_FILTERS}
-
-    def belongs(item, key: str) -> bool:
-        if key == "all":
-            return True
-        if key == "unmatched":
-            return item.receipt_required and item.match_status in {
-                StatementMatchStatus.UNMATCHED,
-                StatementMatchStatus.INFERRED,
-            }
-        if key == "inferred":
-            return item.receipt_required and item.match_status == StatementMatchStatus.INFERRED
-        if key == "needs_review":
-            return item.receipt_required and item.match_status == StatementMatchStatus.NEEDS_REVIEW
-        return True
+    # `unmatched` は管理者が確認したい3区分をまとめる。
+    #   1. 契約変更等による推定対応
+    #   2. 直接・推定ともに根拠がない未一致
+    #   3. 明細のどの行にも使われなかった提出書類
+    counts = {
+        "all": 0,
+        "unmatched": 0,
+        "unmatched_only": 0,
+        "inferred": 0,
+        "needs_review": 0,
+        "unused_receipts": 0,
+    }
 
     for statement in statements:
         all_items = list(statement.items.all())
-        for key in counts:
-            counts[key] += sum(1 for item in all_items if belongs(item, key))
-        statement.display_items = [item for item in all_items if belongs(item, result_filter)]
-        statement.display_item_count = len(statement.display_items)
+        inferred_items = [
+            item
+            for item in all_items
+            if item.receipt_required and item.match_status == StatementMatchStatus.INFERRED
+        ]
+        unmatched_items = [
+            item
+            for item in all_items
+            if item.receipt_required and item.match_status == StatementMatchStatus.UNMATCHED
+        ]
+        review_items = [
+            item
+            for item in all_items
+            if item.receipt_required and item.match_status == StatementMatchStatus.NEEDS_REVIEW
+        ]
+        unused_receipts = list(statement.unmatched_receipt_components or [])
+
+        counts["inferred"] += len(inferred_items)
+        counts["unmatched_only"] += len(unmatched_items)
+        counts["needs_review"] += len(review_items)
+        counts["unused_receipts"] += len(unused_receipts)
+        counts["unmatched"] += len(inferred_items) + len(unmatched_items) + len(unused_receipts)
+        counts["all"] += len(all_items) + len(unused_receipts)
+
+        statement.display_inferred_items = inferred_items
+        statement.display_unmatched_items = unmatched_items
+        statement.display_unused_receipts = (
+            unused_receipts if result_filter in {"all", "unmatched"} else []
+        )
+
+        if result_filter == "unmatched":
+            # 未一致画面では個別グループをテンプレート側で描画する。
+            statement.display_items = []
+            statement.display_item_count = (
+                len(inferred_items) + len(unmatched_items) + len(unused_receipts)
+            )
+        elif result_filter == "needs_review":
+            statement.display_items = review_items
+            statement.display_item_count = len(review_items)
+        else:
+            statement.display_items = all_items
+            statement.display_item_count = len(all_items) + len(unused_receipts)
     return counts
 
 

@@ -2228,3 +2228,94 @@ body.tutorial-open { overflow-x: hidden; }
 @media (max-width: 760px) {
     .plan-change-metadata-panel .detail-list.compact { grid-template-columns: 1fr; }
 }
+
+/* v1.15.0: admin summary cards show only the operationally relevant counts. */
+.compact-admin-history-stats {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.compact-statement-result-stats {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.compact-admin-history-stats .card,
+.compact-statement-result-stats .card {
+    min-width: 0;
+}
+
+@media (max-width: 900px) {
+    .compact-statement-result-stats {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+}
+
+@media (max-width: 560px) {
+    .compact-admin-history-stats,
+    .compact-statement-result-stats {
+        grid-template-columns: 1fr;
+    }
+}
+
+/* v1.15.1: group inferred, unmatched, and unused documents under the unmatched filter */
+.statement-result-filter-summary-main {
+    display: flex;
+    align-items: baseline;
+    gap: 0.65rem;
+    min-width: 0;
+    flex-wrap: wrap;
+}
+
+.statement-result-group {
+    min-width: 0;
+    margin: 1rem 0 0;
+}
+
+.statement-result-group + .statement-result-group {
+    margin-top: 1.4rem;
+    padding-top: 1.25rem;
+    border-top: 2px solid var(--border);
+}
+
+.statement-result-group-header {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 1rem;
+    margin-bottom: 0.8rem;
+}
+
+.statement-result-group-header > div {
+    min-width: 0;
+}
+
+.statement-result-group-header h3 {
+    margin: 0 0 0.25rem;
+}
+
+.statement-result-group-header p {
+    margin: 0;
+}
+
+.statement-group-empty {
+    padding: 0.85rem 1rem;
+    color: var(--muted);
+    background: #f8fafc;
+}
+
+.statement-result-group-inferred .statement-group-empty {
+    border-color: #edc28f;
+    background: #fff8ed;
+}
+
+.statement-result-group-unmatched .statement-group-empty {
+    border-color: #efc0bc;
+    background: #fff7f6;
+}
+
+@media (max-width: 760px) {
+    .statement-result-filter-summary-main,
+    .statement-result-group-header {
+        align-items: flex-start;
+        flex-direction: column;
+    }
+}
