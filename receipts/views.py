@@ -36,6 +36,7 @@ from .emailing import send_resubmission_request_email, send_test_email
 from .forms import (
     MonthSelectForm,
     ReceiptMonthSelectForm,
+    StatementMonthSelectForm,
     CardStatementUploadForm,
     ReceiptBatchUploadForm,
     ReceiptFileReplaceForm,
@@ -58,6 +59,7 @@ from .forms import (
     UserServiceRegistrationForm,
     UserServiceStopForm,
     current_month,
+    current_receipt_month,
 )
 from .models import (
     BillingType,
@@ -118,6 +120,16 @@ def parse_month_from_request(request, *, month_label=None):
         return form.cleaned_data["month"], form
     initial_month = current_month()
     return initial_month, MonthSelectForm(initial={"month": initial_month}, month_label=month_label)
+
+
+def parse_statement_month_from_request(request):
+    """ご利用代金明細ページでは、直接表示時の初期月を前月にする。"""
+
+    form = StatementMonthSelectForm(request.GET or None)
+    if form.is_valid():
+        return form.cleaned_data["month"], form
+    initial_month = current_receipt_month()
+    return initial_month, StatementMonthSelectForm(initial={"month": initial_month})
 
 
 def parse_receipt_month_from_request(request):
@@ -2173,10 +2185,7 @@ def global_statement_queryset(period_month):
 
 @staff_member_required
 def staff_card_statements(request):
-    selected_month, month_form = parse_month_from_request(
-        request,
-        month_label="ご利用代金明細月",
-    )
+    selected_month, month_form = parse_statement_month_from_request(request)
     reconcile_pending_card_statement_month_semantics(period_month=selected_month)
     # 明細月とユーザー提出月は同じ月。照合対象の領収書はその前月分。
     result_filter = normalize_statement_result_filter(request.GET.get("result"))

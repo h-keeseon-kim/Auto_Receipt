@@ -131,9 +131,29 @@ class ReceiptFlowTests(TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertContains(response, "data-auto-month-form")
-        self.assertContains(response, "data-auto-submit-on-change")
+        self.assertContains(response, "data-month-picker-form")
+        self.assertContains(response, "data-month-picker")
+        self.assertContains(response, 'data-selected-month="2026-06"')
+        self.assertContains(response, "2026年06月")
+        self.assertNotContains(response, "data-auto-submit-on-change")
         self.assertNotContains(response, "月を選ぶと自動で切り替わります。")
         self.assertNotContains(response, ">表示</button>")
+
+    @mock.patch("receipts.forms.timezone.localdate", return_value=date(2026, 8, 6))
+    def test_staff_card_statement_direct_open_defaults_to_previous_calendar_month(self, _mocked_localdate):
+        User.objects.create_superuser(
+            username="month-admin",
+            email="month-admin@example.com",
+            password="admin-password-123",
+        )
+        self.client.login(username="month-admin", password="admin-password-123")
+
+        response = self.client.get(reverse("staff_card_statements"))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, 'data-selected-month="2026-07"')
+        self.assertContains(response, "2026年07月")
+        self.assertContains(response, "data-month-picker")
 
 
     def test_ai_payload_uses_receipt_payee_for_filename_not_selected_service_name(self):

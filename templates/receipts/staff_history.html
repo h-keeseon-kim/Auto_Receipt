@@ -7,9 +7,8 @@
         <h1>提出履歴</h1>
         <p class="muted">ユーザー別の提出進捗、未提出サービス、AI確認対象、アップロード済み領収書を確認できます。</p>
     </div>
-    <form method="get" class="month-form auto-month-form" data-tutorial-target="staff-month-form" data-auto-submit-on-change>
-        {{ month_form.receipt_month.label_tag }}
-        {{ month_form.receipt_month }}
+    <form method="get" class="month-form auto-month-form" data-tutorial-target="staff-month-form" data-month-picker-form>
+        {% include "receipts/_month_picker.html" with field=month_form.receipt_month selected_month=target_receipt_month label="領収書発行月" %}
     </form>
 </div>
 

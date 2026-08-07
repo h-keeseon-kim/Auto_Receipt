@@ -2319,3 +2319,147 @@ body.tutorial-open { overflow-x: hidden; }
         flex-direction: column;
     }
 }
+
+/* v1.15.2: browser-native month popup does not allow the current-month outline
+   to be styled independently. Use an app-owned picker so only the selected
+   business month is highlighted. */
+.month-picker {
+    position: relative;
+    width: min(13rem, 100%);
+    min-width: 0;
+}
+.month-picker.is-enhanced > input[type="month"] {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    white-space: nowrap;
+    border: 0;
+    opacity: 0;
+    pointer-events: none;
+}
+.month-picker-trigger {
+    width: 100%;
+    min-height: 3rem;
+    display: none;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.8rem;
+    padding: 0.62rem 0.72rem;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    background: #fff;
+    color: var(--text);
+    font: inherit;
+    cursor: pointer;
+    white-space: nowrap;
+}
+.month-picker.is-enhanced .month-picker-trigger { display: flex; }
+.month-picker-trigger:hover,
+.month-picker-trigger:focus-visible,
+.month-picker.is-open .month-picker-trigger {
+    border-color: var(--primary);
+    outline: 2px solid rgba(33, 84, 216, 0.15);
+    outline-offset: 1px;
+}
+.month-picker-trigger:disabled {
+    cursor: wait;
+    opacity: 0.65;
+}
+.month-picker-calendar-icon {
+    display: inline-flex;
+    flex: 0 0 auto;
+    width: 1.35rem;
+    height: 1.35rem;
+}
+.month-picker-calendar-icon svg {
+    width: 100%;
+    height: 100%;
+    fill: none;
+    stroke: currentColor;
+    stroke-width: 1.8;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+}
+.month-picker-popover {
+    position: absolute;
+    z-index: 80;
+    top: calc(100% + 0.5rem);
+    right: 0;
+    width: min(22rem, calc(100vw - 2rem));
+    padding: 0.85rem;
+    background: #fff;
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    box-shadow: 0 18px 45px rgba(16, 24, 40, 0.2);
+}
+.month-picker-popover[hidden] { display: none; }
+.month-picker-year-nav {
+    display: grid;
+    grid-template-columns: 2.5rem minmax(0, 1fr) 2.5rem;
+    align-items: center;
+    gap: 0.5rem;
+    margin-bottom: 0.7rem;
+    text-align: center;
+}
+.month-picker-year-button {
+    min-width: 2.5rem;
+    min-height: 2.5rem;
+    border: 1px solid var(--border);
+    border-radius: 9px;
+    background: #fff;
+    color: var(--text);
+    font: inherit;
+    font-size: 1.35rem;
+    line-height: 1;
+    cursor: pointer;
+}
+.month-picker-year-button:hover,
+.month-picker-year-button:focus-visible {
+    border-color: var(--primary);
+    color: var(--primary);
+    outline: none;
+}
+.month-picker-grid {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 0.45rem;
+}
+.month-picker-grid button {
+    min-height: 2.65rem;
+    padding: 0.45rem 0.3rem;
+    border: 1px solid transparent;
+    border-radius: 8px;
+    background: #fff;
+    color: var(--text);
+    font: inherit;
+    font-weight: 700;
+    cursor: pointer;
+    white-space: nowrap;
+}
+.month-picker-grid button:hover,
+.month-picker-grid button:focus-visible {
+    border-color: var(--primary);
+    background: #eef4ff;
+    color: var(--primary);
+    outline: none;
+}
+.month-picker-grid button.is-selected,
+.month-picker-grid button.is-selected:hover,
+.month-picker-grid button.is-selected:focus-visible {
+    border-color: var(--primary);
+    background: var(--primary);
+    color: #fff;
+    box-shadow: 0 0 0 2px rgba(33, 84, 216, 0.22);
+}
+@media (max-width: 760px) {
+    .month-picker { width: 100%; }
+    .month-picker-popover {
+        left: 0;
+        right: auto;
+        width: min(22rem, calc(100vw - 2rem));
+    }
+}

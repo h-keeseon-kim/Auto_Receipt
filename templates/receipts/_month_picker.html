@@ -1,0 +1,44 @@
+<label for="{{ field.id_for_label }}_trigger">{{ label }}：</label>
+<div
+    class="month-picker"
+    data-month-picker
+    data-selected-month="{{ selected_month|date:'Y-m' }}"
+>
+    {{ field }}
+    <button
+        type="button"
+        id="{{ field.id_for_label }}_trigger"
+        class="month-picker-trigger"
+        data-month-picker-trigger
+        aria-haspopup="dialog"
+        aria-expanded="false"
+    >
+        <span data-month-picker-display>{{ selected_month|date:"Y年m月" }}</span>
+        <span class="month-picker-calendar-icon" aria-hidden="true">
+            <svg viewBox="0 0 24 24" focusable="false" aria-hidden="true">
+                <path d="M7 2v3M17 2v3M3.5 9h17M5.5 4h13a2 2 0 0 1 2 2v13a2 2 0 0 1-2 2h-13a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2Z"/>
+            </svg>
+        </span>
+    </button>
+    <div class="month-picker-popover" data-month-picker-popover role="dialog" aria-label="{{ label }}を選択" hidden>
+        <div class="month-picker-year-nav">
+            <button type="button" class="month-picker-year-button" data-month-picker-prev-year aria-label="前年を表示">‹</button>
+            <strong data-month-picker-year></strong>
+            <button type="button" class="month-picker-year-button" data-month-picker-next-year aria-label="翌年を表示">›</button>
+        </div>
+        <div class="month-picker-grid" role="grid" aria-label="月">
+            <button type="button" data-month-picker-month="1">1月</button>
+            <button type="button" data-month-picker-month="2">2月</button>
+            <button type="button" data-month-picker-month="3">3月</button>
+            <button type="button" data-month-picker-month="4">4月</button>
+            <button type="button" data-month-picker-month="5">5月</button>
+            <button type="button" data-month-picker-month="6">6月</button>
+            <button type="button" data-month-picker-month="7">7月</button>
+            <button type="button" data-month-picker-month="8">8月</button>
+            <button type="button" data-month-picker-month="9">9月</button>
+            <button type="button" data-month-picker-month="10">10月</button>
+            <button type="button" data-month-picker-month="11">11月</button>
+            <button type="button" data-month-picker-month="12">12月</button>
+        </div>
+    </div>
+</div>

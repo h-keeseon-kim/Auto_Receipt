@@ -115,7 +115,9 @@ class MonthField(forms.DateField):
 
 
 def current_month():
-    today = date.today()
+    # RailwayのOS時刻ではなく、DjangoのTIME_ZONE（既定: Asia/Tokyo）で
+    # 月境界を判定する。
+    today = timezone.localdate()
     return today.replace(day=1)
 
 
@@ -168,6 +170,20 @@ class MonthSelectForm(forms.Form):
 
 class ReceiptMonthSelectForm(forms.Form):
     receipt_month = MonthField(label="領収書発行月", initial=current_receipt_month)
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        apply_design_classes(self)
+
+
+class StatementMonthSelectForm(forms.Form):
+    """全社ご利用代金明細で最初に表示する明細月。
+
+    明細は翌月に確定・提出される運用のため、直接ページを開いた場合は
+    現在月ではなく前月を初期値にする。
+    """
+
+    month = MonthField(label="ご利用代金明細月", initial=current_receipt_month)
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)

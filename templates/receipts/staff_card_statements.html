@@ -7,9 +7,8 @@
         <h1>ご利用代金明細</h1>
         <p class="muted">会社全体のカード明細を、明細月と同じ提出サイクルに登録された前月分の全ユーザー領収書と一括照合します。</p>
     </div>
-    <form method="get" class="month-form auto-month-form" data-auto-submit-on-change>
-        {{ month_form.month.label_tag }}
-        {{ month_form.month }}
+    <form method="get" class="month-form auto-month-form" data-month-picker-form>
+        {% include "receipts/_month_picker.html" with field=month_form.month selected_month=selected_month label="ご利用代金明細月" %}
     </form>
 </div>
 
