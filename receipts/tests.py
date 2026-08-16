@@ -2176,6 +2176,19 @@ class StaffServiceAssignmentTests(TestCase):
         self.assertContains(idle_response, 'aria-busy="false"')
         self.assertContains(idle_response, 'title="AI未確認の領収書はありません。"')
 
+    def test_staff_user_month_status_resolves_target_receipt_month(self):
+        self.client.login(username="admin", password="admin-password-123")
+
+        response = self.client.get(
+            reverse("staff_user_month_status", args=[self.user.pk]) + "?month=2026-08"
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.context["selected_month"], date(2026, 8, 1))
+        self.assertEqual(response.context["target_receipt_month"], date(2026, 7, 1))
+        self.assertContains(response, "対象領収書月: 2026年07月")
+        self.assertContains(response, "管理者代理アップロード")
+
     def test_staff_can_proxy_upload_multiple_receipts_for_user_service(self):
         service = RegisteredService.objects.create(
             user=self.user,

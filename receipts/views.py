@@ -1901,6 +1901,11 @@ def staff_user_month_status(request, user_id: int):
     else:
         selected_month, month_form = parse_month_from_request(request)
 
+    # 管理者の月別状況・代理アップロード画面では、選択した提出サイクル月に
+    # 対応する前月の領収書発行月を表示する。v1.15.0のUI整理時にこの代入が
+    # 抜け、render contextで未定義変数を参照して500になっていた。
+    target_receipt_month = receipt_month_for_submission(selected_month)
+
     selected_upload_choice = (
         request.POST.get("service", "")
         if request.method == "POST"
