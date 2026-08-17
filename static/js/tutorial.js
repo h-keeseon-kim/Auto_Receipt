@@ -128,14 +128,14 @@
             pageName: "staff_card_statements",
             selector: "[data-tutorial-target='staff-statements-nav']",
             title: "ご利用代金明細ページです",
-            body: "会社全体のカード明細をアップロードし、明細月と同じ提出サイクルに保存された前月分の全ユーザー領収書を一括照合します。例えば7月分明細は、7月提出の6月分領収書と照合します。",
+            body: "会社全体のカード明細をアップロードし、明細月と同じ領収書発行月として登録された全ユーザー領収書を一括照合します。例えば7月分明細は、領収書発行月7月の領収書と照合します。",
             placement: "below",
         },
         {
             pageName: "staff_card_statements",
             selector: "[data-tutorial-target='staff-statement-upload-section']",
             title: "全社明細書をアップロードします",
-            body: "明細月を選び、ユーザーを指定せずに会社共通のご利用代金明細書をアップロードします。AIが明細表の全行を抽出し、前月分の領収書と照合します。",
+            body: "明細月を選び、ユーザーを指定せずに会社共通のご利用代金明細書をアップロードします。AIが明細表の全行を抽出し、同じ領収書発行月として登録された領収書と照合します。",
             placement: "above",
         },
         {

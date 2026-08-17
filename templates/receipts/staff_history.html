@@ -31,7 +31,7 @@
             <p class="muted">ユーザー名順です。「月別状況」からサービス単位の提出状況を確認できます。全社カード明細は専用ページで一括照合します。</p>
         </div>
         <div class="actions nowrap">
-            <a class="button" href="{% url 'staff_card_statements' %}?month={{ selected_month|date:'Y-m' }}">ご利用代金明細</a>
+            <a class="button" href="{% url 'staff_card_statements' %}?month={{ target_receipt_month|date:'Y-m' }}">ご利用代金明細</a>
             <a class="button primary" href="{% url 'staff_download_month' %}?month={{ selected_month|date:'Y-m' }}">提出済みZIP</a>
         </div>
     </div>

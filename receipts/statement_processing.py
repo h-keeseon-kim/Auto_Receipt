@@ -36,6 +36,7 @@ from .models import (
     StatementReceiptEvidenceRole,
     add_months,
     receipt_month_for_statement,
+    submission_month_for_receipt,
 )
 from .statement_ai import generate_card_statement_analysis
 from .plan_change_matching import (
@@ -65,6 +66,9 @@ logger = logging.getLogger(__name__)
 
 CARD_STATEMENT_MONTH_SEMANTICS_RECONCILE_MARKER = (
     "【月次ルール更新】明細月と対象領収書月の対応を修正したため、最新の領収書と再照合します。"
+)
+CARD_STATEMENT_SAME_MONTH_RECEIPT_RECONCILE_MARKER = (
+    "【月次ルール更新】全社明細月と領収書発行月を同じ月として照合するため、最新の領収書と再照合します。"
 )
 CARD_STATEMENT_MATCHING_RULES_RECONCILE_MARKER = (
     "【照合ルール更新】必須条件・優先順位方式へ更新したため、最新の領収書と再照合します。"
@@ -127,6 +131,7 @@ KNOWN_MERCHANT_PATTERNS: tuple[tuple[str, tuple[str, ...]], ...] = (
 def reconcile_pending_card_statement_month_semantics(*, period_month=None, statement_id=None) -> int:
     queryset = CardStatement.objects.filter(
         Q(ai_admin_memo__contains=CARD_STATEMENT_MONTH_SEMANTICS_RECONCILE_MARKER)
+        | Q(ai_admin_memo__contains=CARD_STATEMENT_SAME_MONTH_RECEIPT_RECONCILE_MARKER)
         | Q(ai_admin_memo__contains=CARD_STATEMENT_MATCHING_RULES_RECONCILE_MARKER)
         | Q(ai_admin_memo__contains=CARD_LAST4_EVIDENCE_RECONCILE_MARKER)
         | Q(ai_admin_memo__contains=EXACT_AMOUNT_MATCHING_RECONCILE_MARKER)
@@ -271,10 +276,17 @@ def _registered_services_for_period(statement_month: date) -> list[RegisteredSer
 
 
 def _available_receipts_for_statement_month(statement_month: date) -> list[Receipt]:
+    """明細月と同じ領収書発行月の提出ファイルを返す。
+
+    領収書発行月Mは内部的には提出サイクルM+1へ保存されるため、
+    2026年7月明細では2026年8月提出サイクルを参照する。
+    """
+
+    submission_month = submission_month_for_receipt(statement_month)
     return list(
         Receipt.objects.available_files()
         .filter(
-            submission__period_month=statement_month,
+            submission__period_month=submission_month,
             submission__user__is_staff=False,
             submission__user__is_superuser=False,
         )
@@ -484,17 +496,20 @@ def _receipt_components(
 
 
 def _historical_receipts_for_statement_month(statement_month: date) -> list[Receipt]:
-    """契約変更推定に使う過去3提出サイクルの領収書メタデータ。
+    """契約変更推定に使う過去3領収書月のメタデータ。
 
-    ファイル保存期限を過ぎても、抽出済みの日付・金額・プラン名はDBに残るため、
-    available_files() では絞らない。
+    現在の明細月Mに対応する領収書は提出サイクルM+1へ保存されるため、
+    過去3領収書月はその直前3提出サイクルから取得する。ファイル保存期限を
+    過ぎても、抽出済みの日付・金額・プラン名はDBに残るためavailable_files()
+    では絞らない。
     """
 
-    start_month = add_months(statement_month, -3)
+    current_submission_month = submission_month_for_receipt(statement_month)
+    start_submission_month = add_months(current_submission_month, -3)
     return list(
         Receipt.objects.filter(
-            submission__period_month__gte=start_month,
-            submission__period_month__lt=statement_month,
+            submission__period_month__gte=start_submission_month,
+            submission__period_month__lt=current_submission_month,
             submission__user__is_staff=False,
             submission__user__is_superuser=False,
         )
@@ -1334,7 +1349,7 @@ def reconcile_card_statement_items(statement_id: int, *, preserve_manual: bool =
             deleted, _ = MonthlyServiceDeclaration.objects.filter(
                 user=item.matched_service.user,
                 service=item.matched_service,
-                period_month=statement.period_month,
+                period_month=statement.submission_month,
                 no_usage=True,
             ).delete()
             if deleted:
@@ -1430,6 +1445,7 @@ def reconcile_card_statement_items(statement_id: int, *, preserve_manual: bool =
         extraction_memo = (statement.ai_admin_memo or "").split("【照合結果】", 1)[0]
         for marker in (
             CARD_STATEMENT_MONTH_SEMANTICS_RECONCILE_MARKER,
+            CARD_STATEMENT_SAME_MONTH_RECEIPT_RECONCILE_MARKER,
             CARD_STATEMENT_MATCHING_RULES_RECONCILE_MARKER,
             CARD_LAST4_EVIDENCE_RECONCILE_MARKER,
             EXACT_AMOUNT_MATCHING_RECONCILE_MARKER,

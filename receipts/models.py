@@ -45,13 +45,15 @@ def submission_month_for_receipt(receipt_month):
 
 
 def receipt_month_for_statement(statement_month):
-    """ご利用代金明細の月に対応する領収書月を返す。
+    """ご利用代金明細の月に対応する領収書発行月を返す。
 
-    ReceiptHubでは、7月分の全社ご利用代金明細は6月分の領収書と照合する。
-    ユーザーの7月提出サイクルにも、同じ6月分領収書が保存される。
+    全社明細月と領収書発行月は同じ月として扱う。例えば2026年7月分の
+    全社明細書は、ユーザーが「領収書発行月 2026年7月」として登録した
+    領収書と照合する。これらの領収書は内部的には2026年8月提出サイクルに
+    保存される。
     """
 
-    return receipt_month_for_submission(statement_month)
+    return month_start(statement_month)
 
 
 def retention_months() -> int:
@@ -1430,12 +1432,14 @@ class CardStatement(models.Model):
 
     @property
     def submission_month(self):
-        """対象領収書が保存される提出月。
+        """対象領収書が内部保存される提出サイクル月。
 
-        明細月と提出月は同じで、どちらも前月分の領収書を対象とする。
+        明細月と領収書発行月は同じ月であり、その領収書は翌月の提出
+        サイクルに保存される。例えば2026年7月明細は、内部的には
+        2026年8月提出サイクルにある2026年7月発行の領収書を参照する。
         """
 
-        return month_start(self.period_month)
+        return submission_month_for_receipt(self.period_month)
 
     @property
     def missing_receipt_count(self) -> int:
@@ -1953,13 +1957,15 @@ def mark_statement_reconciliation_pending_after_receipt_save(sender, instance: R
     if not instance.file_available:
         return
 
-    period_month = month_start(instance.submission.period_month)
+    # 領収書は「発行月の翌月」の提出サイクルに保存される。
+    # 同じ発行月の全社明細だけを再照合待ちにする。
+    statement_month = receipt_month_for_submission(instance.submission.period_month)
 
     def mark_pending():
         from .statement_processing import RECEIPT_CHANGE_RECONCILE_MARKER
 
         statements = list(
-            CardStatement.objects.filter(period_month=period_month)
+            CardStatement.objects.filter(period_month=statement_month)
             .exclude(status__in=[CardStatementStatus.PROCESSING, CardStatementStatus.FAILED])
             .only("pk", "ai_admin_memo")
         )

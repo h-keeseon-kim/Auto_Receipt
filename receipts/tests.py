@@ -37,6 +37,7 @@ from .monthly_status import build_user_month_summary
 from .statement_ai import StatementAnalysisItem, StatementAnalysisResult, build_statement_result_from_payload
 from .statement_processing import (
     CARD_STATEMENT_MONTH_SEMANTICS_RECONCILE_MARKER,
+    CARD_STATEMENT_SAME_MONTH_RECEIPT_RECONCILE_MARKER,
     RECEIPT_CHANGE_RECONCILE_MARKER,
     DATE_MATCH_TOLERANCE_DAYS,
     _available_receipts_for_statement_month,
@@ -1629,7 +1630,7 @@ Google AI Ultra (30 TB) (Google One)
         with mock.patch("receipts.statement_processing.reconcile_card_statement_items") as reconcile_mock:
             with self.captureOnCommitCallbacks(execute=True):
                 response = self.client.post(
-                    reverse("dashboard") + "?month=2026-06",
+                    reverse("dashboard") + "?receipt_month=2026-06",
                     {
                         "action": "add_receipts",
                         "service": str(self.service.id),
@@ -3729,6 +3730,15 @@ class FinalWorkflowAcceptanceTests(TestCase):
             expires_at=timezone.now() + timedelta(days=30),
         )
 
+    def create_statement_receipt(self, *, service=None, filename="receipt.pdf"):
+        """2026年7月明細向けの7月発行領収書（内部提出サイクル8月）。"""
+
+        return self.create_receipt(
+            service=service,
+            month=date(2026, 8, 1),
+            filename=filename,
+        )
+
     def test_submission_requires_receipt_or_no_usage_for_every_service(self):
         receipt = self.create_receipt(service=self.subscription)
         submission = receipt.submission
@@ -3868,7 +3878,7 @@ class FinalWorkflowAcceptanceTests(TestCase):
         self.assertFalse(receipt_path.exists())
 
     def test_statement_payload_treats_selected_month_as_statement_month(self):
-        self.assertEqual(receipt_month_for_statement(date(2026, 7, 1)), date(2026, 6, 1))
+        self.assertEqual(receipt_month_for_statement(date(2026, 7, 1)), date(2026, 7, 1))
         result = build_statement_result_from_payload(
             {
                 "card_last4": "7210",
@@ -3944,7 +3954,7 @@ class FinalWorkflowAcceptanceTests(TestCase):
         MonthlyServiceDeclaration.objects.create(
             user=self.user,
             service=self.api_service,
-            period_month=date(2026, 7, 1),
+            period_month=date(2026, 8, 1),
             no_usage=True,
             declared_by=self.user,
         )
@@ -3987,7 +3997,7 @@ class FinalWorkflowAcceptanceTests(TestCase):
             MonthlyServiceDeclaration.objects.filter(
                 user=self.user,
                 service=self.api_service,
-                period_month=date(2026, 7, 1),
+                period_month=date(2026, 8, 1),
             ).exists()
         )
         self.assertTrue(item.needs_highlight)
@@ -3997,10 +4007,10 @@ class FinalWorkflowAcceptanceTests(TestCase):
 
     @mock.patch("receipts.statement_processing.generate_card_statement_analysis")
     def test_statement_processing_links_existing_receipt(self, mocked_analysis):
-        receipt = self.create_receipt(service=self.subscription)
+        receipt = self.create_statement_receipt(service=self.subscription)
         receipt.amount = Decimal("220.00")
         receipt.currency = "USD"
-        receipt.issued_on = date(2026, 6, 3)
+        receipt.issued_on = date(2026, 7, 3)
         receipt.ai_extracted_payee = "OPENAI *CHATGPT"
         receipt.save(update_fields=["amount", "currency", "issued_on", "ai_extracted_payee"])
         statement = CardStatement.objects.create(
@@ -4020,7 +4030,7 @@ class FinalWorkflowAcceptanceTests(TestCase):
             items=(
                 StatementAnalysisItem(
                     line_reference="0276",
-                    transaction_date=date(2026, 6, 3),
+                    transaction_date=date(2026, 7, 3),
                     merchant_name="OPENAI *CHATGPT",
                     amount_jpy=Decimal("35949"),
                     original_amount=Decimal("220"),
@@ -4041,8 +4051,12 @@ class FinalWorkflowAcceptanceTests(TestCase):
         self.assertEqual(item.receipt_status_label, "提出済み")
 
     @mock.patch("receipts.statement_processing.generate_card_statement_analysis")
-    def test_july_statement_matches_june_receipt_in_july_submission_not_august_submission(self, mocked_analysis):
-        june_receipt = self.create_receipt(service=self.subscription, month=date(2026, 7, 1), filename="june.pdf")
+    def test_july_statement_matches_july_receipt_in_august_submission_not_june_receipt(self, mocked_analysis):
+        june_receipt = self.create_receipt(
+            service=self.subscription,
+            month=date(2026, 7, 1),
+            filename="june.pdf",
+        )
         june_receipt.amount = Decimal("220.00")
         june_receipt.currency = "USD"
         june_receipt.issued_on = date(2026, 6, 3)
@@ -4050,7 +4064,7 @@ class FinalWorkflowAcceptanceTests(TestCase):
         june_receipt.save(update_fields=["amount", "currency", "issued_on", "ai_extracted_payee"])
 
         august_submission = Submission.objects.create(user=self.user, period_month=date(2026, 8, 1))
-        august_receipt = Receipt.objects.create(
+        july_receipt = Receipt.objects.create(
             submission=august_submission,
             service=self.subscription,
             service_name_snapshot=self.subscription.name,
@@ -4080,7 +4094,7 @@ class FinalWorkflowAcceptanceTests(TestCase):
             items=(
                 StatementAnalysisItem(
                     line_reference="0276",
-                    transaction_date=date(2026, 6, 3),
+                    transaction_date=date(2026, 7, 3),
                     merchant_name="OPENAI *CHATGPT",
                     amount_jpy=Decimal("35949"),
                     original_amount=Decimal("220"),
@@ -4089,19 +4103,25 @@ class FinalWorkflowAcceptanceTests(TestCase):
                     match_status=StatementMatchStatus.MATCHED,
                     receipt_required=True,
                     confidence=0.99,
-                    reason="6月分ChatGPT領収書と一致。",
+                    reason="7月発行のChatGPT領収書と一致。",
                 ),
             ),
         )
 
         process_card_statement(statement.pk)
         item = statement.items.get()
-        self.assertEqual(item.matched_receipt, june_receipt)
-        self.assertNotEqual(item.matched_receipt, august_receipt)
-        self.assertEqual(item.matched_receipt.submission.period_month, date(2026, 7, 1))
+        self.assertEqual(item.matched_receipt, july_receipt)
+        self.assertNotEqual(item.matched_receipt, june_receipt)
+        self.assertEqual(item.matched_receipt.submission.period_month, date(2026, 8, 1))
+        self.assertEqual(statement.target_receipt_month, date(2026, 7, 1))
+        self.assertEqual(statement.submission_month, date(2026, 8, 1))
 
-    def test_existing_statement_is_reconciled_once_with_same_month_submission_after_upgrade(self):
-        june_receipt = self.create_receipt(service=self.subscription, month=date(2026, 7, 1), filename="june.pdf")
+    def test_existing_statement_is_reconciled_once_with_same_receipt_month_after_upgrade(self):
+        june_receipt = self.create_receipt(
+            service=self.subscription,
+            month=date(2026, 7, 1),
+            filename="june.pdf",
+        )
         june_receipt.amount = Decimal("220.00")
         june_receipt.currency = "USD"
         june_receipt.issued_on = date(2026, 6, 3)
@@ -4109,17 +4129,17 @@ class FinalWorkflowAcceptanceTests(TestCase):
         june_receipt.save(update_fields=["amount", "currency", "issued_on", "ai_extracted_payee"])
 
         august_submission = Submission.objects.create(user=self.user, period_month=date(2026, 8, 1))
-        wrong_august_receipt = Receipt.objects.create(
+        july_receipt = Receipt.objects.create(
             submission=august_submission,
             service=self.subscription,
             service_name_snapshot=self.subscription.name,
             billing_type_snapshot=self.subscription.billing_type,
-            original_filename="wrong-august.pdf",
+            original_filename="july.pdf",
             amount=Decimal("220.00"),
             currency="USD",
             issued_on=date(2026, 7, 3),
             ai_extracted_payee="OPENAI *CHATGPT",
-            file=SimpleUploadedFile("wrong-august.pdf", b"%PDF-1.4 wrong", content_type="application/pdf"),
+            file=SimpleUploadedFile("july.pdf", b"%PDF-1.4 july", content_type="application/pdf"),
             expires_at=timezone.now() + timedelta(days=30),
         )
         statement = CardStatement.objects.create(
@@ -4131,7 +4151,7 @@ class FinalWorkflowAcceptanceTests(TestCase):
             card_last4="7210",
             statement_period="2026-07",
             payment_date=date(2026, 7, 29),
-            ai_admin_memo=CARD_STATEMENT_MONTH_SEMANTICS_RECONCILE_MARKER,
+            ai_admin_memo=CARD_STATEMENT_SAME_MONTH_RECEIPT_RECONCILE_MARKER,
             uploaded_by=self.superuser,
             expires_at=timezone.now() + timedelta(days=30),
         )
@@ -4139,7 +4159,7 @@ class FinalWorkflowAcceptanceTests(TestCase):
             statement=statement,
             sequence=1,
             line_reference="0276",
-            transaction_date=date(2026, 6, 3),
+            transaction_date=date(2026, 7, 3),
             merchant_name="OPENAI *CHATGPT",
             amount_jpy=Decimal("35949"),
             original_amount=Decimal("220"),
@@ -4147,10 +4167,10 @@ class FinalWorkflowAcceptanceTests(TestCase):
             matched_user=self.user,
             matched_catalog_service=self.subscription_catalog,
             matched_service=self.subscription,
-            matched_receipt=wrong_august_receipt,
+            matched_receipt=june_receipt,
             match_status=StatementMatchStatus.MATCHED,
             match_confidence=0.95,
-            match_memo="旧ルールによる自動照合。",
+            match_memo="旧月次ルールによる自動照合。",
             receipt_required=True,
         )
 
@@ -4159,24 +4179,24 @@ class FinalWorkflowAcceptanceTests(TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertContains(response, "ご利用代金明細月")
-        self.assertContains(response, "対象領収書月")
-        self.assertContains(response, "2026年06月")
+        self.assertContains(response, "領収書発行月")
+        self.assertContains(response, "2026年07月")
         self.assertContains(response, 'class="statement-result-list"')
         self.assertContains(response, "statement-result-card")
         self.assertNotContains(response, "global-statement-table")
         self.assertNotContains(response, "table-scroll-wide")
         item.refresh_from_db()
         statement.refresh_from_db()
-        self.assertEqual(item.matched_receipt, june_receipt)
-        self.assertNotEqual(item.matched_receipt, wrong_august_receipt)
-        self.assertNotIn(CARD_STATEMENT_MONTH_SEMANTICS_RECONCILE_MARKER, statement.ai_admin_memo)
+        self.assertEqual(item.matched_receipt, july_receipt)
+        self.assertNotEqual(item.matched_receipt, june_receipt)
+        self.assertNotIn(CARD_STATEMENT_SAME_MONTH_RECEIPT_RECONCILE_MARKER, statement.ai_admin_memo)
 
     @mock.patch("receipts.statement_processing.generate_card_statement_analysis")
     def test_statement_rows_use_distinct_receipts_and_keep_extra_charge_highlighted(self, mocked_analysis):
-        first_receipt = self.create_receipt(service=self.subscription, filename="first.pdf")
+        first_receipt = self.create_statement_receipt(service=self.subscription, filename="first.pdf")
         first_receipt.amount = Decimal("220.00")
         first_receipt.currency = "USD"
-        first_receipt.issued_on = date(2026, 6, 3)
+        first_receipt.issued_on = date(2026, 7, 3)
         first_receipt.ai_extracted_payee = "OPENAI *CHATGPT"
         first_receipt.save(update_fields=["amount", "currency", "issued_on", "ai_extracted_payee"])
         statement = CardStatement.objects.create(
@@ -4196,7 +4216,7 @@ class FinalWorkflowAcceptanceTests(TestCase):
             items=(
                 StatementAnalysisItem(
                     line_reference="0276",
-                    transaction_date=date(2026, 6, 3),
+                    transaction_date=date(2026, 7, 3),
                     merchant_name="OPENAI *CHATGPT",
                     amount_jpy=Decimal("35949"),
                     original_amount=Decimal("220"),
@@ -4209,7 +4229,7 @@ class FinalWorkflowAcceptanceTests(TestCase):
                 ),
                 StatementAnalysisItem(
                     line_reference="0277",
-                    transaction_date=date(2026, 6, 4),
+                    transaction_date=date(2026, 7, 4),
                     merchant_name="OPENAI *CHATGPT",
                     amount_jpy=Decimal("3595"),
                     original_amount=Decimal("22"),
@@ -4229,10 +4249,10 @@ class FinalWorkflowAcceptanceTests(TestCase):
         self.assertIsNone(items[1].matched_receipt)
         self.assertTrue(items[1].needs_highlight)
 
-        second_receipt = self.create_receipt(service=self.subscription, filename="second.pdf")
+        second_receipt = self.create_statement_receipt(service=self.subscription, filename="second.pdf")
         second_receipt.amount = Decimal("22.00")
         second_receipt.currency = "USD"
-        second_receipt.issued_on = date(2026, 6, 4)
+        second_receipt.issued_on = date(2026, 7, 4)
         second_receipt.ai_extracted_payee = "OPENAI *CHATGPT"
         second_receipt.save(update_fields=["amount", "currency", "issued_on", "ai_extracted_payee"])
         items = list(statement.items.order_by("sequence"))
@@ -4274,7 +4294,7 @@ class FinalWorkflowAcceptanceTests(TestCase):
         self.assertContains(response, "領収書未提出")
         self.assertContains(response, "API利用確認待ち")
         self.assertContains(response, "全社ご利用代金明細との照合")
-        self.assertContains(response, reverse("staff_card_statements") + "?month=2026-07")
+        self.assertContains(response, reverse("staff_card_statements") + "?month=2026-06")
         self.assertContains(response, "管理者代理アップロード")
         self.assertContains(response, 'type="file"')
 
@@ -4294,7 +4314,7 @@ class FinalWorkflowAcceptanceTests(TestCase):
         )
         other_submission = Submission.objects.create(
             user=other_user,
-            period_month=date(2026, 7, 1),
+            period_month=date(2026, 8, 1),
         )
         other_receipt = Receipt.objects.create(
             submission=other_submission,
@@ -4302,10 +4322,10 @@ class FinalWorkflowAcceptanceTests(TestCase):
             service_name_snapshot=other_service.name,
             billing_type_snapshot=other_service.billing_type,
             original_filename="other-openai.pdf",
-            generated_filename="260603_other_OpenAI_220_USD.pdf",
+            generated_filename="260703_other_OpenAI_220_USD.pdf",
             amount=Decimal("220.00"),
             currency="USD",
-            issued_on=date(2026, 6, 3),
+            issued_on=date(2026, 7, 3),
             ai_extracted_payee="OPENAI *CHATGPT",
             ai_filename_status=ReceiptFilenameStatus.GENERATED,
             file=SimpleUploadedFile(
@@ -4332,7 +4352,7 @@ class FinalWorkflowAcceptanceTests(TestCase):
             items=(
                 StatementAnalysisItem(
                     line_reference="0276",
-                    transaction_date=date(2026, 6, 3),
+                    transaction_date=date(2026, 7, 3),
                     merchant_name="OPENAI *CHATGPT",
                     amount_jpy=Decimal("35949"),
                     original_amount=Decimal("220"),
@@ -4356,7 +4376,7 @@ class FinalWorkflowAcceptanceTests(TestCase):
         self.client.login(username="admin", password="admin-password-123")
         response = self.client.get(reverse("staff_card_statements") + "?month=2026-07")
         self.assertNotContains(response, "other@example.com")
-        self.assertContains(response, "260603_other_OpenAI_220_USD.pdf")
+        self.assertContains(response, "260703_other_OpenAI_220_USD.pdf")
         self.assertNotContains(response, 'class="statement-unmatched-row"')
         self.assertNotContains(response, "照合候補")
 
@@ -4388,7 +4408,7 @@ class FinalWorkflowAcceptanceTests(TestCase):
         self,
         *,
         reference="0274",
-        transaction_date=date(2026, 6, 10),
+        transaction_date=date(2026, 7, 10),
         merchant="CLAUDE.AI SUBSCR ANTHROPIC.COM",
         amount="22.00",
         currency="USD",
@@ -4422,10 +4442,10 @@ class FinalWorkflowAcceptanceTests(TestCase):
             billing_type=claude_catalog.billing_type,
             registered_by=self.superuser,
         )
-        receipt = self.create_receipt(service=claude_service, filename="anthropic-22.pdf")
+        receipt = self.create_statement_receipt(service=claude_service, filename="anthropic-22.pdf")
         receipt.amount = Decimal("22.00")
         receipt.currency = "USD"
-        receipt.issued_on = date(2026, 6, 10)
+        receipt.issued_on = date(2026, 7, 10)
         receipt.ai_extracted_payee = "Anthropic, PBC"
         receipt.save(update_fields=["amount", "currency", "issued_on", "ai_extracted_payee"])
         statement = self._create_processing_statement()
@@ -4444,10 +4464,10 @@ class FinalWorkflowAcceptanceTests(TestCase):
 
     @mock.patch("receipts.statement_processing.generate_card_statement_analysis")
     def test_statement_matches_receipt_within_plus_or_minus_one_day(self, mocked_analysis):
-        receipt = self.create_receipt(filename="anthropic-next-day.pdf")
+        receipt = self.create_statement_receipt(filename="anthropic-next-day.pdf")
         receipt.amount = Decimal("22")
         receipt.currency = "USD"
-        receipt.issued_on = date(2026, 6, 11)
+        receipt.issued_on = date(2026, 7, 11)
         receipt.ai_extracted_payee = "ANTHROPIC"
         receipt.save(update_fields=["amount", "currency", "issued_on", "ai_extracted_payee"])
         statement = self._create_processing_statement()
@@ -4462,10 +4482,10 @@ class FinalWorkflowAcceptanceTests(TestCase):
 
     @mock.patch("receipts.statement_processing.generate_card_statement_analysis")
     def test_statement_does_not_match_receipt_outside_one_day(self, mocked_analysis):
-        receipt = self.create_receipt(filename="anthropic-two-days-later.pdf")
+        receipt = self.create_statement_receipt(filename="anthropic-two-days-later.pdf")
         receipt.amount = Decimal("22.00")
         receipt.currency = "USD"
-        receipt.issued_on = date(2026, 6, 12)
+        receipt.issued_on = date(2026, 7, 12)
         receipt.ai_extracted_payee = "Anthropic, PBC"
         receipt.save(update_fields=["amount", "currency", "issued_on", "ai_extracted_payee"])
         statement = self._create_processing_statement()
@@ -4481,10 +4501,10 @@ class FinalWorkflowAcceptanceTests(TestCase):
 
     @mock.patch("receipts.statement_processing.generate_card_statement_analysis")
     def test_statement_does_not_match_different_amount_even_when_payee_and_date_match(self, mocked_analysis):
-        receipt = self.create_receipt(filename="anthropic-22.pdf")
+        receipt = self.create_statement_receipt(filename="anthropic-22.pdf")
         receipt.amount = Decimal("22.00")
         receipt.currency = "USD"
-        receipt.issued_on = date(2026, 6, 10)
+        receipt.issued_on = date(2026, 7, 10)
         receipt.ai_extracted_payee = "Anthropic, PBC"
         receipt.save(update_fields=["amount", "currency", "issued_on", "ai_extracted_payee"])
         statement = self._create_processing_statement()
@@ -4501,10 +4521,10 @@ class FinalWorkflowAcceptanceTests(TestCase):
 
     @mock.patch("receipts.statement_processing.generate_card_statement_analysis")
     def test_statement_does_not_match_unrelated_payee_even_when_amount_and_date_match(self, mocked_analysis):
-        receipt = self.create_receipt(filename="openai-22.pdf")
+        receipt = self.create_statement_receipt(filename="openai-22.pdf")
         receipt.amount = Decimal("22.00")
         receipt.currency = "USD"
-        receipt.issued_on = date(2026, 6, 10)
+        receipt.issued_on = date(2026, 7, 10)
         receipt.ai_extracted_payee = "OpenAI, LLC"
         receipt.save(update_fields=["amount", "currency", "issued_on", "ai_extracted_payee"])
         statement = self._create_processing_statement()
@@ -4518,10 +4538,10 @@ class FinalWorkflowAcceptanceTests(TestCase):
 
     @mock.patch("receipts.statement_processing.generate_card_statement_analysis")
     def test_multiple_similar_receipts_are_assigned_arbitrarily_one_to_one(self, mocked_analysis):
-        first = self.create_receipt(filename="anthropic-a.pdf")
+        first = self.create_statement_receipt(filename="anthropic-a.pdf")
         first.amount = Decimal("22.00")
         first.currency = "USD"
-        first.issued_on = date(2026, 6, 9)
+        first.issued_on = date(2026, 7, 9)
         first.ai_extracted_payee = "Anthropic, PBC"
         first.save(update_fields=["amount", "currency", "issued_on", "ai_extracted_payee"])
 
@@ -4537,7 +4557,7 @@ class FinalWorkflowAcceptanceTests(TestCase):
             billing_type=self.subscription_catalog.billing_type,
             registered_by=self.superuser,
         )
-        other_submission = Submission.objects.create(user=other_user, period_month=date(2026, 7, 1))
+        other_submission = Submission.objects.create(user=other_user, period_month=date(2026, 8, 1))
         second = Receipt.objects.create(
             submission=other_submission,
             service=other_service,
@@ -4546,7 +4566,7 @@ class FinalWorkflowAcceptanceTests(TestCase):
             original_filename="anthropic-b.pdf",
             amount=Decimal("22.00"),
             currency="USD",
-            issued_on=date(2026, 6, 11),
+            issued_on=date(2026, 7, 11),
             ai_extracted_payee="ANTHROPIC",
             file=SimpleUploadedFile(
                 "anthropic-b.pdf",
@@ -4574,8 +4594,8 @@ class FinalWorkflowAcceptanceTests(TestCase):
     @mock.patch("receipts.statement_processing.generate_card_statement_analysis")
     def test_one_statement_line_uses_one_of_multiple_similar_receipts_without_candidate_state(self, mocked_analysis):
         receipts = []
-        for index, issued_on in enumerate((date(2026, 6, 9), date(2026, 6, 11)), start=1):
-            receipt = self.create_receipt(filename=f"anthropic-{index}.pdf")
+        for index, issued_on in enumerate((date(2026, 7, 9), date(2026, 7, 11)), start=1):
+            receipt = self.create_statement_receipt(filename=f"anthropic-{index}.pdf")
             receipt.amount = Decimal("22.00")
             receipt.currency = "USD"
             receipt.issued_on = issued_on
@@ -4606,17 +4626,17 @@ class FinalWorkflowAcceptanceTests(TestCase):
             billing_type=self.subscription_catalog.billing_type,
             registered_by=self.superuser,
         )
-        other_submission = Submission.objects.create(user=other_user, period_month=date(2026, 7, 1))
+        other_submission = Submission.objects.create(user=other_user, period_month=date(2026, 8, 1))
         Receipt.objects.create(
             submission=other_submission,
             service=other_service,
             service_name_snapshot=other_service.name,
             billing_type_snapshot=other_service.billing_type,
             original_filename="anthropic-22.pdf",
-            generated_filename="260610_hidden_Anthropic_22_USD.pdf",
+            generated_filename="260710_hidden_Anthropic_22_USD.pdf",
             amount=Decimal("22.00"),
             currency="USD",
-            issued_on=date(2026, 6, 10),
+            issued_on=date(2026, 7, 10),
             ai_extracted_payee="Anthropic, PBC",
             file=SimpleUploadedFile(
                 "anthropic-22.pdf",
@@ -4635,7 +4655,7 @@ class FinalWorkflowAcceptanceTests(TestCase):
         self.client.login(username="admin", password="admin-password-123")
         response = self.client.get(reverse("staff_card_statements") + "?month=2026-07")
 
-        self.assertContains(response, "260610_hidden_Anthropic_22_USD.pdf")
+        self.assertContains(response, "260710_hidden_Anthropic_22_USD.pdf")
         self.assertNotContains(response, "hidden-user@example.com")
         self.assertNotContains(response, "照合候補")
         self.assertNotContains(response, "この領収書で確定")
@@ -4658,7 +4678,7 @@ class FinalWorkflowAcceptanceTests(TestCase):
             statement=statement,
             sequence=1,
             line_reference="X1",
-            transaction_date=date(2026, 6, 10),
+            transaction_date=date(2026, 7, 10),
             merchant_name="ANTHROPIC",
             original_amount=Decimal("22.00"),
             original_currency="USD",
@@ -4714,7 +4734,7 @@ class FinalWorkflowAcceptanceTests(TestCase):
         self.assertNotIn(self.subscription.pk, scoped_service_ids)
         self.assertIn(self.api_service.pk, scoped_service_ids)
 
-        receipt = self.create_receipt(service=self.subscription, filename="non-p-card.pdf")
+        receipt = self.create_statement_receipt(service=self.subscription, filename="non-p-card.pdf")
         receipt.refresh_from_db()
         self.assertFalse(receipt.p_card_usage_snapshot)
         available_receipt_ids = {
@@ -4758,8 +4778,8 @@ class FinalWorkflowAcceptanceTests(TestCase):
         self.assertTrue(CardStatement.objects.filter(pk=statement.pk).exists())
 
     def test_staff_can_download_slack_shareable_statement_reconciliation_pdf(self):
-        receipt = self.create_receipt(service=self.subscription, filename="matched.pdf")
-        receipt.generated_filename = "260603_user_OpenAI_220_USD.pdf"
+        receipt = self.create_statement_receipt(service=self.subscription, filename="matched.pdf")
+        receipt.generated_filename = "260703_user_OpenAI_220_USD.pdf"
         receipt.save(update_fields=["generated_filename"])
         statement = CardStatement.objects.create(
             period_month=date(2026, 7, 1),
@@ -4780,7 +4800,7 @@ class FinalWorkflowAcceptanceTests(TestCase):
             statement=statement,
             sequence=1,
             line_reference="0276",
-            transaction_date=date(2026, 6, 3),
+            transaction_date=date(2026, 7, 3),
             merchant_name="OPENAI *CHATGPT",
             amount_jpy=Decimal("35949"),
             original_amount=Decimal("220"),
@@ -4797,7 +4817,7 @@ class FinalWorkflowAcceptanceTests(TestCase):
             statement=statement,
             sequence=2,
             line_reference="0302",
-            transaction_date=date(2026, 6, 16),
+            transaction_date=date(2026, 7, 16),
             merchant_name="OPENAI",
             amount_jpy=Decimal("8236"),
             original_amount=Decimal("49.92"),
@@ -4847,7 +4867,7 @@ class FinalWorkflowAcceptanceTests(TestCase):
             statement=statement,
             sequence=1,
             line_reference="0302",
-            transaction_date=date(2026, 6, 16),
+            transaction_date=date(2026, 7, 16),
             merchant_name="OPENAI",
             amount_jpy=Decimal("8236"),
             original_amount=Decimal("49.92"),
@@ -4873,7 +4893,7 @@ class FinalWorkflowAcceptanceTests(TestCase):
 
         self.assertTrue(payload.startswith(b"%PDF-"))
         rendered_text = "\n".join(captured_text)
-        self.assertIn("2026年07月明細 / 対象領収書月 2026年06月", rendered_text)
+        self.assertIn("2026年07月明細 / 領収書発行月 2026年07月", rendered_text)
         self.assertIn("未一致・解析要確認", rendered_text)
         self.assertNotIn("未提出・手動確認対象", rendered_text)
         self.assertNotIn("未提出・確認対象", rendered_text)
@@ -4910,8 +4930,8 @@ class FinalWorkflowAcceptanceTests(TestCase):
         self.assertEqual(response.status_code, 404)
 
     def test_statement_result_filter_and_unmatched_submitted_receipts_are_visible(self):
-        unused_receipt = self.create_receipt(filename="金_Github_11USD.pdf")
-        unused_receipt.generated_filename = "260621_keeseon.kim_GitHub_Copilot_11_USD.pdf"
+        unused_receipt = self.create_statement_receipt(filename="金_Github_11USD.pdf")
+        unused_receipt.generated_filename = "260721_keeseon.kim_GitHub_Copilot_11_USD.pdf"
         unused_receipt.save(update_fields=["generated_filename"])
         statement = CardStatement.objects.create(
             period_month=date(2026, 7, 1),
@@ -4946,7 +4966,7 @@ class FinalWorkflowAcceptanceTests(TestCase):
             statement=statement,
             sequence=1,
             line_reference="0385",
-            transaction_date=date(2026, 6, 21),
+            transaction_date=date(2026, 7, 21),
             merchant_name="UNMATCHED GITHUB LINE",
             original_amount=Decimal("1.10"),
             original_currency="USD",
@@ -4957,7 +4977,7 @@ class FinalWorkflowAcceptanceTests(TestCase):
             statement=statement,
             sequence=2,
             line_reference="0379",
-            transaction_date=date(2026, 6, 24),
+            transaction_date=date(2026, 7, 24),
             merchant_name="MATCHED GOOGLE ONE LINE",
             amount_jpy=Decimal("32000"),
             match_status=StatementMatchStatus.MATCHED,
@@ -4967,7 +4987,7 @@ class FinalWorkflowAcceptanceTests(TestCase):
             statement=statement,
             sequence=3,
             line_reference="0343",
-            transaction_date=date(2026, 6, 8),
+            transaction_date=date(2026, 7, 8),
             merchant_name="INFERRED CLAUDE LINE",
             original_amount=Decimal("22.00"),
             original_currency="USD",
@@ -4991,7 +5011,7 @@ class FinalWorkflowAcceptanceTests(TestCase):
         self.assertContains(response, '<span class="label">未一致</span>', html=True)
         self.assertNotContains(response, '<span class="label">AI解析中</span>', html=True)
         self.assertNotContains(response, '<span class="label">推定対応</span>', html=True)
-        self.assertContains(response, "260621_keeseon.kim_GitHub_Copilot_11_USD.pdf")
+        self.assertContains(response, "260721_keeseon.kim_GitHub_Copilot_11_USD.pdf")
         self.assertContains(response, "1.10 USD")
         self.assertContains(response, "11.00 USD")
 
@@ -5027,7 +5047,7 @@ class FinalWorkflowAcceptanceTests(TestCase):
             statement_period="2026-07",
             unmatched_receipt_components=[
                 {
-                    "filename": "260621_keeseon.kim_GitHub_Copilot_11_USD.pdf",
+                    "filename": "260721_keeseon.kim_GitHub_Copilot_11_USD.pdf",
                     "user": "keeseon.kim@hakuhodo.co.jp",
                     "service": "GitHub（サブスク）",
                     "service_label": "GitHub Copilot",
@@ -5049,7 +5069,7 @@ class FinalWorkflowAcceptanceTests(TestCase):
             statement=statement,
             sequence=1,
             line_reference="0385",
-            transaction_date=date(2026, 6, 21),
+            transaction_date=date(2026, 7, 21),
             merchant_name="GITHUB",
             original_amount=Decimal("1.10"),
             original_currency="USD",
@@ -5089,12 +5109,12 @@ class FinalWorkflowAcceptanceTests(TestCase):
         )
         historical = self.create_receipt(
             service=claude_service,
-            month=date(2026, 6, 1),
-            filename="260508_uchiyama_Claude_Pro_22_USD.pdf",
+            month=date(2026, 7, 1),
+            filename="260608_uchiyama_Claude_Pro_22_USD.pdf",
         )
         historical.amount = Decimal("22.00")
         historical.currency = "USD"
-        historical.issued_on = date(2026, 5, 8)
+        historical.issued_on = date(2026, 6, 8)
         historical.ai_extracted_payee = "Anthropic, PBC"
         historical.ai_extracted_service_label = "Claude"
         historical.ai_extracted_plan_name = historical_plan_name
@@ -5102,25 +5122,24 @@ class FinalWorkflowAcceptanceTests(TestCase):
         historical.plan_change_metadata_checked_at = timezone.now()
         historical.save()
 
-        change = self.create_receipt(
+        change = self.create_statement_receipt(
             service=claude_service,
-            month=date(2026, 7, 1),
-            filename="260606_uchiyama_Claude_Max_218.01_USD.pdf",
+            filename="260706_uchiyama_Claude_Max_218.01_USD.pdf",
         )
         change.amount = Decimal("218.01")
         change.currency = "USD"
-        change.issued_on = date(2026, 6, 6)
+        change.issued_on = date(2026, 7, 6)
         change.ai_extracted_payee = "Anthropic, PBC"
         change.ai_extracted_service_label = "Claude"
         change.ai_extracted_plan_name = "Max plan - 20x"
         change.plan_change_details = {
             "previous_plan": "Claude Pro",
             "new_plan": "Max plan - 20x",
-            "change_date": "2026-06-06",
-            "previous_plan_unused_from": "2026-06-06",
-            "previous_plan_end": "2026-06-08",
-            "new_plan_start": "2026-06-06",
-            "new_plan_end": "2026-07-06",
+            "change_date": "2026-07-06",
+            "previous_plan_unused_from": "2026-07-06",
+            "previous_plan_end": "2026-07-08",
+            "new_plan_start": "2026-07-06",
+            "new_plan_end": "2026-08-06",
             "adjustment_amount": "-1.81",
             "adjustment_currency": "USD",
             "confidence": 0.99,
@@ -5143,7 +5162,7 @@ class FinalWorkflowAcceptanceTests(TestCase):
             statement=statement,
             sequence=1,
             line_reference="0343",
-            transaction_date=date(2026, 6, 8),
+            transaction_date=date(2026, 7, 8),
             merchant_name="ANTHROPIC* CLAUD / ANTHROPIC.COM",
             amount_jpy=Decimal("3663"),
             original_amount=Decimal("22.00"),
@@ -5165,7 +5184,7 @@ class FinalWorkflowAcceptanceTests(TestCase):
         self.assertEqual(inference.change_receipt, change)
         self.assertEqual(inference.historical_receipt, historical)
         self.assertEqual(inference.previous_plan, "Claude Pro")
-        self.assertEqual(inference.previous_plan_end, date(2026, 6, 8))
+        self.assertEqual(inference.previous_plan_end, date(2026, 7, 8))
         self.assertEqual(inference.amount, Decimal("22.00"))
 
         self.client.login(username="admin", password="admin-password-123")
@@ -5208,7 +5227,7 @@ class FinalWorkflowAcceptanceTests(TestCase):
             statement=previous_statement,
             sequence=15,
             line_reference="0285",
-            transaction_date=date(2026, 5, 8),
+            transaction_date=date(2026, 6, 8),
             merchant_name="CLAUDE.AI SUBSCR / ANTHROPIC.COM",
             amount_jpy=Decimal("3585"),
             original_amount=Decimal("22.00"),
@@ -5217,14 +5236,13 @@ class FinalWorkflowAcceptanceTests(TestCase):
             receipt_required=True,
         )
 
-        change = self.create_receipt(
+        change = self.create_statement_receipt(
             service=claude_service,
-            month=date(2026, 7, 1),
-            filename="260606_uchiyama_Claude_Max_218.01_USD.pdf",
+            filename="260706_uchiyama_Claude_Max_218.01_USD.pdf",
         )
         change.amount = Decimal("218.01")
         change.currency = "USD"
-        change.issued_on = date(2026, 6, 6)
+        change.issued_on = date(2026, 7, 6)
         change.ai_extracted_payee = "Anthropic, PBC"
         change.ai_extracted_service_label = "Claude"
         change.ai_extracted_plan_name = "Max plan - 20x"
@@ -5236,11 +5254,11 @@ class FinalWorkflowAcceptanceTests(TestCase):
         change.plan_change_details = {
             "previous_plan": "Claude Pro",
             "new_plan": "Max plan - 20x",
-            "change_date": "2026-06-06",
-            "previous_plan_unused_from": "2026-06-06",
-            "previous_plan_end": "2026-06-08",
-            "new_plan_start": "2026-06-06",
-            "new_plan_end": "2026-07-06",
+            "change_date": "2026-07-06",
+            "previous_plan_unused_from": "2026-07-06",
+            "previous_plan_end": "2026-07-08",
+            "new_plan_start": "2026-07-06",
+            "new_plan_end": "2026-08-06",
             "adjustment_amount": "-1.81",
             "adjustment_currency": "USD",
             "confidence": 0.99,
@@ -5263,7 +5281,7 @@ class FinalWorkflowAcceptanceTests(TestCase):
             statement=statement,
             sequence=22,
             line_reference="0343",
-            transaction_date=date(2026, 6, 8),
+            transaction_date=date(2026, 7, 8),
             merchant_name="ANTHROPIC* CLAUD / ANTHROPIC.COM",
             amount_jpy=Decimal("3663"),
             original_amount=Decimal("22.00"),
@@ -5335,7 +5353,7 @@ class FinalWorkflowAcceptanceTests(TestCase):
         )
 
     def test_version_file_is_present_without_web_display_requirement(self):
-        self.assertEqual(Path("VERSION").read_text(encoding="utf-8").strip(), "1.15.0")
+        self.assertEqual(Path("VERSION").read_text(encoding="utf-8").strip(), "1.15.4")
 
 
 @override_settings(PASSWORD_HASHERS=FAST_PASSWORD_HASHERS)

@@ -1533,9 +1533,10 @@ def staff_receipt_review(request, pk: int):
 
 
 def reconcile_card_statement_items_for_submission_month(period_month):
-    """提出月と同じ明細月の全社明細を、API再実行なしで再照合する。"""
+    """提出サイクルに対応する領収書発行月の全社明細を再照合する。"""
 
-    for statement_id in CardStatement.objects.filter(period_month=period_month).exclude(
+    statement_month = receipt_month_for_submission(period_month)
+    for statement_id in CardStatement.objects.filter(period_month=statement_month).exclude(
         status__in=[CardStatementStatus.PROCESSING, CardStatementStatus.FAILED]
     ).values_list("pk", flat=True):
         reconcile_card_statement_items(statement_id)
@@ -2038,7 +2039,7 @@ def staff_user_month_status(request, user_id: int):
         ),
         has_open_resubmission_requests=has_open_resubmission_requests,
     )
-    global_statement_count = CardStatement.objects.filter(period_month=selected_month).count()
+    global_statement_count = CardStatement.objects.filter(period_month=target_receipt_month).count()
     return render(
         request,
         "receipts/staff_user_month_status.html",
@@ -2192,7 +2193,7 @@ def global_statement_queryset(period_month):
 def staff_card_statements(request):
     selected_month, month_form = parse_statement_month_from_request(request)
     reconcile_pending_card_statement_month_semantics(period_month=selected_month)
-    # 明細月とユーザー提出月は同じ月。照合対象の領収書はその前月分。
+    # 全社明細月と領収書発行月は同じ月。対象ファイルは翌月の提出サイクルに保存される。
     result_filter = normalize_statement_result_filter(request.GET.get("result"))
     statement_queryset = global_statement_queryset(selected_month)
     statements = list(statement_queryset)
@@ -2255,8 +2256,8 @@ def staff_upload_card_statement(request):
         messages.success(
             request,
             f"全ユーザー共通のご利用代金明細書をアップロードしました。AIで全明細行を抽出し、"
-            f"明細月・提出月 {selected_month:%Y年%m月} の対象領収書月 "
-            f"{receipt_month_for_statement(selected_month):%Y年%m月} に提出された領収書と照合しています。",
+            f"ご利用代金明細月 {selected_month:%Y年%m月} と同じ領収書発行月 "
+            f"{receipt_month_for_statement(selected_month):%Y年%m月} として登録された全ユーザー領収書と照合しています。",
         )
     return redirect(f"{reverse('staff_card_statements')}?month={month_query(selected_month)}")
 

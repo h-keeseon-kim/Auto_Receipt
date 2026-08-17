@@ -5,7 +5,7 @@
 <div class="page-title">
     <div>
         <h1>ご利用代金明細</h1>
-        <p class="muted">会社全体のカード明細を、明細月と同じ提出サイクルに登録された前月分の全ユーザー領収書と一括照合します。</p>
+        <p class="muted">会社全体のカード明細を、同じ領収書発行月として登録された全ユーザー領収書と一括照合します。</p>
     </div>
     <form method="get" class="month-form auto-month-form" data-month-picker-form>
         {% include "receipts/_month_picker.html" with field=month_form.month selected_month=selected_month label="ご利用代金明細月" %}
@@ -23,7 +23,7 @@
     <div class="section-header">
         <div>
             <h2>{{ selected_month|date:"Y年m月" }}分の全社明細書をアップロード</h2>
-            <p class="muted">ユーザーは選択しません。AIが全明細行を抽出した後、対象領収書月 {{ target_receipt_month|date:"Y年m月" }}の全ユーザー領収書を全体一対一で照合します。通常取引に加え、請求・支払額から返金額を差し引いた純額も確認します。直接一致しない明細では、契約変更書類のBill to利用者・旧プラン終了日と、過去領収書または前月カード明細の完全一致金額・請求周期が揃う場合だけ推定対応として提示します。前月カード明細は提出領収書の代わりではなく、旧プラン実績を裏付ける補助証拠として使用します。未一致は赤色、推定対応は橙色、領収書は存在するものの解析項目が不足する場合は黄色で表示します。</p>
+            <p class="muted">ユーザーは選択しません。AIが全明細行を抽出した後、領収書発行月 {{ target_receipt_month|date:"Y年m月" }}として登録された全ユーザー領収書を全体一対一で照合します。通常取引に加え、請求・支払額から返金額を差し引いた純額も確認します。直接一致しない明細では、契約変更書類のBill to利用者・旧プラン終了日と、過去領収書または前月カード明細の完全一致金額・請求周期が揃う場合だけ推定対応として提示します。前月カード明細は提出領収書の代わりではなく、旧プラン実績を裏付ける補助証拠として使用します。未一致は赤色、推定対応は橙色、領収書は存在するものの解析項目が不足する場合は黄色で表示します。</p>
         </div>
     </div>
     <form method="post" enctype="multipart/form-data" action="{% url 'staff_upload_card_statement' %}" class="statement-upload-form">

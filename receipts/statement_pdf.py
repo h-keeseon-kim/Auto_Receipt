@@ -208,9 +208,9 @@ def _metadata_table(statement: CardStatement, styles: dict[str, ParagraphStyle])
     card_label = f"****-{statement.card_last4}" if statement.card_last4 else "-"
     data = [
         [
-            _paragraph("明細月 / 提出月", styles["small"]),
+            _paragraph("ご利用代金明細月", styles["small"]),
             _paragraph(statement.period_month.strftime("%Y年%m月"), styles["body"]),
-            _paragraph("対象領収書月", styles["small"]),
+            _paragraph("領収書発行月", styles["small"]),
             _paragraph(statement.target_receipt_month.strftime("%Y年%m月"), styles["body"]),
             _paragraph("解析ステータス", styles["small"]),
             _paragraph(statement.get_status_display(), styles["body"]),
@@ -443,7 +443,7 @@ def build_card_statement_reconciliation_pdf(statement: CardStatement) -> bytes:
     story: list = [
         Paragraph("ご利用代金明細 照合結果", styles["title"]),
         Paragraph(
-            f"{statement.period_month:%Y年%m月}明細 / 対象領収書月 {statement.target_receipt_month:%Y年%m月}",
+            f"{statement.period_month:%Y年%m月}明細 / 領収書発行月 {statement.target_receipt_month:%Y年%m月}",
             styles["subtitle"],
         ),
         _metadata_table(statement, styles),
