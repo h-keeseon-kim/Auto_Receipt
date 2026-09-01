@@ -50,14 +50,19 @@ from .plan_change_matching import (
 from .statement_matching import (
     AmountOption,
     EvidenceComponent,
+    MATCH_BILLING_BRIDGE,
     MATCH_DIRECT,
     MATCH_LINKED_REFUND_NET,
     MATCH_MERCHANT_REFUND_NET,
     MATCH_ORIGINAL_CHARGE,
+    MATCH_REVERSAL_ORIGINAL_CHARGE,
     ROLE_CHARGE,
     ROLE_REFUND,
+    STATEMENT_ROLE_CHARGE,
+    STATEMENT_ROLE_REVERSAL,
     StatementLine,
     format_evidence_calculation,
+    merchant_keys_compatible,
     reconcile_statement,
 )
 
@@ -88,6 +93,9 @@ EMPIRICAL_MATCHING_RECONCILE_MARKER = (
 SERVICE_LABEL_RECONCILE_MARKER = (
     "【照合ルール更新】法的な払先と領収書本文のサービス名を分離し、Google One等をサービス名で照合するため再照合します。"
 )
+BILLING_DESCRIPTOR_BRIDGE_RECONCILE_MARKER = (
+    "【照合ルール更新】Google Play等の決済名義と領収書本文のサービス名を既知の請求経路として照合し、明細未使用書類は未解決明細だけと比較するため再照合します。"
+)
 PLAN_CHANGE_INFERENCE_RECONCILE_MARKER = (
     "【照合ルール更新】契約変更書類と過去の旧プラン実績による推定対応を追加したため再照合します。"
 )
@@ -99,6 +107,9 @@ PLAN_CHANGE_USER_INFERENCE_RECONCILE_MARKER = (
 )
 RECEIPT_CHANGE_RECONCILE_MARKER = (
     "【領収書更新】領収書の追加・差し替え・AI解析結果更新があったため、最新状態で再照合します。"
+)
+CROSS_MONTH_CARD_NETTING_RECONCILE_MARKER = (
+    "【照合ルール更新】明細内の実利用月を含む領収書参照、法人カード単位の後日返金相殺、返品元決済参照へ更新したため再照合します。"
 )
 
 # 実データでは通常一致56件がすべて同日または1日差だった。
@@ -113,7 +124,8 @@ GENERIC_IDENTITY_TOKENS = {
 # 実明細と実領収書で確認した企業・サービス表記。順序は具体的表記を優先する。
 KNOWN_MERCHANT_PATTERNS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("GOOGLE_CLOUD", ("GOOGLECLOUD", "GCLOUD", "GOOGLECLOUDPLATFORM")),
-    ("GOOGLE_ONE", ("GOOGLEGOOGLEON", "GOOGLEONE")),
+    ("GOOGLE_ONE", ("GOOGLEGOOGLEON", "GOOGLEONE", "GOOGLEAIULTRA")),
+    ("GOOGLE_PLAY", ("GOOGLEPLAY",)),
     ("ANTHROPIC", ("ANTHROPIC", "CLAUDE")),
     ("OPENAI", ("OPENAI", "CHATGPT")),
     ("AUDIOSHAKE", ("AUDIOSHAKE",)),
@@ -138,10 +150,12 @@ def reconcile_pending_card_statement_month_semantics(*, period_month=None, state
         | Q(ai_admin_memo__contains=SIMPLE_RECEIPT_MATCHING_RECONCILE_MARKER)
         | Q(ai_admin_memo__contains=EMPIRICAL_MATCHING_RECONCILE_MARKER)
         | Q(ai_admin_memo__contains=SERVICE_LABEL_RECONCILE_MARKER)
+        | Q(ai_admin_memo__contains=BILLING_DESCRIPTOR_BRIDGE_RECONCILE_MARKER)
         | Q(ai_admin_memo__contains=PLAN_CHANGE_INFERENCE_RECONCILE_MARKER)
         | Q(ai_admin_memo__contains=PLAN_CHANGE_METADATA_REFRESH_RECONCILE_MARKER)
         | Q(ai_admin_memo__contains=PLAN_CHANGE_USER_INFERENCE_RECONCILE_MARKER)
         | Q(ai_admin_memo__contains=RECEIPT_CHANGE_RECONCILE_MARKER)
+        | Q(ai_admin_memo__contains=CROSS_MONTH_CARD_NETTING_RECONCILE_MARKER)
     ).exclude(status__in=[CardStatementStatus.PROCESSING, CardStatementStatus.FAILED])
     if period_month is not None:
         queryset = queryset.filter(period_month=period_month)
@@ -275,24 +289,38 @@ def _registered_services_for_period(statement_month: date) -> list[RegisteredSer
     )
 
 
-def _available_receipts_for_statement_month(statement_month: date) -> list[Receipt]:
-    """明細月と同じ領収書発行月の提出ファイルを返す。
+def _available_receipts_for_statement_month(
+    statement_month: date,
+    *,
+    transaction_dates: list[date] | tuple[date, ...] | None = None,
+) -> list[Receipt]:
+    """Return receipts from every receipt month represented in the statement.
 
-    領収書発行月Mは内部的には提出サイクルM+1へ保存されるため、
-    2026年7月明細では2026年8月提出サイクルを参照する。
+    Card statements can include late-posted transactions from the previous
+    calendar month. ReceiptHub stores receipt month M in submission cycle M+1,
+    so a July statement containing a June 28 line must query both the July and
+    August submission cycles. The statement month itself is always included.
     """
 
-    submission_month = submission_month_for_receipt(statement_month)
+    receipt_months = {date(statement_month.year, statement_month.month, 1)}
+    for transaction_date in transaction_dates or ():
+        if transaction_date:
+            receipt_months.add(date(transaction_date.year, transaction_date.month, 1))
+    submission_months = [
+        submission_month_for_receipt(receipt_month)
+        for receipt_month in sorted(receipt_months)
+    ]
     return list(
         Receipt.objects.available_files()
         .filter(
-            submission__period_month=submission_month,
+            submission__period_month__in=submission_months,
             submission__user__is_staff=False,
             submission__user__is_superuser=False,
         )
         .filter(Q(is_extra=True) | Q(p_card_usage_snapshot=True))
         .select_related("submission__user", "service", "service__catalog_service", "admin_reviewed_by")
-        .order_by("issued_on", "uploaded_at", "pk")
+        .order_by("submission__period_month", "issued_on", "uploaded_at", "pk")
+        .distinct()
     )
 
 
@@ -777,6 +805,28 @@ def _plan_inference_reason(candidate) -> str:
     )
 
 
+REVERSAL_TEXT_MARKERS = ("返品", "取消", "キャンセル", "REVERSAL", "REFUND", "CREDITREVERSAL")
+
+
+def _statement_item_is_reversal(item: CardStatementItem) -> bool:
+    for amount in (item.original_amount, item.amount_jpy):
+        if amount is not None and amount < 0:
+            return True
+    text = unicodedata.normalize(
+        "NFKC",
+        " ".join(
+            value
+            for value in (
+                item.merchant_name,
+                item.merchant_normalized,
+                _base_match_memo(item.match_memo),
+            )
+            if value
+        ),
+    ).upper()
+    return any(marker in text for marker in REVERSAL_TEXT_MARKERS)
+
+
 def _statement_line(item: CardStatementItem, catalogs: list[ServiceCatalog]) -> StatementLine:
     options: list[AmountOption] = []
     if item.original_amount is not None and item.original_currency:
@@ -790,6 +840,11 @@ def _statement_line(item: CardStatementItem, catalogs: list[ServiceCatalog]) -> 
         merchant_key=_canonical_merchant_key(item.merchant_name, catalogs),
         amount_options=tuple(options),
         reference=item.line_reference,
+        statement_role=(
+            STATEMENT_ROLE_REVERSAL
+            if _statement_item_is_reversal(item)
+            else STATEMENT_ROLE_CHARGE
+        ),
     )
 
 
@@ -844,7 +899,9 @@ def _mark_review(item: CardStatementItem, receipt: Receipt | None, *, base_memo:
 def _reason_for_match_type(match_type: str) -> str:
     return {
         MATCH_DIRECT: StatementMatchReason.AUTO_STRONG,
+        MATCH_BILLING_BRIDGE: StatementMatchReason.AUTO_STRONG,
         MATCH_ORIGINAL_CHARGE: StatementMatchReason.ORIGINAL_CHARGE,
+        MATCH_REVERSAL_ORIGINAL_CHARGE: StatementMatchReason.ORIGINAL_CHARGE,
         MATCH_LINKED_REFUND_NET: StatementMatchReason.LINKED_REFUND_NET,
         MATCH_MERCHANT_REFUND_NET: StatementMatchReason.MERCHANT_REFUND_NET,
     }.get(match_type, StatementMatchReason.AUTO_STRONG)
@@ -853,9 +910,11 @@ def _reason_for_match_type(match_type: str) -> str:
 def _match_type_label(match_type: str) -> str:
     return {
         MATCH_DIRECT: "直接一致",
+        MATCH_BILLING_BRIDGE: "決済名義互換一致",
         MATCH_ORIGINAL_CHARGE: "返金書内の元決済確認",
+        MATCH_REVERSAL_ORIGINAL_CHARGE: "返品元決済確認",
         MATCH_LINKED_REFUND_NET: "紐付返金相殺",
-        MATCH_MERCHANT_REFUND_NET: "同一請求元内の近接返金相殺",
+        MATCH_MERCHANT_REFUND_NET: "法人カード単位の後日返金相殺",
     }.get(match_type, "一致")
 
 
@@ -925,14 +984,17 @@ def _shortage_note(
         1
         for candidate in items
         if candidate.receipt_required
-        and _statement_line(candidate, catalogs).merchant_key == line.merchant_key
+        and merchant_keys_compatible(
+            line.merchant_key,
+            _statement_line(candidate, catalogs).merchant_key,
+        )
         and any(value.currency == option.currency and value.amount == option.amount for value in _statement_line(candidate, catalogs).amount_options)
     )
     support = sum(
         1
         for component in components
         if component.role == ROLE_CHARGE
-        and component.merchant_key == line.merchant_key
+        and merchant_keys_compatible(line.merchant_key, component.merchant_key)
         and component.currency == option.currency
         and component.signed_amount == option.amount
     )
@@ -957,11 +1019,20 @@ def _unused_component_reason(
 ) -> dict[str, Any]:
     """未使用の提出証拠が明細へ紐付かなかった理由を説明する。"""
 
-    merchant_lines = [line for line in lines if line.merchant_key == component.merchant_key]
+    if not lines:
+        return {
+            "reason_code": "no_unresolved_statement_line",
+            "reason": "未一致・解析要確認の明細行は残っていません。提出書類の重複または対象外月を確認してください。",
+        }
+
+    merchant_lines = [
+        line for line in lines
+        if merchant_keys_compatible(line.merchant_key, component.merchant_key)
+    ]
     if not merchant_lines:
         return {
             "reason_code": "merchant_not_found",
-            "reason": "ご利用代金明細に同じ請求元・サービスの明細がありません。",
+            "reason": "未一致・解析要確認の明細行に、同じ請求元・サービスまたは既知の決済名義対応がありません。",
         }
 
     amount_compatible: list[tuple[StatementLine, AmountOption]] = []
@@ -1057,37 +1128,79 @@ def _build_unmatched_receipt_snapshot(
     lines: list[StatementLine],
     receipt_by_id: dict[int, Receipt],
 ) -> list[dict[str, Any]]:
+    """Build one unmatched row per physical uploaded PDF.
+
+    Refund documents can contain both the original charge and a credit component.
+    The UI section is explicitly a list of *files*, so the same PDF must not be
+    repeated once for every extracted financial component.
+    """
+
     snapshots: list[dict[str, Any]] = []
-    for component in sorted(unused_components, key=lambda value: (value.receipt_order, value.key)):
-        receipt = receipt_by_id.get(component.receipt_id)
+    grouped: dict[int, list[EvidenceComponent]] = {}
+    for component in unused_components:
+        grouped.setdefault(component.receipt_id, []).append(component)
+
+    for receipt_id, receipt_components in sorted(
+        grouped.items(),
+        key=lambda value: (
+            min(component.receipt_order for component in value[1]),
+            value[0],
+        ),
+    ):
+        receipt = receipt_by_id.get(receipt_id)
         if receipt is None:
             continue
-        reason = _unused_component_reason(component, lines)
+        ordered = sorted(
+            receipt_components,
+            key=lambda component: (
+                0 if component.role == ROLE_REFUND else 1,
+                component.event_date or date.min,
+                component.key,
+            ),
+        )
+        representative = ordered[0]
+        reason = _unused_component_reason(representative, lines)
         snapshots.append(
             {
                 "receipt_id": receipt.pk,
-                "component_key": component.key,
+                "component_key": representative.key,
+                "component_count": len(ordered),
+                "components": [
+                    {
+                        "component_key": component.key,
+                        "event_date": component.event_date.isoformat() if component.event_date else "",
+                        "amount": format(component.signed_amount, "f"),
+                        "currency": component.currency,
+                        "role": component.role,
+                    }
+                    for component in ordered
+                ],
                 "filename": receipt.display_filename,
                 "original_filename": receipt.original_filename,
                 "user": receipt.submission.user.username,
                 "service": receipt.service_display_name_snapshot,
-                "service_label": component.service_label or receipt.ai_extracted_service_label,
-                "payee": component.payee or receipt.ai_extracted_payee,
-                "event_date": component.event_date.isoformat() if component.event_date else "",
-                "amount": format(component.signed_amount, "f"),
-                "currency": component.currency,
-                "role": component.role,
-                "document_kind": component.document_kind,
-                "source_label": component.source_label,
+                "service_label": representative.service_label or receipt.ai_extracted_service_label,
+                "payee": representative.payee or receipt.ai_extracted_payee,
+                "event_date": representative.event_date.isoformat() if representative.event_date else "",
+                "amount": format(representative.signed_amount, "f"),
+                "currency": representative.currency,
+                "role": representative.role,
+                "document_kind": representative.document_kind,
+                "source_label": representative.source_label,
                 **reason,
             }
         )
 
+    represented_receipt_ids = set(grouped)
     for receipt in unresolved_receipts:
+        if receipt.pk in represented_receipt_ids:
+            continue
         snapshots.append(
             {
                 "receipt_id": receipt.pk,
                 "component_key": "",
+                "component_count": 0,
+                "components": [],
                 "filename": receipt.display_filename,
                 "original_filename": receipt.original_filename,
                 "user": receipt.submission.user.username,
@@ -1123,7 +1236,10 @@ def reconcile_card_statement_items(statement_id: int, *, preserve_manual: bool =
             "plan_change_inference__user",
         ).order_by("sequence", "id")
     )
-    receipts = _available_receipts_for_statement_month(statement.period_month)
+    receipts = _available_receipts_for_statement_month(
+        statement.period_month,
+        transaction_dates=[item.transaction_date for item in items if item.transaction_date],
+    )
     receipt_by_id = {receipt.pk: receipt for receipt in receipts}
     catalogs = list(ServiceCatalog.objects.all().order_by("pk"))
     components, unresolved_receipts = _receipt_components(receipts, catalogs)
@@ -1309,7 +1425,10 @@ def reconcile_card_statement_items(statement_id: int, *, preserve_manual: bool =
             (
                 index
                 for index, receipt in enumerate(unresolved_pool)
-                if _unresolved_receipt_key(receipt, catalogs) == line.merchant_key
+                if merchant_keys_compatible(
+                    line.merchant_key,
+                    _unresolved_receipt_key(receipt, catalogs),
+                )
             ),
             None,
         )
@@ -1331,15 +1450,30 @@ def reconcile_card_statement_items(statement_id: int, *, preserve_manual: bool =
                 reason=_shortage_note(item, items, list(component_by_key.values()), catalogs),
             )
 
+    used_receipt_ids = {
+        component.receipt_id
+        for matched_components in evidence_components_by_item.values()
+        for component in matched_components
+    }
     unused_components = [
         component_by_key[key]
         for key in reconciliation.unused_component_keys
         if key in component_by_key
+        and component_by_key[key].receipt_id not in used_receipt_ids
     ]
+    unresolved_pool = [
+        receipt for receipt in unresolved_pool if receipt.pk not in used_receipt_ids
+    ]
+    unresolved_line_keys = {
+        str(item.pk)
+        for item in auto_items
+        if item.match_status in {StatementMatchStatus.UNMATCHED, StatementMatchStatus.NEEDS_REVIEW}
+    }
+    unresolved_lines = [line for line in auto_lines if line.key in unresolved_line_keys]
     unmatched_receipt_snapshot = _build_unmatched_receipt_snapshot(
         unused_components=unused_components,
         unresolved_receipts=unresolved_pool,
-        lines=auto_lines,
+        lines=unresolved_lines,
         receipt_by_id=receipt_by_id,
     )
 
@@ -1452,22 +1586,35 @@ def reconcile_card_statement_items(statement_id: int, *, preserve_manual: bool =
             SIMPLE_RECEIPT_MATCHING_RECONCILE_MARKER,
             EMPIRICAL_MATCHING_RECONCILE_MARKER,
             SERVICE_LABEL_RECONCILE_MARKER,
+            BILLING_DESCRIPTOR_BRIDGE_RECONCILE_MARKER,
             PLAN_CHANGE_INFERENCE_RECONCILE_MARKER,
             PLAN_CHANGE_METADATA_REFRESH_RECONCILE_MARKER,
             PLAN_CHANGE_USER_INFERENCE_RECONCILE_MARKER,
             RECEIPT_CHANGE_RECONCILE_MARKER,
+            CROSS_MONTH_CARD_NETTING_RECONCILE_MARKER,
         ):
             extraction_memo = extraction_memo.replace(marker, "")
         extraction_memo = extraction_memo.strip()
-        target_receipt_month = receipt_month_for_statement(statement.period_month)
+        target_receipt_months = sorted(
+            {
+                date(statement.period_month.year, statement.period_month.month, 1),
+                *(
+                    date(item.transaction_date.year, item.transaction_date.month, 1)
+                    for item in items
+                    if item.transaction_date
+                ),
+            }
+        )
+        target_receipt_month_label = "・".join(month.strftime("%Y-%m") for month in target_receipt_months)
         reconciliation_memo = (
-            f"【照合結果】明細月{statement.period_month:%Y-%m}（対象領収書月{target_receipt_month:%Y-%m}）の"
+            f"【照合結果】明細月{statement.period_month:%Y-%m}（参照領収書月{target_receipt_month_label}）の"
             f"提出PDF{len(receipts)}件を、ファイル名や利用者ではなくPDF本文の取引構成要素で照合しました。"
             f"直接一致{direct_count}件、返金書内の元決済{original_count}件、紐付返金相殺{linked_count}件、"
-            f"同一請求元内の近接返金相殺{merchant_net_count}件、推定対応{inferred_count}件、解析要確認{review_count}件、未一致{missing_count}件、"
-            f"明細未使用の提出証拠{len(unmatched_receipt_snapshot)}件です。"
-            f"通常取引は金額・通貨完全一致、請求元一致、利用日±{DATE_MATCH_TOLERANCE_DAYS}日を全体最適化で一対一割当し、"
+            f"法人カード単位の後日返金相殺{merchant_net_count}件、推定対応{inferred_count}件、解析要確認{review_count}件、未一致{missing_count}件、"
+            f"明細未使用の提出PDF{len(unmatched_receipt_snapshot)}件です。"
+            f"通常取引は金額・通貨完全一致、請求元一致または既知の決済名義対応、利用日±{DATE_MATCH_TOLERANCE_DAYS}日を全体最適化で一対一割当し、"
             "明示Invoice/Transaction IDが同じ重複書類は1取引として扱っています。通常照合では利用者特定を条件に含めません。"
+            "返品行は同一請求元・同一利用日の元決済を参照し、同一法人カードの後日返金は最大45日後まで厳密な金額一致で全体最適割当します。"
             "直接一致しない明細についてのみ、当月の契約変更書類に明記されたBill to利用者・旧プラン終了情報と、"
             "過去領収書または前月カード明細の同一請求元・金額通貨完全一致・前月同請求日の実績が揃う場合に限り、"
             "管理者確認前の推定対応として提示します。前月カード明細は領収書提出証拠ではなく、旧プランの請求周期を裏付ける補助証拠です。"

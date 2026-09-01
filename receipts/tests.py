@@ -60,6 +60,7 @@ from .models import (
     Receipt,
     ReceiptAdminReviewStatus,
     ReceiptFilenameStatus,
+    ReceiptFinancialDocumentKind,
     ReceiptPeriodCheckStatus,
     ReceiptUploadSource,
     ReceiptResubmissionRequest,
@@ -367,6 +368,12 @@ Google AI Ultra (30 TB) (Google One)
         )
         self.assertEqual(result.service_label, "Google One")
         self.assertEqual(result.suggested_filename, "260623_keeseon.kim_Google_One_32000_JPY.pdf")
+
+    def test_google_play_statement_descriptor_has_dedicated_billing_key(self):
+        self.assertEqual(_known_merchant_key("GOOGLE PLAY JAPA"), "GOOGLE_PLAY")
+        self.assertEqual(_known_merchant_key("GOOGLE PLAY JAPAN"), "GOOGLE_PLAY")
+        self.assertEqual(_known_merchant_key("GOOGLE GOOGLE ON"), "GOOGLE_ONE")
+        self.assertEqual(_known_merchant_key("GOOGLE CLOUD"), "GOOGLE_CLOUD")
 
     @mock.patch("receipts.ai_processing.generate_ai_receipt_filename")
     def test_needs_review_result_still_persists_extracted_amount_date_and_currency(self, mocked_generate):
@@ -1625,6 +1632,16 @@ Google AI Ultra (30 TB) (Google One)
             ai_admin_memo="解析済み",
             reconciled_at=timezone.now(),
         )
+        next_month_statement = CardStatement.objects.create(
+            period_month=date(2026, 7, 1),
+            file=SimpleUploadedFile(
+                "statement-next.pdf", b"%PDF-1.4 statement", content_type="application/pdf"
+            ),
+            original_filename="statement-next.pdf",
+            status=CardStatementStatus.COMPLETED,
+            ai_admin_memo="解析済み",
+            reconciled_at=timezone.now(),
+        )
         self.client.login(username="alice", password="password123")
 
         with mock.patch("receipts.statement_processing.reconcile_card_statement_items") as reconcile_mock:
@@ -1646,8 +1663,11 @@ Google AI Ultra (30 TB) (Google One)
         self.assertEqual(Receipt.objects.filter(submission__user=self.user).count(), 1)
         reconcile_mock.assert_not_called()
         statement.refresh_from_db()
+        next_month_statement.refresh_from_db()
         self.assertIn(RECEIPT_CHANGE_RECONCILE_MARKER, statement.ai_admin_memo)
         self.assertIsNone(statement.reconciled_at)
+        self.assertIn(RECEIPT_CHANGE_RECONCILE_MARKER, next_month_statement.ai_admin_memo)
+        self.assertIsNone(next_month_statement.reconciled_at)
 
 
 
@@ -5352,8 +5372,149 @@ class FinalWorkflowAcceptanceTests(TestCase):
             PlanChangeInferenceStatus.REJECTED,
         )
 
+    def test_google_play_statement_is_matched_to_nearby_google_one_receipt_before_distant_google_one_line(self):
+        google_one_catalog = ServiceCatalog.objects.create(
+            name="Google AI",
+            billing_type=BillingType.SUBSCRIPTION,
+            merchant_aliases="GOOGLE PLAY JAPAN, GOOGLE GOOGLE ON, Google One",
+            created_by=self.superuser,
+        )
+        second_user = User.objects.create_user(
+            username="second-google-user@example.com",
+            email="second-google-user@example.com",
+            password="password123",
+        )
+        first_service = RegisteredService.objects.create(
+            user=self.user,
+            catalog_service=google_one_catalog,
+            name=google_one_catalog.name,
+            billing_type=google_one_catalog.billing_type,
+            registered_by=self.superuser,
+        )
+        second_service = RegisteredService.objects.create(
+            user=second_user,
+            catalog_service=google_one_catalog,
+            name=google_one_catalog.name,
+            billing_type=google_one_catalog.billing_type,
+            registered_by=self.superuser,
+        )
+
+        first_submission = Submission.objects.create(
+            user=self.user,
+            period_month=date(2026, 8, 1),
+        )
+        first_receipt = Receipt.objects.create(
+            submission=first_submission,
+            service=first_service,
+            service_name_snapshot=first_service.name,
+            billing_type_snapshot=first_service.billing_type,
+            original_filename="0415_2607_松﨑_Google_¥36,400.pdf",
+            generated_filename="260711_ken.matsuzaki_Google_One_32000_JPY.pdf",
+            file=SimpleUploadedFile("google-one-july-11.pdf", b"%PDF-1.4 test", content_type="application/pdf"),
+            issued_on=date(2026, 7, 11),
+            amount=Decimal("32000"),
+            currency="JPY",
+            ai_extracted_payee="Google Asia Pacific Pte. Ltd.",
+            ai_extracted_service_label="Google One",
+            financial_document_kind=ReceiptFinancialDocumentKind.INVOICE,
+            financial_transaction_components=[
+                {
+                    "component_key": "primary",
+                    "role": "charge",
+                    "signed_amount": "32000",
+                    "currency": "JPY",
+                    "transaction_date": "2026-07-11",
+                    "payee": "Google Asia Pacific Pte. Ltd.",
+                    "service_label": "Google One",
+                    "source_label": "主要取引",
+                    "document_kind": "invoice",
+                }
+            ],
+            financial_metadata_checked_at=timezone.now(),
+            plan_change_metadata_checked_at=timezone.now(),
+            expires_at=timezone.now() + timedelta(days=30),
+        )
+        second_submission = Submission.objects.create(
+            user=second_user,
+            period_month=date(2026, 8, 1),
+        )
+        second_receipt = Receipt.objects.create(
+            submission=second_submission,
+            service=second_service,
+            service_name_snapshot=second_service.name,
+            billing_type_snapshot=second_service.billing_type,
+            original_filename="google-one-july-23.pdf",
+            generated_filename="260723_keeseon.kim_Google_One_32000_JPY.pdf",
+            file=SimpleUploadedFile("google-one-july-23.pdf", b"%PDF-1.4 test", content_type="application/pdf"),
+            issued_on=date(2026, 7, 23),
+            amount=Decimal("32000"),
+            currency="JPY",
+            ai_extracted_payee="Google Asia Pacific Pte. Ltd.",
+            ai_extracted_service_label="Google One",
+            financial_document_kind=ReceiptFinancialDocumentKind.INVOICE,
+            financial_transaction_components=[
+                {
+                    "component_key": "primary",
+                    "role": "charge",
+                    "signed_amount": "32000",
+                    "currency": "JPY",
+                    "transaction_date": "2026-07-23",
+                    "payee": "Google Asia Pacific Pte. Ltd.",
+                    "service_label": "Google One",
+                    "source_label": "主要取引",
+                    "document_kind": "invoice",
+                }
+            ],
+            financial_metadata_checked_at=timezone.now(),
+            plan_change_metadata_checked_at=timezone.now(),
+            expires_at=timezone.now() + timedelta(days=30),
+        )
+
+        statement = CardStatement.objects.create(
+            period_month=date(2026, 7, 1),
+            file=SimpleUploadedFile("statement-2026-07.pdf", b"%PDF-1.4 statement", content_type="application/pdf"),
+            original_filename="statement-2026-07.pdf",
+            status=CardStatementStatus.NEEDS_REVIEW,
+            card_last4="7210",
+            statement_period="2026-07",
+            uploaded_by=self.superuser,
+            expires_at=timezone.now() + timedelta(days=30),
+        )
+        play_item = CardStatementItem.objects.create(
+            statement=statement,
+            sequence=1,
+            line_reference="0415",
+            transaction_date=date(2026, 7, 10),
+            merchant_name="GOOGLE PLAY JAPA",
+            amount_jpy=Decimal("32000"),
+            match_status=StatementMatchStatus.UNMATCHED,
+            receipt_required=True,
+        )
+        one_item = CardStatementItem.objects.create(
+            statement=statement,
+            sequence=2,
+            line_reference="0445",
+            transaction_date=date(2026, 7, 24),
+            merchant_name="GOOGLE GOOGLE ON",
+            amount_jpy=Decimal("32000"),
+            match_status=StatementMatchStatus.UNMATCHED,
+            receipt_required=True,
+        )
+
+        reconcile_card_statement_items(statement.pk)
+
+        play_item.refresh_from_db()
+        one_item.refresh_from_db()
+        statement.refresh_from_db()
+        self.assertEqual(play_item.match_status, StatementMatchStatus.MATCHED)
+        self.assertEqual(play_item.matched_receipt, first_receipt)
+        self.assertIn("決済名義互換一致", play_item.match_memo)
+        self.assertEqual(one_item.match_status, StatementMatchStatus.MATCHED)
+        self.assertEqual(one_item.matched_receipt, second_receipt)
+        self.assertEqual(statement.unmatched_receipt_components, [])
+
     def test_version_file_is_present_without_web_display_requirement(self):
-        self.assertEqual(Path("VERSION").read_text(encoding="utf-8").strip(), "1.15.4")
+        self.assertEqual(Path("VERSION").read_text(encoding="utf-8").strip(), "1.16.0")
 
 
 @override_settings(PASSWORD_HASHERS=FAST_PASSWORD_HASHERS)

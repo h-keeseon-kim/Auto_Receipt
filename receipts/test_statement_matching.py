@@ -10,12 +10,15 @@ from receipts.statement_matching import (
     DOC_RECEIPT,
     DOC_REFUND,
     EvidenceComponent,
+    MATCH_BILLING_BRIDGE,
     MATCH_DIRECT,
     MATCH_LINKED_REFUND_NET,
     MATCH_MERCHANT_REFUND_NET,
     MATCH_ORIGINAL_CHARGE,
+    MATCH_REVERSAL_ORIGINAL_CHARGE,
     ROLE_CHARGE,
     ROLE_REFUND,
+    STATEMENT_ROLE_REVERSAL,
     StatementLine,
     deduplicate_components,
     reconcile_statement,
@@ -195,14 +198,200 @@ class StatementMatchingEngineTests(unittest.TestCase):
         self.assertEqual(assignment.match_type, MATCH_MERCHANT_REFUND_NET)
         self.assertEqual(set(assignment.component_keys), {"charge", "refund-a", "refund-b"})
 
-    def test_unlinked_distant_refund_is_not_used_for_merchant_netting(self):
+    def test_unlinked_refund_outside_card_posting_window_is_not_used(self):
+        line_value = StatementLine(
+            key="L",
+            sequence=1,
+            transaction_date=date(2026, 6, 23),
+            merchant_key="ANTHROPIC",
+            amount_options=(AmountOption(Decimal("64"), "USD", "statement"),),
+        )
         components = [
             component("charge", 1, 1, 23, "ANTHROPIC", "137.26"),
-            component("refund-a", 2, 2, 4, "ANTHROPIC", "-66.48", role=ROLE_REFUND, kind=DOC_REFUND),
-            component("refund-b", 3, 3, 8, "ANTHROPIC", "-6.78", role=ROLE_REFUND, kind=DOC_REFUND),
+            EvidenceComponent(
+                key="refund-a",
+                receipt_id=2,
+                receipt_order=2,
+                filename="refund-a.pdf",
+                merchant_key="ANTHROPIC",
+                signed_amount=Decimal("-66.48"),
+                currency="USD",
+                event_date=date(2026, 8, 20),
+                role=ROLE_REFUND,
+                document_kind=DOC_REFUND,
+                payee="ANTHROPIC",
+            ),
+            EvidenceComponent(
+                key="refund-b",
+                receipt_id=3,
+                receipt_order=3,
+                filename="refund-b.pdf",
+                merchant_key="ANTHROPIC",
+                signed_amount=Decimal("-6.78"),
+                currency="USD",
+                event_date=date(2026, 8, 20),
+                role=ROLE_REFUND,
+                document_kind=DOC_REFUND,
+                payee="ANTHROPIC",
+            ),
         ]
-        result = reconcile_statement([line("L", 1, 23, "ANTHROPIC", "64")], components)
+        result = reconcile_statement([line_value], components)
         self.assertNotIn("L", result.assignments)
+
+
+    def test_corporate_card_refunds_are_allocated_globally_across_accounts(self):
+        lines = [
+            StatementLine(
+                key="0424",
+                sequence=1,
+                transaction_date=date(2026, 7, 3),
+                merchant_key="ANTHROPIC",
+                amount_options=(AmountOption(Decimal("178.60"), "USD", "外貨金額"),),
+                reference="0424",
+            ),
+            StatementLine(
+                key="0465",
+                sequence=2,
+                transaction_date=date(2026, 7, 8),
+                merchant_key="ANTHROPIC",
+                amount_options=(AmountOption(Decimal("104.74"), "USD", "外貨金額"),),
+                reference="0465",
+            ),
+            StatementLine(
+                key="0466",
+                sequence=3,
+                transaction_date=date(2026, 6, 28),
+                merchant_key="ANTHROPIC",
+                amount_options=(AmountOption(Decimal("66.60"), "USD", "外貨金額"),),
+                reference="0466",
+            ),
+        ]
+
+        def dated_component(key, receipt_id, order, event_date, amount, role=ROLE_CHARGE):
+            return EvidenceComponent(
+                key=key,
+                receipt_id=receipt_id,
+                receipt_order=order,
+                filename=f"{key}.pdf",
+                merchant_key="ANTHROPIC",
+                signed_amount=Decimal(amount),
+                currency="USD",
+                event_date=event_date,
+                role=role,
+                document_kind=DOC_REFUND if role == ROLE_REFUND else DOC_RECEIPT,
+                payee="Anthropic, PBC",
+            )
+
+        components = [
+            dated_component("team-29554", 1, 1, date(2026, 7, 2), "295.54"),
+            dated_component("max5-110", 2, 2, date(2026, 7, 8), "110.00"),
+            dated_component("fujimoto-220", 3, 3, date(2026, 6, 28), "220.00"),
+            dated_component("saito-071", 10, 10, date(2026, 7, 5), "-0.71", ROLE_REFUND),
+            dated_component("takahashi-090", 11, 11, date(2026, 7, 5), "-0.90", ROLE_REFUND),
+            dated_component("hamaguchi-3237", 12, 12, date(2026, 7, 5), "-32.37", ROLE_REFUND),
+            dated_component("takizawa-1241", 13, 13, date(2026, 7, 5), "-12.41", ROLE_REFUND),
+            dated_component("sung-6558", 14, 14, date(2026, 7, 6), "-65.58", ROLE_REFUND),
+            dated_component("takenaka-497", 15, 15, date(2026, 7, 5), "-4.97", ROLE_REFUND),
+            dated_component("takaya-462", 16, 16, date(2026, 7, 7), "-4.62", ROLE_REFUND),
+            dated_component("hiwatashi-064", 17, 17, date(2026, 7, 28), "-0.64", ROLE_REFUND),
+            dated_component("masui-11920", 18, 18, date(2026, 7, 6), "-119.20", ROLE_REFUND),
+            dated_component("nishikawa-3420", 19, 19, date(2026, 7, 29), "-34.20", ROLE_REFUND),
+            # Numerically valid for 0424 with fewer documents, but posted before
+            # the sale. Chronology must make the six later refunds preferable.
+            dated_component("kim-old-6648", 20, 20, date(2026, 6, 22), "-66.48", ROLE_REFUND),
+        ]
+
+        result = reconcile_statement(lines, components)
+
+        self.assertEqual(set(result.assignments), {"0424", "0465", "0466"})
+        self.assertEqual(
+            set(result.assignments["0424"].component_keys),
+            {
+                "team-29554", "saito-071", "takahashi-090", "hamaguchi-3237",
+                "takizawa-1241", "sung-6558", "takenaka-497",
+            },
+        )
+        self.assertEqual(
+            set(result.assignments["0465"].component_keys),
+            {"max5-110", "takaya-462", "hiwatashi-064"},
+        )
+        self.assertEqual(
+            set(result.assignments["0466"].component_keys),
+            {"fujimoto-220", "masui-11920", "nishikawa-3420"},
+        )
+        used = [key for assignment in result.assignments.values() for key in assignment.component_keys]
+        self.assertEqual(len(used), len(set(used)))
+        self.assertIn("kim-old-6648", result.unused_component_keys)
+
+    def test_reversal_row_can_reference_same_original_charge_as_net_rebooking(self):
+        lines = [
+            StatementLine(
+                key="0383",
+                sequence=1,
+                transaction_date=date(2026, 6, 28),
+                merchant_key="ANTHROPIC",
+                amount_options=(AmountOption(Decimal("36991"), "JPY", "円請求額"),),
+                reference="0383",
+                statement_role=STATEMENT_ROLE_REVERSAL,
+            ),
+            StatementLine(
+                key="0466",
+                sequence=2,
+                transaction_date=date(2026, 6, 28),
+                merchant_key="ANTHROPIC",
+                amount_options=(AmountOption(Decimal("66.60"), "USD", "外貨金額"),),
+                reference="0466",
+            ),
+        ]
+        components = [
+            EvidenceComponent(
+                key="fujimoto-220",
+                receipt_id=1,
+                receipt_order=1,
+                filename="0383_260629_藤本_Claude_220USD.pdf",
+                merchant_key="ANTHROPIC",
+                signed_amount=Decimal("220.00"),
+                currency="USD",
+                event_date=date(2026, 6, 28),
+                role=ROLE_CHARGE,
+                document_kind=DOC_RECEIPT,
+                payee="Anthropic, PBC",
+            ),
+            EvidenceComponent(
+                key="masui-11920",
+                receipt_id=2,
+                receipt_order=2,
+                filename="masui-refund.pdf",
+                merchant_key="ANTHROPIC",
+                signed_amount=Decimal("-119.20"),
+                currency="USD",
+                event_date=date(2026, 7, 6),
+                role=ROLE_REFUND,
+                document_kind=DOC_REFUND,
+                payee="Anthropic, PBC",
+            ),
+            EvidenceComponent(
+                key="nishikawa-3420",
+                receipt_id=3,
+                receipt_order=3,
+                filename="nishikawa-refund.pdf",
+                merchant_key="ANTHROPIC",
+                signed_amount=Decimal("-34.20"),
+                currency="USD",
+                event_date=date(2026, 7, 29),
+                role=ROLE_REFUND,
+                document_kind=DOC_REFUND,
+                payee="Anthropic, PBC",
+            ),
+        ]
+
+        result = reconcile_statement(lines, components)
+
+        self.assertEqual(result.assignments["0466"].match_type, MATCH_MERCHANT_REFUND_NET)
+        self.assertEqual(result.assignments["0383"].match_type, MATCH_REVERSAL_ORIGINAL_CHARGE)
+        self.assertEqual(result.assignments["0383"].component_keys, ("fujimoto-220",))
+        self.assertIn("fujimoto-220", result.assignments["0466"].component_keys)
+        self.assertFalse(result.unused_component_keys)
 
     def test_one_component_is_never_used_for_two_statement_lines(self):
         lines = [line(f"L{i}", i, i, "ANTHROPIC", "22") for i in range(1, 21)]
@@ -265,6 +454,135 @@ class StatementMatchingEngineTests(unittest.TestCase):
         self.assertEqual(set(result.assignments), {"0356", "0379"})
         self.assertEqual(result.assignments["0356"].component_keys, ("google-one-june-11",))
         self.assertEqual(result.assignments["0379"].component_keys, ("google-one-june-23",))
+
+
+    def test_google_play_billing_descriptor_matches_google_one_receipt_without_stealing_exact_match(self):
+        lines = [
+            StatementLine(
+                key="0415",
+                sequence=1,
+                transaction_date=date(2026, 7, 10),
+                merchant_key="GOOGLE_PLAY",
+                amount_options=(AmountOption(Decimal("32000"), "JPY", "円請求額"),),
+                reference="0415",
+            ),
+            StatementLine(
+                key="0445",
+                sequence=2,
+                transaction_date=date(2026, 7, 24),
+                merchant_key="GOOGLE_ONE",
+                amount_options=(AmountOption(Decimal("32000"), "JPY", "円請求額"),),
+                reference="0445",
+            ),
+        ]
+        components = [
+            EvidenceComponent(
+                key="matsuzaki-google-one",
+                receipt_id=1,
+                receipt_order=1,
+                filename="260711_ken.matsuzaki_Google_One_32000_JPY.pdf",
+                merchant_key="GOOGLE_ONE",
+                signed_amount=Decimal("32000"),
+                currency="JPY",
+                event_date=date(2026, 7, 11),
+                document_kind=DOC_INVOICE,
+                payee="Google Asia Pacific Pte. Ltd.",
+                service_label="Google One",
+            ),
+            EvidenceComponent(
+                key="kim-google-one",
+                receipt_id=2,
+                receipt_order=2,
+                filename="260723_keeseon.kim_Google_One_32000_JPY.pdf",
+                merchant_key="GOOGLE_ONE",
+                signed_amount=Decimal("32000"),
+                currency="JPY",
+                event_date=date(2026, 7, 23),
+                document_kind=DOC_INVOICE,
+                payee="Google Asia Pacific Pte. Ltd.",
+                service_label="Google One",
+            ),
+        ]
+
+        result = reconcile_statement(lines, components, date_tolerance_days=1)
+
+        self.assertEqual(set(result.assignments), {"0415", "0445"})
+        self.assertEqual(result.assignments["0415"].component_keys, ("matsuzaki-google-one",))
+        self.assertEqual(result.assignments["0415"].match_type, MATCH_BILLING_BRIDGE)
+        self.assertEqual(result.assignments["0445"].component_keys, ("kim-google-one",))
+        self.assertEqual(result.assignments["0445"].match_type, MATCH_DIRECT)
+        self.assertFalse(result.unused_component_keys)
+
+    def test_google_play_billing_bridge_does_not_match_google_cloud_receipt(self):
+        result = reconcile_statement(
+            [
+                StatementLine(
+                    key="L",
+                    sequence=1,
+                    transaction_date=date(2026, 7, 10),
+                    merchant_key="GOOGLE_PLAY",
+                    amount_options=(AmountOption(Decimal("32000"), "JPY", "円請求額"),),
+                )
+            ],
+            [
+                EvidenceComponent(
+                    key="cloud",
+                    receipt_id=1,
+                    receipt_order=1,
+                    filename="google-cloud.pdf",
+                    merchant_key="GOOGLE_CLOUD",
+                    signed_amount=Decimal("32000"),
+                    currency="JPY",
+                    event_date=date(2026, 7, 10),
+                    document_kind=DOC_INVOICE,
+                    payee="Google Cloud",
+                    service_label="Google Cloud",
+                )
+            ],
+        )
+        self.assertNotIn("L", result.assignments)
+
+    def test_exact_merchant_identity_outranks_billing_bridge(self):
+        line_value = StatementLine(
+            key="L",
+            sequence=1,
+            transaction_date=date(2026, 7, 10),
+            merchant_key="GOOGLE_ONE",
+            amount_options=(AmountOption(Decimal("32000"), "JPY", "円請求額"),),
+        )
+        components = [
+            EvidenceComponent(
+                key="bridge",
+                receipt_id=1,
+                receipt_order=1,
+                filename="google-play.pdf",
+                merchant_key="GOOGLE_PLAY",
+                signed_amount=Decimal("32000"),
+                currency="JPY",
+                event_date=date(2026, 7, 10),
+                document_kind=DOC_INVOICE,
+                payee="Google Play Japan",
+                service_label="Google Play",
+            ),
+            EvidenceComponent(
+                key="exact",
+                receipt_id=2,
+                receipt_order=2,
+                filename="google-one.pdf",
+                merchant_key="GOOGLE_ONE",
+                signed_amount=Decimal("32000"),
+                currency="JPY",
+                event_date=date(2026, 7, 11),
+                document_kind=DOC_INVOICE,
+                payee="Google Asia Pacific Pte. Ltd.",
+                service_label="Google One",
+            ),
+        ]
+
+        result = reconcile_statement([line_value], components, date_tolerance_days=1)
+
+        self.assertEqual(result.assignments["L"].component_keys, ("exact",))
+        self.assertEqual(result.assignments["L"].match_type, MATCH_DIRECT)
 
     def test_unrelated_merchant_does_not_match_even_if_amount_and_date_match(self):
         result = reconcile_statement(

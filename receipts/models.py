@@ -179,7 +179,7 @@ class StatementMatchReason(models.TextChoices):
     PLAN_CHANGE_CONFIRMED = "plan_change_confirmed", "契約変更推定を管理者確定"
     ORIGINAL_CHARGE = "original_charge", "返金書内の元決済確認"
     LINKED_REFUND_NET = "linked_refund_net", "紐付返金相殺"
-    MERCHANT_REFUND_NET = "merchant_refund_net", "同一請求元内の近接返金相殺"
+    MERCHANT_REFUND_NET = "merchant_refund_net", "法人カード単位の後日返金相殺"
     REFUND_ADJUSTED = "refund_adjusted", "旧返金調整（再照合対象）"
     PARSE_REVIEW = "parse_review", "解析要確認"
     AUTO_AMOUNT_ONLY = "auto_amount_only", "旧金額一致（再照合対象）"
@@ -1958,14 +1958,17 @@ def mark_statement_reconciliation_pending_after_receipt_save(sender, instance: R
         return
 
     # 領収書は「発行月の翌月」の提出サイクルに保存される。
-    # 同じ発行月の全社明細だけを再照合待ちにする。
-    statement_month = receipt_month_for_submission(instance.submission.period_month)
+    # カード明細には前月末の遅延計上が含まれるため、同じ発行月の明細に
+    # 加えて翌月明細も再照合待ちにする。実際の候補採否は明細内利用日と
+    # 金額・通貨・請求元の厳密条件で決まる。
+    receipt_month = receipt_month_for_submission(instance.submission.period_month)
+    statement_months = {receipt_month, add_months(receipt_month, 1)}
 
     def mark_pending():
         from .statement_processing import RECEIPT_CHANGE_RECONCILE_MARKER
 
         statements = list(
-            CardStatement.objects.filter(period_month=statement_month)
+            CardStatement.objects.filter(period_month__in=statement_months)
             .exclude(status__in=[CardStatementStatus.PROCESSING, CardStatementStatus.FAILED])
             .only("pk", "ai_admin_memo")
         )
