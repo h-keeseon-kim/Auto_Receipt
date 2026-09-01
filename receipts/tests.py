@@ -5513,8 +5513,160 @@ class FinalWorkflowAcceptanceTests(TestCase):
         self.assertEqual(one_item.matched_receipt, second_receipt)
         self.assertEqual(statement.unmatched_receipt_components, [])
 
+    def test_cross_month_support_receipts_are_not_reported_as_current_month_unused_files(self):
+        """Past-month candidates may be searched, but must not flood the UI.
+
+        A July statement can contain a June 28 transaction, so the reconciliation
+        pool legitimately includes both June and July receipt months.  The unused
+        list is driven by PDF-derived dates and actual line relevance, not merely
+        by the storage submission cycle.  Unrelated historical receipts must stay
+        hidden even when an administrator re-uploads them into the current cycle.
+        """
+
+        claude_catalog = ServiceCatalog.objects.create(
+            name="Claude",
+            billing_type=BillingType.SUBSCRIPTION,
+            merchant_aliases="ANTHROPIC, ANTHROPIC.COM, CLAUDE",
+            created_by=self.superuser,
+        )
+        claude_service = RegisteredService.objects.create(
+            user=self.user,
+            catalog_service=claude_catalog,
+            name=claude_catalog.name,
+            billing_type=claude_catalog.billing_type,
+            registered_by=self.superuser,
+        )
+
+        def create_financial_receipt(*, submission_month, filename, event_date, amount):
+            submission, _ = Submission.objects.get_or_create(
+                user=self.user,
+                period_month=submission_month,
+            )
+            return Receipt.objects.create(
+                submission=submission,
+                service=claude_service,
+                service_name_snapshot=claude_service.name,
+                billing_type_snapshot=claude_service.billing_type,
+                original_filename=filename,
+                generated_filename=filename,
+                file=SimpleUploadedFile(filename, b"%PDF-1.4 test", content_type="application/pdf"),
+                issued_on=event_date,
+                amount=Decimal(amount),
+                currency="USD",
+                ai_extracted_payee="Anthropic, PBC",
+                ai_extracted_service_label="Claude",
+                financial_document_kind=ReceiptFinancialDocumentKind.CHARGE,
+                financial_transaction_components=[
+                    {
+                        "component_key": "primary",
+                        "role": "charge",
+                        "signed_amount": amount,
+                        "currency": "USD",
+                        "transaction_date": event_date.isoformat(),
+                        "payee": "Anthropic, PBC",
+                        "service_label": "Claude",
+                        "source_label": "主要取引",
+                        "document_kind": "charge",
+                    }
+                ],
+                financial_metadata_checked_at=timezone.now(),
+                plan_change_metadata_checked_at=timezone.now(),
+                expires_at=timezone.now() + timedelta(days=30),
+            )
+
+        # June receipts are stored in the July submission cycle. One is needed
+        # for the late-posted June line; the other is deliberately unrelated.
+        june_matching_receipt = create_financial_receipt(
+            submission_month=date(2026, 7, 1),
+            filename="260628_user_Claude_220_USD.pdf",
+            event_date=date(2026, 6, 28),
+            amount="220.00",
+        )
+        june_unrelated_receipt = create_financial_receipt(
+            submission_month=date(2026, 7, 1),
+            filename="260601_user_Claude_22_USD.pdf",
+            event_date=date(2026, 6, 1),
+            amount="22.00",
+        )
+        # Administrators can re-upload a historical file into the current cycle.
+        # Storage month alone must not make that old PDF visible as July-unused.
+        june_reuploaded_in_current_cycle = create_financial_receipt(
+            submission_month=date(2026, 8, 1),
+            filename="260531_reuploaded_Claude_150_USD.pdf",
+            event_date=date(2026, 5, 31),
+            amount="150.00",
+        )
+
+        # July receipts are stored in the August submission cycle. This unused
+        # file must remain visible because it belongs to the selected month.
+        july_unused_receipt = create_financial_receipt(
+            submission_month=date(2026, 8, 1),
+            filename="260715_user_Claude_33_USD.pdf",
+            event_date=date(2026, 7, 15),
+            amount="33.00",
+        )
+
+        statement = CardStatement.objects.create(
+            period_month=date(2026, 7, 1),
+            file=SimpleUploadedFile(
+                "statement-2026-07.pdf",
+                b"%PDF-1.4 statement",
+                content_type="application/pdf",
+            ),
+            original_filename="statement-2026-07.pdf",
+            status=CardStatementStatus.NEEDS_REVIEW,
+            card_last4="7210",
+            statement_period="2026-07",
+            uploaded_by=self.superuser,
+            expires_at=timezone.now() + timedelta(days=30),
+        )
+        item = CardStatementItem.objects.create(
+            statement=statement,
+            sequence=1,
+            line_reference="0466-source",
+            transaction_date=date(2026, 6, 28),
+            merchant_name="ANTHROPIC* CLAUDE SU",
+            original_amount=Decimal("220.00"),
+            original_currency="USD",
+            match_status=StatementMatchStatus.UNMATCHED,
+            receipt_required=True,
+        )
+
+        available_ids = {
+            receipt.pk
+            for receipt in _available_receipts_for_statement_month(
+                statement.period_month,
+                transaction_dates=[item.transaction_date],
+            )
+        }
+        self.assertEqual(
+            available_ids,
+            {
+                june_matching_receipt.pk,
+                june_unrelated_receipt.pk,
+                june_reuploaded_in_current_cycle.pk,
+                july_unused_receipt.pk,
+            },
+        )
+
+        reconcile_card_statement_items(statement.pk)
+
+        item.refresh_from_db()
+        statement.refresh_from_db()
+        self.assertEqual(item.match_status, StatementMatchStatus.MATCHED)
+        self.assertEqual(item.matched_receipt, june_matching_receipt)
+        self.assertEqual(
+            [entry["receipt_id"] for entry in statement.unmatched_receipt_components],
+            [july_unused_receipt.pk],
+        )
+        unused_ids = {entry["receipt_id"] for entry in statement.unmatched_receipt_components}
+        self.assertNotIn(june_unrelated_receipt.pk, unused_ids)
+        self.assertNotIn(june_reuploaded_in_current_cycle.pk, unused_ids)
+        self.assertIn("無関係な月跨ぎ補助候補PDF2件を表示対象外", statement.ai_admin_memo)
+        self.assertIn("明細未使用の対象月・関連月跨ぎPDF1件", statement.ai_admin_memo)
+
     def test_version_file_is_present_without_web_display_requirement(self):
-        self.assertEqual(Path("VERSION").read_text(encoding="utf-8").strip(), "1.16.0")
+        self.assertEqual(Path("VERSION").read_text(encoding="utf-8").strip(), "1.16.1")
 
 
 @override_settings(PASSWORD_HASHERS=FAST_PASSWORD_HASHERS)

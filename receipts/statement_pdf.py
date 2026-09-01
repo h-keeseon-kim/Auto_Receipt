@@ -457,7 +457,7 @@ def build_card_statement_reconciliation_pdf(statement: CardStatement) -> bytes:
             Spacer(1, 3 * mm),
             Paragraph("明細に紐づかなかった提出書類", styles["section"]),
             Paragraph(
-                "提出済みですが、カード明細のどの行にも使用されなかった書類です。カード明細側の金額誤記・別取引・重複提出・解析不足の確認に使用します。",
+                "PDF本文の書類日・取引日が選択中の領収書発行月に属する提出ファイル、または明細に含まれる月跨ぎ取引と日付・請求元が関連する提出ファイルのうち、どの決済グループにも使用されなかった物理PDFです。照合候補として内部参照しただけの無関係な過去月書類は含めません。",
                 styles["subtitle"],
             ),
             _unused_receipts_table(unused_entries, styles),

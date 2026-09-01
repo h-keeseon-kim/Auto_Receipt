@@ -130,7 +130,7 @@
                     <div class="section-header compact">
                         <div>
                             <h3 id="unused-receipts-{{ statement.pk }}">明細に紐づかなかった提出書類</h3>
-                            <p class="muted">提出済みですが、カード明細のどの決済グループにも使用されなかった物理ファイルです。同じ返金PDF内の元決済・返金構成要素は1ファイルとして表示します。カード明細側の金額誤記、別取引、重複提出、日付差、解析不足を確認できます。</p>
+                            <p class="muted">PDF本文の書類日・取引日が選択中の領収書発行月に属する提出ファイル、または明細に含まれる月跨ぎ取引と日付・請求元が関連する提出ファイルのうち、どの決済グループにも使用されなかった物理PDFです。照合候補として内部参照しただけの無関係な過去月書類は表示しません。同じ返金PDF内の元決済・返金構成要素は1ファイルとして表示します。</p>
                         </div>
                         <span class="badge draft">{{ statement.display_unused_receipts|length }}件</span>
                     </div>

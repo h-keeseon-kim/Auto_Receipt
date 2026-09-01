@@ -56,6 +56,8 @@ from .statement_matching import (
     MATCH_MERCHANT_REFUND_NET,
     MATCH_ORIGINAL_CHARGE,
     MATCH_REVERSAL_ORIGINAL_CHARGE,
+    DEFAULT_REFUND_LOOKAHEAD_DAYS,
+    DEFAULT_REFUND_LOOKBACK_DAYS,
     ROLE_CHARGE,
     ROLE_REFUND,
     STATEMENT_ROLE_CHARGE,
@@ -111,6 +113,9 @@ RECEIPT_CHANGE_RECONCILE_MARKER = (
 CROSS_MONTH_CARD_NETTING_RECONCILE_MARKER = (
     "【照合ルール更新】明細内の実利用月を含む領収書参照、法人カード単位の後日返金相殺、返品元決済参照へ更新したため再照合します。"
 )
+UNMATCHED_RECEIPT_EVENT_SCOPE_RECONCILE_MARKER = (
+    "【照合表示更新】保存先の提出月ではなくPDF本文の書類日・取引日を基準に、当月分と実明細に関連する月跨ぎ書類だけを明細未使用一覧へ表示するため再照合します。"
+)
 
 # 実データでは通常一致56件がすべて同日または1日差だった。
 DATE_MATCH_TOLERANCE_DAYS = 1
@@ -156,6 +161,7 @@ def reconcile_pending_card_statement_month_semantics(*, period_month=None, state
         | Q(ai_admin_memo__contains=PLAN_CHANGE_USER_INFERENCE_RECONCILE_MARKER)
         | Q(ai_admin_memo__contains=RECEIPT_CHANGE_RECONCILE_MARKER)
         | Q(ai_admin_memo__contains=CROSS_MONTH_CARD_NETTING_RECONCILE_MARKER)
+        | Q(ai_admin_memo__contains=UNMATCHED_RECEIPT_EVENT_SCOPE_RECONCILE_MARKER)
     ).exclude(status__in=[CardStatementStatus.PROCESSING, CardStatementStatus.FAILED])
     if period_month is not None:
         queryset = queryset.filter(period_month=period_month)
@@ -322,6 +328,103 @@ def _available_receipts_for_statement_month(
         .order_by("submission__period_month", "issued_on", "uploaded_at", "pk")
         .distinct()
     )
+
+
+def _unmatched_report_receipt_ids(
+    statement_month: date,
+    receipts: list[Receipt],
+    components: list[EvidenceComponent],
+    unresolved_receipts: list[Receipt],
+    lines: list[StatementLine],
+    catalogs: list[ServiceCatalog],
+) -> set[int]:
+    """Return physical PDFs that belong in this statement's unused-file report.
+
+    Reconciliation scope is intentionally broader than display scope.  A July
+    statement can contain late-posted June transactions, so matching may load
+    both June and July receipt pools.  The UI must not label every unrelated
+    historical PDF as "明細未使用" merely because that broader pool was read.
+
+    Display a physical PDF when at least one of these conditions is true:
+
+    * its extracted document/transaction date belongs to the selected statement
+      month;
+    * it is a genuinely relevant cross-month candidate for an actual statement
+      line (same merchant and audited date window); or
+    * no reliable date was extracted and the PDF was stored in the selected
+      month's submission cycle, so hiding it would conceal a parse problem.
+
+    The decision is made from PDF-derived dates first.  Submission.period_month
+    is only a fallback because administrators can re-upload older receipts in a
+    later cycle.
+    """
+
+    target_month = receipt_month_for_statement(statement_month).replace(day=1)
+    primary_submission_month = submission_month_for_receipt(target_month).replace(day=1)
+    components_by_receipt: dict[int, list[EvidenceComponent]] = {}
+    for component in components:
+        components_by_receipt.setdefault(component.receipt_id, []).append(component)
+    unresolved_ids = {receipt.pk for receipt in unresolved_receipts}
+
+    def is_target_month(value: date | None) -> bool:
+        return bool(value and value.replace(day=1) == target_month)
+
+    def component_is_cross_month_relevant(component: EvidenceComponent) -> bool:
+        if component.event_date is None:
+            return False
+        for line in lines:
+            if line.transaction_date is None:
+                continue
+            if not merchant_keys_compatible(line.merchant_key, component.merchant_key):
+                continue
+            distance = (component.event_date - line.transaction_date).days
+            if component.role == ROLE_REFUND:
+                if -DEFAULT_REFUND_LOOKBACK_DAYS <= distance <= DEFAULT_REFUND_LOOKAHEAD_DAYS:
+                    return True
+            elif abs(distance) <= DATE_MATCH_TOLERANCE_DAYS:
+                return True
+        return False
+
+    scoped_ids: set[int] = set()
+    for receipt in receipts:
+        receipt_components = components_by_receipt.get(receipt.pk, [])
+        extracted_dates = [
+            component.event_date
+            for component in receipt_components
+            if component.event_date is not None
+        ]
+        if receipt.issued_on is not None:
+            extracted_dates.append(receipt.issued_on)
+
+        # Current-month PDFs remain visible even when they do not match any line.
+        if any(is_target_month(value) for value in extracted_dates):
+            scoped_ids.add(receipt.pk)
+            continue
+
+        # A previous-month PDF is visible only when it could plausibly explain an
+        # actual line in this statement.  This preserves 0383/0466-style lookup
+        # without surfacing unrelated receipts from the entire previous month.
+        if any(component_is_cross_month_relevant(component) for component in receipt_components):
+            scoped_ids.add(receipt.pk)
+            continue
+
+        if receipt.pk in unresolved_ids and receipt.issued_on is not None:
+            merchant_key = _unresolved_receipt_key(receipt, catalogs)
+            if merchant_key and any(
+                line.transaction_date is not None
+                and merchant_keys_compatible(line.merchant_key, merchant_key)
+                and abs((receipt.issued_on - line.transaction_date).days) <= DATE_MATCH_TOLERANCE_DAYS
+                for line in lines
+            ):
+                scoped_ids.add(receipt.pk)
+                continue
+
+        # Only undated/parse-failed PDFs use the storage cycle as a fallback.
+        # A reliably dated old PDF re-uploaded this month must not be shown.
+        if not extracted_dates and receipt.submission.period_month.replace(day=1) == primary_submission_month:
+            scoped_ids.add(receipt.pk)
+
+    return scoped_ids
 
 
 def _parse_decimal(value: Any) -> Decimal | None:
@@ -1300,6 +1403,15 @@ def reconcile_card_statement_items(statement_id: int, *, preserve_manual: bool =
         auto_items.append(item)
         auto_lines.append(line)
 
+    unmatched_report_receipt_ids = _unmatched_report_receipt_ids(
+        statement.period_month,
+        receipts,
+        components,
+        unresolved_receipts,
+        auto_lines,
+        catalogs,
+    )
+
     reconciliation = reconcile_statement(
         auto_lines,
         [component for component in components if component.key not in manual_component_keys],
@@ -1460,9 +1572,13 @@ def reconcile_card_statement_items(statement_id: int, *, preserve_manual: bool =
         for key in reconciliation.unused_component_keys
         if key in component_by_key
         and component_by_key[key].receipt_id not in used_receipt_ids
+        and component_by_key[key].receipt_id in unmatched_report_receipt_ids
     ]
-    unresolved_pool = [
-        receipt for receipt in unresolved_pool if receipt.pk not in used_receipt_ids
+    unmatched_report_unresolved_receipts = [
+        receipt
+        for receipt in unresolved_pool
+        if receipt.pk not in used_receipt_ids
+        and receipt.pk in unmatched_report_receipt_ids
     ]
     unresolved_line_keys = {
         str(item.pk)
@@ -1472,7 +1588,7 @@ def reconcile_card_statement_items(statement_id: int, *, preserve_manual: bool =
     unresolved_lines = [line for line in auto_lines if line.key in unresolved_line_keys]
     unmatched_receipt_snapshot = _build_unmatched_receipt_snapshot(
         unused_components=unused_components,
-        unresolved_receipts=unresolved_pool,
+        unresolved_receipts=unmatched_report_unresolved_receipts,
         lines=unresolved_lines,
         receipt_by_id=receipt_by_id,
     )
@@ -1592,6 +1708,7 @@ def reconcile_card_statement_items(statement_id: int, *, preserve_manual: bool =
             PLAN_CHANGE_USER_INFERENCE_RECONCILE_MARKER,
             RECEIPT_CHANGE_RECONCILE_MARKER,
             CROSS_MONTH_CARD_NETTING_RECONCILE_MARKER,
+            UNMATCHED_RECEIPT_EVENT_SCOPE_RECONCILE_MARKER,
         ):
             extraction_memo = extraction_memo.replace(marker, "")
         extraction_memo = extraction_memo.strip()
@@ -1606,18 +1723,27 @@ def reconcile_card_statement_items(statement_id: int, *, preserve_manual: bool =
             }
         )
         target_receipt_month_label = "・".join(month.strftime("%Y-%m") for month in target_receipt_months)
+        unused_report_scope_count = len(unmatched_report_receipt_ids)
+        internal_reference_only_count = max(len(receipts) - unused_report_scope_count, 0)
+        receipt_scope_summary = (
+            f"照合候補PDF{len(receipts)}件（明細未使用一覧の表示対象PDF{unused_report_scope_count}件"
+        )
+        if internal_reference_only_count:
+            receipt_scope_summary += f"、無関係な月跨ぎ補助候補PDF{internal_reference_only_count}件を表示対象外"
+        receipt_scope_summary += "）"
         reconciliation_memo = (
             f"【照合結果】明細月{statement.period_month:%Y-%m}（参照領収書月{target_receipt_month_label}）の"
-            f"提出PDF{len(receipts)}件を、ファイル名や利用者ではなくPDF本文の取引構成要素で照合しました。"
+            f"{receipt_scope_summary}を、ファイル名や利用者ではなくPDF本文の取引構成要素で照合しました。"
             f"直接一致{direct_count}件、返金書内の元決済{original_count}件、紐付返金相殺{linked_count}件、"
             f"法人カード単位の後日返金相殺{merchant_net_count}件、推定対応{inferred_count}件、解析要確認{review_count}件、未一致{missing_count}件、"
-            f"明細未使用の提出PDF{len(unmatched_receipt_snapshot)}件です。"
+            f"明細未使用の対象月・関連月跨ぎPDF{len(unmatched_receipt_snapshot)}件です。"
             f"通常取引は金額・通貨完全一致、請求元一致または既知の決済名義対応、利用日±{DATE_MATCH_TOLERANCE_DAYS}日を全体最適化で一対一割当し、"
             "明示Invoice/Transaction IDが同じ重複書類は1取引として扱っています。通常照合では利用者特定を条件に含めません。"
             "返品行は同一請求元・同一利用日の元決済を参照し、同一法人カードの後日返金は最大45日後まで厳密な金額一致で全体最適割当します。"
             "直接一致しない明細についてのみ、当月の契約変更書類に明記されたBill to利用者・旧プラン終了情報と、"
             "過去領収書または前月カード明細の同一請求元・金額通貨完全一致・前月同請求日の実績が揃う場合に限り、"
             "管理者確認前の推定対応として提示します。前月カード明細は領収書提出証拠ではなく、旧プランの請求周期を裏付ける補助証拠です。"
+            "未使用一覧は当月書類と実明細に関連する月跨ぎ書類だけを対象とし、照合候補として読み込んだだけの無関係な過去月PDFは表示しません。"
         )
         if reconciliation.deduplicated_component_keys:
             reconciliation_memo += f" 重複証拠{len(reconciliation.deduplicated_component_keys)}件を二重計上から除外しました。"
