@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import logging
 import re
 import threading
@@ -11,7 +12,7 @@ from typing import Any
 
 from django.conf import settings
 from django.contrib.auth import get_user_model
-from django.db import close_old_connections, transaction
+from django.db import IntegrityError, close_old_connections, transaction
 from django.db.models import Q
 from django.utils import timezone
 
@@ -34,9 +35,14 @@ from .models import (
     StatementMatchReason,
     StatementMatchStatus,
     StatementReceiptEvidenceRole,
+    StatementReceiptEvidenceUsageMode,
     add_months,
     receipt_month_for_statement,
     submission_month_for_receipt,
+)
+from .receipt_component_identity import (
+    component_fingerprint,
+    source_component_key,
 )
 from .statement_ai import generate_card_statement_analysis
 from .plan_change_matching import (
@@ -62,6 +68,8 @@ from .statement_matching import (
     ROLE_REFUND,
     STATEMENT_ROLE_CHARGE,
     STATEMENT_ROLE_REVERSAL,
+    USAGE_MODE_CONSUME,
+    USAGE_MODE_REFERENCE,
     StatementLine,
     format_evidence_calculation,
     merchant_keys_compatible,
@@ -116,6 +124,9 @@ CROSS_MONTH_CARD_NETTING_RECONCILE_MARKER = (
 UNMATCHED_RECEIPT_EVENT_SCOPE_RECONCILE_MARKER = (
     "【照合表示更新】保存先の提出月ではなくPDF本文の書類日・取引日を基準に、当月分と実明細に関連する月跨ぎ書類だけを明細未使用一覧へ表示するため再照合します。"
 )
+GLOBAL_COMPONENT_USAGE_RECONCILE_MARKER = (
+    "【照合使用履歴更新】取引構成要素の全明細共通フィンガープリントと消費・参照区分を導入し、過去明細で使用済みの証拠を再利用しないため再照合します。"
+)
 
 # 実データでは通常一致56件がすべて同日または1日差だった。
 DATE_MATCH_TOLERANCE_DAYS = 1
@@ -146,7 +157,16 @@ KNOWN_MERCHANT_PATTERNS: tuple[tuple[str, tuple[str, ...]], ...] = (
 
 
 def reconcile_pending_card_statement_month_semantics(*, period_month=None, statement_id=None) -> int:
-    queryset = CardStatement.objects.filter(
+    """Reconcile pending statements in chronological order until ownership settles.
+
+    A reconciliation that changes the global consume ledger invalidates other
+    statement snapshots. With several months pending, a single pass can therefore
+    mark an already processed earlier statement again. A short fixed-point loop
+    guarantees that the page is rendered only after those secondary invalidations
+    have been cleared. In normal operation convergence takes one or two rounds.
+    """
+
+    marker_filter = (
         Q(ai_admin_memo__contains=CARD_STATEMENT_MONTH_SEMANTICS_RECONCILE_MARKER)
         | Q(ai_admin_memo__contains=CARD_STATEMENT_SAME_MONTH_RECEIPT_RECONCILE_MARKER)
         | Q(ai_admin_memo__contains=CARD_STATEMENT_MATCHING_RULES_RECONCILE_MARKER)
@@ -162,15 +182,43 @@ def reconcile_pending_card_statement_month_semantics(*, period_month=None, state
         | Q(ai_admin_memo__contains=RECEIPT_CHANGE_RECONCILE_MARKER)
         | Q(ai_admin_memo__contains=CROSS_MONTH_CARD_NETTING_RECONCILE_MARKER)
         | Q(ai_admin_memo__contains=UNMATCHED_RECEIPT_EVENT_SCOPE_RECONCILE_MARKER)
-    ).exclude(status__in=[CardStatementStatus.PROCESSING, CardStatementStatus.FAILED])
-    if period_month is not None:
-        queryset = queryset.filter(period_month=period_month)
-    if statement_id is not None:
-        queryset = queryset.filter(pk=statement_id)
-    ids = list(queryset.order_by("pk").values_list("pk", flat=True))
-    for pk in ids:
-        reconcile_card_statement_items(pk)
-    return len(ids)
+        | Q(ai_admin_memo__contains=GLOBAL_COMPONENT_USAGE_RECONCILE_MARKER)
+    )
+
+    def pending_ids() -> list[int]:
+        queryset = CardStatement.objects.filter(marker_filter).exclude(
+            status__in=[CardStatementStatus.PROCESSING, CardStatementStatus.FAILED]
+        )
+        if statement_id is not None:
+            queryset = queryset.filter(pk=statement_id)
+        elif period_month is not None:
+            # Settle all pending earlier statements first. A newly uploaded
+            # component may belong to an older statement even when the
+            # administrator opens a later month.
+            queryset = queryset.filter(period_month__lte=period_month)
+        return list(
+            queryset.order_by("period_month", "uploaded_at", "pk")
+            .values_list("pk", flat=True)
+        )
+
+    processed = 0
+    max_rounds = 4 if statement_id is None else 1
+    for _round in range(max_rounds):
+        ids = pending_ids()
+        if not ids:
+            break
+        for pk in ids:
+            reconcile_card_statement_items(pk)
+            processed += 1
+    else:
+        remaining = pending_ids()
+        if remaining:
+            logger.warning(
+                "Global statement component ownership did not settle after %s rounds: %s",
+                max_rounds,
+                remaining,
+            )
+    return processed
 
 
 def _normalize_text(value: str) -> str:
@@ -552,6 +600,592 @@ def _enrich_receipt_financial_metadata(receipt: Receipt) -> None:
     receipt.updated_at = updated_at
 
 
+def _ensure_receipt_file_sha256(receipt: Receipt) -> str:
+    """Persist the immutable file digest without firing Receipt post-save hooks."""
+
+    if receipt.file_sha256:
+        return receipt.file_sha256
+    if not receipt.file_available:
+        return ""
+    digest = hashlib.sha256()
+    try:
+        with receipt.file.open("rb") as file_obj:
+            while True:
+                chunk = file_obj.read(1024 * 1024)
+                if not chunk:
+                    break
+                digest.update(chunk)
+    except Exception:
+        logger.exception("Could not hash receipt file %s", receipt.pk)
+        return ""
+    value = digest.hexdigest()
+    Receipt.objects.filter(pk=receipt.pk, file_sha256="").update(
+        file_sha256=value,
+        updated_at=timezone.now(),
+    )
+    receipt.file_sha256 = value
+    return value
+
+
+def _component_fingerprint_for_receipt(
+    receipt: Receipt,
+    *,
+    raw_key: str,
+    merchant_key: str,
+    payee: str,
+    role: str,
+    amount: Decimal,
+    currency: str,
+    event_date: date | None,
+    invoice_number: str = "",
+    transaction_id: str = "",
+    related_transaction_id: str = "",
+) -> str:
+    return component_fingerprint(
+        merchant_key=merchant_key,
+        payee=payee,
+        role=role,
+        signed_amount=amount,
+        currency=currency,
+        event_date=event_date,
+        invoice_number=invoice_number,
+        transaction_id=transaction_id,
+        related_transaction_id=related_transaction_id,
+        file_sha256=_ensure_receipt_file_sha256(receipt),
+        source_component_key=raw_key,
+        receipt_id=receipt.pk,
+    )
+
+
+def _evidence_component_fingerprint(evidence: CardStatementReceiptEvidence) -> str:
+    receipt = evidence.receipt
+    file_sha256 = _ensure_receipt_file_sha256(receipt) if receipt is not None else ""
+    merchant_key = (
+        _known_merchant_key(evidence.service_label_snapshot)
+        or _known_merchant_key(evidence.payee_snapshot)
+    )
+    return component_fingerprint(
+        merchant_key=merchant_key,
+        payee=evidence.payee_snapshot,
+        role=evidence.role,
+        signed_amount=evidence.signed_amount,
+        currency=evidence.currency,
+        event_date=evidence.event_date,
+        invoice_number=evidence.invoice_number_snapshot,
+        transaction_id=evidence.transaction_reference_snapshot,
+        related_transaction_id=evidence.related_transaction_reference_snapshot,
+        file_sha256=file_sha256,
+        source_component_key=source_component_key(
+            evidence.component_key,
+            evidence.receipt_id,
+        ),
+        receipt_id=evidence.receipt_id,
+    )
+
+
+def _mark_statement_for_global_usage_reconciliation(statement: CardStatement) -> None:
+    memo = statement.ai_admin_memo or ""
+    if GLOBAL_COMPONENT_USAGE_RECONCILE_MARKER not in memo:
+        memo = f"{GLOBAL_COMPONENT_USAGE_RECONCILE_MARKER} {memo}".strip()
+    CardStatement.objects.filter(pk=statement.pk).update(
+        ai_admin_memo=memo[:5000],
+        reconciled_at=None,
+        unmatched_receipt_components=[],
+        updated_at=timezone.now(),
+    )
+
+
+def mark_card_statements_for_global_usage_refresh(
+    *,
+    exclude_statement_id: int | None = None,
+    period_month_gte: date | None = None,
+) -> int:
+    """Invalidate statement allocations/snapshots affected by global ownership.
+
+    The operation does not delete evidence.  It places the selected statements
+    on the deterministic reconciliation queue and clears only the cached global
+    unused-PDF snapshot.  Callers can restrict the lower month bound after a
+    receipt change or exclude the statement currently being committed.
+    """
+
+    queryset = CardStatement.objects.exclude(
+        status__in=[CardStatementStatus.PROCESSING, CardStatementStatus.FAILED]
+    )
+    if exclude_statement_id is not None:
+        queryset = queryset.exclude(pk=exclude_statement_id)
+    if period_month_gte is not None:
+        queryset = queryset.filter(period_month__gte=period_month_gte)
+
+    updated = 0
+    for candidate in queryset.only("pk", "ai_admin_memo").order_by(
+        "period_month", "uploaded_at", "pk"
+    ):
+        memo = candidate.ai_admin_memo or ""
+        if GLOBAL_COMPONENT_USAGE_RECONCILE_MARKER not in memo:
+            memo = f"{GLOBAL_COMPONENT_USAGE_RECONCILE_MARKER} {memo}".strip()
+        CardStatement.objects.filter(pk=candidate.pk).update(
+            ai_admin_memo=memo[:5000],
+            reconciled_at=None,
+            unmatched_receipt_components=[],
+            updated_at=timezone.now(),
+        )
+        updated += 1
+    return updated
+
+
+def mark_later_card_statements_for_global_usage_refresh(statement: CardStatement) -> int:
+    """Invalidate every other statement after a global consume set changes.
+
+    Later statements may need their monetary allocation rebuilt because the same
+    component is no longer available. Earlier statements may need to reclaim a
+    newly available component or merely refresh a previously saved "globally
+    unused" snapshot after a later statement consumes it. The function name is
+    retained for backwards compatibility, but the invalidation scope is global.
+    """
+
+    return mark_card_statements_for_global_usage_refresh(
+        exclude_statement_id=statement.pk,
+    )
+
+
+def _reset_legacy_automatic_evidence_item(
+    item: CardStatementItem,
+    *,
+    reason: str,
+) -> None:
+    """Release a stale automatic evidence group as one atomic calculation."""
+
+    if _is_manual_override(item):
+        raise IntegrityError(
+            f"Manual statement item {item.pk} cannot be released by automatic fingerprint backfill"
+        )
+    CardStatementReceiptEvidence.objects.filter(statement_item=item).delete()
+    CardStatementPlanChangeInference.objects.filter(statement_item=item).delete()
+    _clear_item_match(item)
+    if item.receipt_required:
+        item.match_status = StatementMatchStatus.UNMATCHED
+        item.match_reason_code = StatementMatchReason.NO_COMPATIBLE_RECEIPT
+        item.match_confidence = 0.0
+        item.match_memo = reason[:4000]
+    else:
+        item.match_status = StatementMatchStatus.IGNORED
+        item.match_reason_code = StatementMatchReason.IGNORED
+        item.match_confidence = 1.0
+        item.match_memo = "領収書管理対象外です。"
+    item.save(
+        update_fields=[
+            "matched_user", "matched_catalog_service", "matched_service",
+            "matched_receipt", "match_status", "match_reason_code",
+            "match_confidence", "match_memo",
+        ]
+    )
+    _mark_statement_for_global_usage_reconciliation(item.statement)
+
+
+def _backfill_missing_evidence_fingerprints() -> int:
+    """Upgrade legacy evidence rows to stable component identities.
+
+    Migration 0042 handles the normal upgrade path. This lazy fallback covers
+    rows whose source file was unavailable during migration or legacy/manual
+    rows created with a blank fingerprint. Manual ownership has priority; among
+    automatic owners the earliest statement wins. A monetary calculation is
+    indivisible, so when one component loses ownership the whole automatic item
+    is cleared and queued for deterministic rebuilding rather than being
+    misleadingly demoted to a reference-only row.
+    """
+
+    rows = list(
+        CardStatementReceiptEvidence.objects.select_for_update()
+        .filter(component_fingerprint="")
+        .select_related("receipt", "statement_item__statement")
+        .order_by(
+            "statement_item__statement__period_month",
+            "statement_item__statement__uploaded_at",
+            "statement_item__statement_id",
+            "statement_item__sequence",
+            "pk",
+        )
+    )
+    updated = 0
+    cleared_item_ids: set[int] = set()
+    for evidence in rows:
+        if evidence.statement_item_id in cleared_item_ids:
+            continue
+        if not CardStatementReceiptEvidence.objects.filter(pk=evidence.pk).exists():
+            continue
+        fingerprint = _evidence_component_fingerprint(evidence)
+        if not fingerprint:
+            continue
+
+        usage_mode = evidence.usage_mode or StatementReceiptEvidenceUsageMode.CONSUME
+        if usage_mode == StatementReceiptEvidenceUsageMode.REFERENCE:
+            CardStatementReceiptEvidence.objects.filter(pk=evidence.pk).update(
+                component_fingerprint=fingerprint,
+                usage_mode=StatementReceiptEvidenceUsageMode.REFERENCE,
+            )
+            updated += 1
+            continue
+
+        owners = list(
+            CardStatementReceiptEvidence.objects.select_for_update()
+            .filter(
+                component_fingerprint=fingerprint,
+                usage_mode=StatementReceiptEvidenceUsageMode.CONSUME,
+            )
+            .exclude(pk=evidence.pk)
+            .select_related("statement_item__statement")
+            .order_by(
+                "statement_item__statement__period_month",
+                "statement_item__statement__uploaded_at",
+                "statement_item__statement_id",
+                "statement_item__sequence",
+                "pk",
+            )
+        )
+        current_item = evidence.statement_item
+        current_manual = _is_manual_override(current_item)
+        manual_owners = [owner for owner in owners if _is_manual_override(owner.statement_item)]
+
+        if current_manual and manual_owners:
+            logger.warning(
+                "Manual evidence %s conflicts with manual component owner(s) %s",
+                evidence.pk,
+                [owner.pk for owner in manual_owners],
+            )
+            warning = (
+                "【全明細使用履歴・管理者確認】同じ金融イベントを複数の管理者確定明細が"
+                "使用しています。どちらを正しい所有先とするか確認してください。"
+            )
+            if warning not in (current_item.match_memo or ""):
+                current_item.match_memo = f"{warning} {current_item.match_memo or ''}"[:4000]
+                current_item.save(update_fields=["match_memo"])
+            _mark_statement_for_global_usage_reconciliation(current_item.statement)
+            continue
+
+        if current_manual:
+            for owner in owners:
+                owner_item = owner.statement_item
+                _reset_legacy_automatic_evidence_item(
+                    owner_item,
+                    reason=(
+                        "【全明細使用履歴】管理者確定明細が同じ取引構成要素を使用しているため、"
+                        "旧自動割当を解放しました。最新の領収書と再照合してください。"
+                    ),
+                )
+                cleared_item_ids.add(owner_item.pk)
+            CardStatementReceiptEvidence.objects.filter(pk=evidence.pk).update(
+                component_fingerprint=fingerprint,
+                usage_mode=StatementReceiptEvidenceUsageMode.CONSUME,
+            )
+            updated += 1
+            continue
+
+        if manual_owners:
+            _reset_legacy_automatic_evidence_item(
+                current_item,
+                reason=(
+                    "【全明細使用履歴】同じ取引構成要素は管理者確定明細で使用済みのため、"
+                    "旧自動割当を解放しました。最新の領収書と再照合してください。"
+                ),
+            )
+            cleared_item_ids.add(current_item.pk)
+            continue
+
+        if owners:
+            current_order = (
+                _statement_order_key(current_item.statement),
+                current_item.sequence,
+                current_item.pk,
+                evidence.sequence,
+                evidence.pk,
+            )
+            earliest_owner = min(
+                owners,
+                key=lambda owner: (
+                    _statement_order_key(owner.statement_item.statement),
+                    owner.statement_item.sequence,
+                    owner.statement_item.pk,
+                    owner.sequence,
+                    owner.pk,
+                ),
+            )
+            owner_order = (
+                _statement_order_key(earliest_owner.statement_item.statement),
+                earliest_owner.statement_item.sequence,
+                earliest_owner.statement_item.pk,
+                earliest_owner.sequence,
+                earliest_owner.pk,
+            )
+            if current_order < owner_order:
+                for owner in owners:
+                    owner_item = owner.statement_item
+                    _reset_legacy_automatic_evidence_item(
+                        owner_item,
+                        reason=(
+                            "【全明細使用履歴】より前のカード明細が同じ取引構成要素を使用するため、"
+                            "旧自動割当を解放しました。最新の領収書と再照合してください。"
+                        ),
+                    )
+                    cleared_item_ids.add(owner_item.pk)
+            else:
+                _reset_legacy_automatic_evidence_item(
+                    current_item,
+                    reason=(
+                        "【全明細使用履歴】同じ取引構成要素がより前のカード明細で使用済みのため、"
+                        "旧自動割当を解放しました。最新の領収書と再照合してください。"
+                    ),
+                )
+                cleared_item_ids.add(current_item.pk)
+                continue
+
+        CardStatementReceiptEvidence.objects.filter(pk=evidence.pk).update(
+            component_fingerprint=fingerprint,
+            usage_mode=StatementReceiptEvidenceUsageMode.CONSUME,
+        )
+        updated += 1
+    return updated
+
+
+def _statement_order_key(statement: CardStatement) -> tuple[Any, Any, int]:
+    """Deterministic ownership order: statement month, upload time, primary key."""
+
+    return (statement.period_month, statement.uploaded_at, statement.pk)
+
+
+def _evidence_history_payload(evidence: CardStatementReceiptEvidence) -> dict[str, Any]:
+    owner_statement = evidence.statement_item.statement
+    return {
+        "evidence_id": evidence.pk,
+        "statement_id": owner_statement.pk,
+        "statement_month": owner_statement.period_month.isoformat(),
+        "line_reference": (
+            evidence.statement_item.line_reference
+            or str(evidence.statement_item.sequence)
+        ),
+        "filename": evidence.filename_snapshot,
+        "usage_mode": evidence.usage_mode,
+        "manual": _is_manual_override(evidence.statement_item),
+    }
+
+
+def _partition_global_consume_ownership(
+    statement: CardStatement,
+    *,
+    manual_item_ids: set[int],
+) -> tuple[
+    dict[str, list[dict[str, Any]]],
+    dict[str, list[CardStatementReceiptEvidence]],
+]:
+    """Split global consume owners into blockers and preemptable later owners.
+
+    Manual allocations always block automatic reassignment, regardless of their
+    statement month.  Automatic ownership is chronological: an earlier statement
+    may reclaim a component from a later statement, while a later statement may
+    never take a component already consumed by an earlier one.  Existing consume
+    rows are locked so two reconciliations cannot make conflicting ownership
+    decisions concurrently.
+    """
+
+    current_order = _statement_order_key(statement)
+    rows = list(
+        CardStatementReceiptEvidence.objects.select_for_update()
+        .filter(usage_mode=StatementReceiptEvidenceUsageMode.CONSUME)
+        .exclude(component_fingerprint="")
+        .select_related("statement_item__statement", "receipt")
+        .order_by(
+            "statement_item__statement__period_month",
+            "statement_item__statement__uploaded_at",
+            "statement_item__statement_id",
+            "statement_item__sequence",
+            "pk",
+        )
+    )
+
+    blocking: dict[str, list[dict[str, Any]]] = {}
+    preemptable: dict[str, list[CardStatementReceiptEvidence]] = {}
+    for evidence in rows:
+        item = evidence.statement_item
+        owner_statement = item.statement
+        if owner_statement.pk == statement.pk:
+            if item.pk in manual_item_ids:
+                blocking.setdefault(evidence.component_fingerprint, []).append(
+                    _evidence_history_payload(evidence)
+                )
+            # This statement's old automatic rows are released before matching.
+            continue
+
+        is_manual = _is_manual_override(item)
+        owner_order = _statement_order_key(owner_statement)
+        if (
+            is_manual
+            or owner_statement.status == CardStatementStatus.PROCESSING
+            or owner_order < current_order
+        ):
+            blocking.setdefault(evidence.component_fingerprint, []).append(
+                _evidence_history_payload(evidence)
+            )
+        else:
+            preemptable.setdefault(evidence.component_fingerprint, []).append(evidence)
+
+    return blocking, preemptable
+
+
+def _release_later_automatic_consumers(
+    statement: CardStatement,
+    *,
+    desired_fingerprints: set[str],
+    preemptable_owners: dict[str, list[CardStatementReceiptEvidence]],
+) -> tuple[set[int], set[int]]:
+    """Release later automatic assignments that conflict with this statement.
+
+    The entire downstream statement item is invalid once any component in its
+    calculation is reclaimed.  All evidence rows for that item are therefore
+    deleted together, and its statement is queued for chronological
+    reconciliation.  Manual overrides are never passed in as preemptable owners.
+    """
+
+    conflict_item_ids = {
+        evidence.statement_item_id
+        for fingerprint in desired_fingerprints
+        for evidence in preemptable_owners.get(fingerprint, [])
+    }
+    if not conflict_item_ids:
+        return set(), set()
+
+    affected_items = list(
+        CardStatementItem.objects.select_for_update()
+        .filter(pk__in=conflict_item_ids)
+        .select_related("statement")
+        .order_by("statement__period_month", "statement__uploaded_at", "statement_id", "sequence", "pk")
+    )
+    affected_statement_ids = {item.statement_id for item in affected_items}
+    # A manual decision must never be silently cleared. The partition helper
+    # excludes manual items, but validate every row before deleting anything.
+    manual_conflicts = [item.pk for item in affected_items if _is_manual_override(item)]
+    if manual_conflicts:
+        raise IntegrityError(
+            f"Manual statement item(s) {manual_conflicts} were selected for automatic preemption"
+        )
+    if affected_statement_ids:
+        list(
+            CardStatement.objects.select_for_update()
+            .filter(pk__in=affected_statement_ids)
+            .order_by("period_month", "uploaded_at", "pk")
+            .values_list("pk", flat=True)
+        )
+
+    CardStatementReceiptEvidence.objects.filter(
+        statement_item_id__in=conflict_item_ids
+    ).delete()
+    CardStatementPlanChangeInference.objects.filter(
+        statement_item_id__in=conflict_item_ids
+    ).delete()
+
+    for item in affected_items:
+        _clear_item_match(item)
+        if item.receipt_required:
+            item.match_status = StatementMatchStatus.UNMATCHED
+            item.match_reason_code = StatementMatchReason.NO_COMPATIBLE_RECEIPT
+            item.match_confidence = 0.0
+            item.match_memo = (
+                "【全明細使用履歴】より前の明細が同じ取引構成要素を金額計算に使用したため、"
+                "この明細の自動割当を解放しました。最新の領収書と再照合してください。"
+            )
+        else:
+            item.match_status = StatementMatchStatus.IGNORED
+            item.match_reason_code = StatementMatchReason.IGNORED
+            item.match_confidence = 1.0
+            item.match_memo = "領収書管理対象外です。"
+        item.save(
+            update_fields=[
+                "matched_user", "matched_catalog_service", "matched_service",
+                "matched_receipt", "match_status", "match_reason_code",
+                "match_confidence", "match_memo",
+            ]
+        )
+
+    for owner_statement in CardStatement.objects.filter(pk__in=affected_statement_ids):
+        _mark_statement_for_global_usage_reconciliation(owner_statement)
+
+    return set(conflict_item_ids), affected_statement_ids
+
+
+def _remaining_preemptable_history(
+    preemptable_owners: dict[str, list[CardStatementReceiptEvidence]],
+    *,
+    released_item_ids: set[int],
+) -> dict[str, list[dict[str, Any]]]:
+    history: dict[str, list[dict[str, Any]]] = {}
+    for fingerprint, evidences in preemptable_owners.items():
+        for evidence in evidences:
+            if evidence.statement_item_id in released_item_ids:
+                continue
+            history.setdefault(fingerprint, []).append(_evidence_history_payload(evidence))
+    return history
+
+
+def _merge_usage_history(
+    *histories: dict[str, list[dict[str, Any]]],
+) -> dict[str, list[dict[str, Any]]]:
+    merged: dict[str, list[dict[str, Any]]] = {}
+    seen: set[int] = set()
+    for history in histories:
+        for fingerprint, rows in history.items():
+            for row in rows:
+                evidence_id = int(row.get("evidence_id") or 0)
+                if evidence_id and evidence_id in seen:
+                    continue
+                if evidence_id:
+                    seen.add(evidence_id)
+                merged.setdefault(fingerprint, []).append(row)
+    return merged
+
+
+def _global_reference_component_history(
+    statement: CardStatement,
+    *,
+    manual_item_ids: set[int],
+) -> dict[str, list[dict[str, Any]]]:
+    """Return reference-only history without reserving the component.
+
+    Reference rows are retained for audit display but deliberately do not make a
+    component unavailable to a later monetary calculation.
+    """
+
+    queryset = (
+        CardStatementReceiptEvidence.objects.filter(
+            usage_mode=StatementReceiptEvidenceUsageMode.REFERENCE,
+        )
+        .exclude(component_fingerprint="")
+        .select_related("statement_item__statement", "receipt")
+    )
+    rows = list(queryset.exclude(statement_item__statement=statement))
+    if manual_item_ids:
+        rows.extend(queryset.filter(statement_item_id__in=manual_item_ids))
+
+    history: dict[str, list[dict[str, Any]]] = {}
+    seen_evidence_ids: set[int] = set()
+    for evidence in rows:
+        if evidence.pk in seen_evidence_ids:
+            continue
+        seen_evidence_ids.add(evidence.pk)
+        owner_statement = evidence.statement_item.statement
+        history.setdefault(evidence.component_fingerprint, []).append(
+            {
+                "evidence_id": evidence.pk,
+                "statement_id": owner_statement.pk,
+                "statement_month": owner_statement.period_month.isoformat(),
+                "line_reference": (
+                    evidence.statement_item.line_reference
+                    or str(evidence.statement_item.sequence)
+                ),
+                "filename": evidence.filename_snapshot,
+                "usage_mode": evidence.usage_mode,
+            }
+        )
+    return history
+
+
 def _receipt_components(
     receipts: list[Receipt],
     catalogs: list[ServiceCatalog],
@@ -600,6 +1234,22 @@ def _receipt_components(
             evidence_payee = payee
             raw_key = str(raw.get("component_key") or f"component-{index + 1}")
             component_key = f"receipt-{receipt.pk}:{raw_key}"[:160]
+            invoice_number = str(raw.get("invoice_number") or "")[:160]
+            transaction_id = str(raw.get("transaction_id") or "")[:160]
+            related_transaction_id = str(raw.get("related_transaction_id") or "")[:160]
+            fingerprint = _component_fingerprint_for_receipt(
+                receipt,
+                raw_key=raw_key,
+                merchant_key=merchant_key,
+                payee=evidence_payee,
+                role=role,
+                amount=amount,
+                currency=currency,
+                event_date=event_date,
+                invoice_number=invoice_number,
+                transaction_id=transaction_id,
+                related_transaction_id=related_transaction_id,
+            )
             components.append(
                 EvidenceComponent(
                     key=component_key,
@@ -612,12 +1262,13 @@ def _receipt_components(
                     event_date=event_date,
                     role=role,
                     document_kind=document_kind,
-                    invoice_number=str(raw.get("invoice_number") or "")[:160],
-                    transaction_id=str(raw.get("transaction_id") or "")[:160],
-                    related_transaction_id=str(raw.get("related_transaction_id") or "")[:160],
+                    invoice_number=invoice_number,
+                    transaction_id=transaction_id,
+                    related_transaction_id=related_transaction_id,
                     source_label=str(raw.get("source_label") or "")[:120],
                     payee=evidence_payee[:160],
                     service_label=service_label[:160],
+                    fingerprint=fingerprint,
                 )
             )
             valid_count += 1
@@ -908,26 +1559,35 @@ def _plan_inference_reason(candidate) -> str:
     )
 
 
-REVERSAL_TEXT_MARKERS = ("返品", "取消", "キャンセル", "REVERSAL", "REFUND", "CREDITREVERSAL")
+REVERSAL_MERCHANT_MARKERS = (
+    "返品", "取消", "キャンセル", "RETURN", "REVERSAL", "CREDIT REVERSAL", "CREDITREVERSAL",
+)
+REVERSAL_MEMO_MARKERS = (
+    "返品元決済確認", "カード明細の返品・取消行", "同日返品元決済",
+)
 
 
 def _statement_item_is_reversal(item: CardStatementItem) -> bool:
+    """Return True only for an actual card return/cancellation statement row.
+
+    A normal positive re-booking may contain the word ``返金`` in its match memo
+    because several later refunds were netted into it. Treating that memo as a
+    reversal would incorrectly downgrade its monetary evidence to reference-only.
+    The broad markers are therefore inspected only in the statement merchant
+    fields; saved memos use a narrow set of explicit reversal phrases.
+    """
+
     for amount in (item.original_amount, item.amount_jpy):
         if amount is not None and amount < 0:
             return True
-    text = unicodedata.normalize(
+    merchant_text = unicodedata.normalize(
         "NFKC",
-        " ".join(
-            value
-            for value in (
-                item.merchant_name,
-                item.merchant_normalized,
-                _base_match_memo(item.match_memo),
-            )
-            if value
-        ),
+        " ".join(value for value in (item.merchant_name, item.merchant_normalized) if value),
     ).upper()
-    return any(marker in text for marker in REVERSAL_TEXT_MARKERS)
+    if any(marker in merchant_text for marker in REVERSAL_MERCHANT_MARKERS):
+        return True
+    memo_text = unicodedata.normalize("NFKC", item.match_memo or "").upper()
+    return any(marker in memo_text for marker in REVERSAL_MEMO_MARKERS)
 
 
 def _statement_line(item: CardStatementItem, catalogs: list[ServiceCatalog]) -> StatementLine:
@@ -1031,6 +1691,8 @@ def _create_evidence_records(
     item: CardStatementItem,
     components: list[EvidenceComponent],
     receipt_by_id: dict[int, Receipt],
+    *,
+    usage_mode: str = USAGE_MODE_CONSUME,
 ) -> list[CardStatementReceiptEvidence]:
     records: list[CardStatementReceiptEvidence] = []
     for sequence, component in enumerate(components, start=1):
@@ -1040,6 +1702,12 @@ def _create_evidence_records(
                 statement_item=item,
                 receipt=receipt,
                 component_key=component.key[:160],
+                component_fingerprint=component.fingerprint[:64],
+                usage_mode=(
+                    StatementReceiptEvidenceUsageMode.REFERENCE
+                    if usage_mode == USAGE_MODE_REFERENCE
+                    else StatementReceiptEvidenceUsageMode.CONSUME
+                ),
                 role=(
                     StatementReceiptEvidenceRole.REFUND
                     if component.role == ROLE_REFUND
@@ -1227,24 +1895,114 @@ def _unused_component_reason(
 def _build_unmatched_receipt_snapshot(
     *,
     unused_components: list[EvidenceComponent],
+    all_components: list[EvidenceComponent],
     unresolved_receipts: list[Receipt],
     lines: list[StatementLine],
     receipt_by_id: dict[int, Receipt],
+    global_usage_history: dict[str, list[dict[str, Any]]],
+    global_reference_history: dict[str, list[dict[str, Any]]],
+    current_component_usage: dict[str, list[dict[str, Any]]],
 ) -> list[dict[str, Any]]:
-    """Build one unmatched row per physical uploaded PDF.
+    """Build one row per PDF that still has a globally unconsumed component.
 
-    Refund documents can contain both the original charge and a credit component.
-    The UI section is explicitly a list of *files*, so the same PDF must not be
-    repeated once for every extracted financial component.
+    A refund PDF commonly contains both the original payment and the refund. If
+    one component was already consumed by a prior statement while the other is
+    still available, the file remains visible as ``一部使用済み`` and the
+    component-level status explains exactly what remains unused. Fully consumed
+    PDFs are omitted from this section.
     """
 
     snapshots: list[dict[str, Any]] = []
-    grouped: dict[int, list[EvidenceComponent]] = {}
+    unused_keys = {component.key for component in unused_components}
+    unused_by_receipt: dict[int, list[EvidenceComponent]] = {}
+    all_by_receipt: dict[int, list[EvidenceComponent]] = {}
+    for component in all_components:
+        all_by_receipt.setdefault(component.receipt_id, []).append(component)
     for component in unused_components:
-        grouped.setdefault(component.receipt_id, []).append(component)
+        unused_by_receipt.setdefault(component.receipt_id, []).append(component)
 
-    for receipt_id, receipt_components in sorted(
-        grouped.items(),
+    def component_status(component: EvidenceComponent) -> dict[str, Any]:
+        usage_identity = component.fingerprint or component.key
+        current_usages = list(current_component_usage.get(usage_identity, []))
+        current_consumes = [
+            usage for usage in current_usages
+            if usage.get("usage_mode") != USAGE_MODE_REFERENCE
+        ]
+        current_references = [
+            usage for usage in current_usages
+            if usage.get("usage_mode") == USAGE_MODE_REFERENCE
+        ]
+        if current_consumes:
+            return {
+                "status": "current_consumed",
+                "status_label": (
+                    "今回明細で金額計算に使用"
+                    + ("・返品元としても参照" if current_references else "")
+                ),
+                "usage_mode": USAGE_MODE_CONSUME,
+                "consumed": True,
+                "referenced": bool(current_references),
+                "available": False,
+                "used_in": [*current_consumes, *current_references],
+            }
+        if current_references:
+            return {
+                "status": "current_reference",
+                "status_label": "今回明細で参照（未消費）",
+                "usage_mode": USAGE_MODE_REFERENCE,
+                "consumed": False,
+                "referenced": True,
+                "available": True,
+                "used_in": current_references,
+            }
+        history = global_usage_history.get(component.fingerprint, []) if component.fingerprint else []
+        if history:
+            return {
+                "status": "past_consumed",
+                "status_label": "他の明細で金額計算に使用済み",
+                "usage_mode": USAGE_MODE_CONSUME,
+                "consumed": True,
+                "referenced": False,
+                "available": False,
+                "used_in": history,
+            }
+        reference_history = (
+            global_reference_history.get(component.fingerprint, [])
+            if component.fingerprint
+            else []
+        )
+        if component.key in unused_keys and reference_history:
+            return {
+                "status": "past_reference",
+                "status_label": "他の明細で参照済み（未消費）",
+                "usage_mode": USAGE_MODE_REFERENCE,
+                "consumed": False,
+                "referenced": True,
+                "available": True,
+                "used_in": reference_history,
+            }
+        if component.key in unused_keys:
+            return {
+                "status": "unused",
+                "status_label": "全明細で金額計算に未使用",
+                "usage_mode": "",
+                "consumed": False,
+                "referenced": False,
+                "available": True,
+                "used_in": [],
+            }
+        return {
+            "status": "duplicate",
+            "status_label": "同一金融イベントの重複証拠として除外",
+            "usage_mode": "",
+            "consumed": False,
+            "referenced": False,
+            "available": False,
+            "used_in": [],
+        }
+
+    for receipt_id, receipt_unused_components in sorted(
+        unused_by_receipt.items(),
         key=lambda value: (
             min(component.receipt_order for component in value[1]),
             value[0],
@@ -1253,31 +2011,80 @@ def _build_unmatched_receipt_snapshot(
         receipt = receipt_by_id.get(receipt_id)
         if receipt is None:
             continue
-        ordered = sorted(
-            receipt_components,
+        all_for_receipt = sorted(
+            all_by_receipt.get(receipt_id, receipt_unused_components),
+            key=lambda component: (
+                0 if component.role == ROLE_CHARGE else 1,
+                component.event_date or date.min,
+                component.key,
+            ),
+        )
+        ordered_unused = sorted(
+            receipt_unused_components,
             key=lambda component: (
                 0 if component.role == ROLE_REFUND else 1,
                 component.event_date or date.min,
                 component.key,
             ),
         )
-        representative = ordered[0]
+        representative = ordered_unused[0]
         reason = _unused_component_reason(representative, lines)
+        component_rows: list[dict[str, Any]] = []
+        consumed_count = 0
+        reference_count = 0
+        available_count = 0
+        for component in all_for_receipt:
+            status = component_status(component)
+            consumed_count += int(bool(status.get("consumed")))
+            reference_count += int(bool(status.get("referenced")))
+            available_count += int(bool(status.get("available")))
+            component_rows.append(
+                {
+                    "component_key": component.key,
+                    "component_fingerprint": component.fingerprint,
+                    "event_date": component.event_date.isoformat() if component.event_date else "",
+                    "amount": format(component.signed_amount, "f"),
+                    "currency": component.currency,
+                    "role": component.role,
+                    **status,
+                }
+            )
+
+        if consumed_count and available_count:
+            usage_state = "partial"
+            usage_state_label = "一部使用済み"
+            usage_summary = (
+                f"PDF内{len(component_rows)}構成要素のうち{consumed_count}件は金額計算に使用済みで、"
+                f"{available_count}件はまだ金額計算に使用できます。"
+            )
+        elif reference_count and available_count:
+            usage_state = "referenced"
+            usage_state_label = "参照済み・未消費"
+            usage_summary = (
+                f"PDF内{len(component_rows)}構成要素のうち{reference_count}件は返品元確認等で参照済みですが、"
+                "金額計算にはまだ使用されていません。"
+            )
+        else:
+            usage_state = "unused"
+            usage_state_label = "全期間未使用"
+            usage_summary = (
+                f"PDF内{len(component_rows)}構成要素は、全明細を通じて金額計算に未使用です。"
+            )
+
         snapshots.append(
             {
                 "receipt_id": receipt.pk,
                 "component_key": representative.key,
-                "component_count": len(ordered),
-                "components": [
-                    {
-                        "component_key": component.key,
-                        "event_date": component.event_date.isoformat() if component.event_date else "",
-                        "amount": format(component.signed_amount, "f"),
-                        "currency": component.currency,
-                        "role": component.role,
-                    }
-                    for component in ordered
-                ],
+                "component_count": len(component_rows),
+                "unused_component_count": available_count,
+                "used_component_count": consumed_count,
+                "consumed_component_count": consumed_count,
+                "reference_component_count": reference_count,
+                "available_component_count": available_count,
+                "usage_state": usage_state,
+                "usage_state_label": usage_state_label,
+                "usage_summary": usage_summary,
+                "components": component_rows,
                 "filename": receipt.display_filename,
                 "original_filename": receipt.original_filename,
                 "user": receipt.submission.user.username,
@@ -1294,7 +2101,7 @@ def _build_unmatched_receipt_snapshot(
             }
         )
 
-    represented_receipt_ids = set(grouped)
+    represented_receipt_ids = set(unused_by_receipt)
     for receipt in unresolved_receipts:
         if receipt.pk in represented_receipt_ids:
             continue
@@ -1303,6 +2110,14 @@ def _build_unmatched_receipt_snapshot(
                 "receipt_id": receipt.pk,
                 "component_key": "",
                 "component_count": 0,
+                "unused_component_count": 0,
+                "used_component_count": 0,
+                "consumed_component_count": 0,
+                "reference_component_count": 0,
+                "available_component_count": 0,
+                "usage_state": "unknown",
+                "usage_state_label": "解析要確認",
+                "usage_summary": "金融イベントを抽出できないため、全期間の使用有無を判定できません。",
                 "components": [],
                 "filename": receipt.display_filename,
                 "original_filename": receipt.original_filename,
@@ -1323,10 +2138,19 @@ def _build_unmatched_receipt_snapshot(
     return snapshots
 
 
-def reconcile_card_statement_items(statement_id: int, *, preserve_manual: bool = True) -> CardStatement:
-    """全ユーザーの提出PDFを、実データ検証済みルールで明細へ照合する。"""
+def _reconcile_card_statement_items_impl(
+    statement: CardStatement,
+    *,
+    preserve_manual: bool = True,
+) -> CardStatement:
+    """Reconcile one already locked card statement.
 
-    statement = CardStatement.objects.get(pk=statement_id)
+    The public wrapper below owns the transaction and retry boundary.  Keeping
+    the implementation inside that boundary is important because the global
+    component-consume constraint must be checked atomically with deleting this
+    statement's old automatic allocation and writing the replacement.
+    """
+
     if statement.status == CardStatementStatus.PROCESSING:
         return statement
 
@@ -1343,9 +2167,22 @@ def reconcile_card_statement_items(statement_id: int, *, preserve_manual: bool =
         statement.period_month,
         transaction_dates=[item.transaction_date for item in items if item.transaction_date],
     )
+    # Serialize reconciliations that share the same physical receipt rows.  A
+    # re-uploaded duplicate can still have another Receipt PK, so the database
+    # unique constraint on component_fingerprint remains the final guard and the
+    # public wrapper retries once after a concurrent winner commits.
+    receipt_ids = sorted(receipt.pk for receipt in receipts)
+    if receipt_ids:
+        list(
+            Receipt.objects.select_for_update()
+            .filter(pk__in=receipt_ids)
+            .order_by("pk")
+            .values_list("pk", flat=True)
+        )
     receipt_by_id = {receipt.pk: receipt for receipt in receipts}
     catalogs = list(ServiceCatalog.objects.all().order_by("pk"))
     components, unresolved_receipts = _receipt_components(receipts, catalogs)
+    _backfill_missing_evidence_fingerprints()
     historical_receipts = _historical_receipts_for_statement_month(statement.period_month)
     plan_change_documents = _plan_change_documents(receipts, catalogs)
     historical_plan_evidences = [
@@ -1360,10 +2197,45 @@ def reconcile_card_statement_items(statement_id: int, *, preserve_manual: bool =
     statement_errors = _statement_gate_errors(statement)
 
     manual_item_ids = {item.pk for item in items if preserve_manual and _is_manual_override(item)}
+    old_automatic_consume_fingerprints = set(
+        CardStatementReceiptEvidence.objects.filter(
+            statement_item__statement=statement,
+            usage_mode=StatementReceiptEvidenceUsageMode.CONSUME,
+        )
+        .exclude(statement_item_id__in=manual_item_ids)
+        .exclude(component_fingerprint="")
+        .values_list("component_fingerprint", flat=True)
+    )
+
+    # Release this statement's old automatic allocation before recomputing. The
+    # surrounding transaction restores it if reconciliation fails. Manual rows
+    # remain authoritative and continue to reserve their components.
+    CardStatementReceiptEvidence.objects.filter(
+        statement_item__statement=statement,
+    ).exclude(statement_item_id__in=manual_item_ids).delete()
+
     manual_component_keys = set(
         CardStatementReceiptEvidence.objects.filter(statement_item_id__in=manual_item_ids)
         .values_list("component_key", flat=True)
     )
+    blocking_usage_history, preemptable_usage_owners = _partition_global_consume_ownership(
+        statement,
+        manual_item_ids=manual_item_ids,
+    )
+    global_reference_history = _global_reference_component_history(
+        statement,
+        manual_item_ids=manual_item_ids,
+    )
+    # Only earlier automatic owners and all manual owners block matching. Later
+    # automatic owners are provisionally ignored so chronological ownership can
+    # be corrected if this statement needs the component.
+    blocking_fingerprints = set(blocking_usage_history)
+    globally_unavailable_component_keys = {
+        component.key
+        for component in components
+        if component.fingerprint and component.fingerprint in blocking_fingerprints
+    }
+    unavailable_component_keys = manual_component_keys | globally_unavailable_component_keys
     auto_items: list[CardStatementItem] = []
     auto_lines: list[StatementLine] = []
     for item in items:
@@ -1414,13 +2286,42 @@ def reconcile_card_statement_items(statement_id: int, *, preserve_manual: bool =
 
     reconciliation = reconcile_statement(
         auto_lines,
-        [component for component in components if component.key not in manual_component_keys],
+        components,
         date_tolerance_days=DATE_MATCH_TOLERANCE_DAYS,
+        unavailable_component_keys=unavailable_component_keys,
     )
     component_by_key = reconciliation.components_by_key
+
+    desired_consume_fingerprints = {
+        component_by_key[key].fingerprint
+        for assignment in reconciliation.assignments.values()
+        if assignment.usage_mode == USAGE_MODE_CONSUME
+        for key in assignment.component_keys
+        if key in component_by_key and component_by_key[key].fingerprint
+    }
+    released_later_item_ids, preempted_statement_ids = _release_later_automatic_consumers(
+        statement,
+        desired_fingerprints=desired_consume_fingerprints,
+        preemptable_owners=preemptable_usage_owners,
+    )
+    remaining_later_usage_history = _remaining_preemptable_history(
+        preemptable_usage_owners,
+        released_item_ids=released_later_item_ids,
+    )
+    global_usage_history = _merge_usage_history(
+        blocking_usage_history,
+        remaining_later_usage_history,
+    )
+
     item_by_key = {str(item.pk): item for item in auto_items}
     line_by_key = {line.key: line for line in auto_lines}
     evidence_components_by_item: dict[int, list[EvidenceComponent]] = {}
+    evidence_usage_mode_by_item: dict[int, str] = {}
+    # One original charge can be consumed by a net calculation and referenced by
+    # a return row in the same statement. Preserve every usage instead of letting
+    # the last assignment overwrite the first. Keys are stable fingerprints so a
+    # re-uploaded copy receives the same status.
+    current_component_usage: dict[str, list[dict[str, Any]]] = {}
 
     for line_key, assignment in reconciliation.assignments.items():
         item = item_by_key[line_key]
@@ -1444,6 +2345,38 @@ def reconcile_card_statement_items(statement_id: int, *, preserve_manual: bool =
             if part
         ).strip()
         evidence_components_by_item[item.pk] = matched_components
+        evidence_usage_mode_by_item[item.pk] = assignment.usage_mode
+        for component in matched_components:
+            usage_identity = component.fingerprint or component.key
+            current_component_usage.setdefault(usage_identity, []).append(
+                {
+                    "usage_mode": assignment.usage_mode,
+                    "statement_id": statement.pk,
+                    "statement_month": statement.period_month.isoformat(),
+                    "line_reference": item.line_reference or str(item.sequence),
+                }
+            )
+
+    if manual_item_ids:
+        manual_evidences = (
+            CardStatementReceiptEvidence.objects.filter(statement_item_id__in=manual_item_ids)
+            .select_related("statement_item")
+            .order_by("statement_item__sequence", "sequence", "pk")
+        )
+        for evidence in manual_evidences:
+            usage_identity = evidence.component_fingerprint or evidence.component_key
+            current_component_usage.setdefault(usage_identity, []).append(
+                {
+                    "usage_mode": evidence.usage_mode,
+                    "statement_id": statement.pk,
+                    "statement_month": statement.period_month.isoformat(),
+                    "line_reference": (
+                        evidence.statement_item.line_reference
+                        or str(evidence.statement_item.sequence)
+                    ),
+                    "manual": True,
+                }
+            )
 
     historical_receipt_by_id = {receipt.pk: receipt for receipt in historical_receipts}
     inferred_candidates_by_item: dict[int, Any] = {}
@@ -1571,8 +2504,11 @@ def reconcile_card_statement_items(statement_id: int, *, preserve_manual: bool =
         component_by_key[key]
         for key in reconciliation.unused_component_keys
         if key in component_by_key
-        and component_by_key[key].receipt_id not in used_receipt_ids
         and component_by_key[key].receipt_id in unmatched_report_receipt_ids
+        and (
+            not component_by_key[key].fingerprint
+            or component_by_key[key].fingerprint not in global_usage_history
+        )
     ]
     unmatched_report_unresolved_receipts = [
         receipt
@@ -1588,9 +2524,13 @@ def reconcile_card_statement_items(statement_id: int, *, preserve_manual: bool =
     unresolved_lines = [line for line in auto_lines if line.key in unresolved_line_keys]
     unmatched_receipt_snapshot = _build_unmatched_receipt_snapshot(
         unused_components=unused_components,
+        all_components=components,
         unresolved_receipts=unmatched_report_unresolved_receipts,
         lines=unresolved_lines,
         receipt_by_id=receipt_by_id,
+        global_usage_history=global_usage_history,
+        global_reference_history=global_reference_history,
+        current_component_usage=current_component_usage,
     )
 
     no_usage_conflicts: list[str] = []
@@ -1610,11 +2550,11 @@ def reconcile_card_statement_items(statement_id: int, *, preserve_manual: bool =
                 no_usage_conflicts.append(text)
                 item.match_memo = f"{item.match_memo} {text}".strip()
 
+    # The public wrapper already owns the outer transaction. Keep this savepoint
+    # around persistence, but do not delete the automatic evidence a second time:
+    # it was released before matching so the current statement could safely
+    # reclaim its own previous components.
     with transaction.atomic():
-        CardStatementReceiptEvidence.objects.filter(statement_item__statement=statement).exclude(
-            statement_item_id__in=manual_item_ids
-        ).delete()
-
         for item in items:
             candidate = inferred_candidates_by_item.get(item.pk)
             existing = existing_inferences.get(item.pk)
@@ -1672,9 +2612,25 @@ def reconcile_card_statement_items(statement_id: int, *, preserve_manual: bool =
                 continue
             matched_components = evidence_components_by_item.get(item.pk)
             if matched_components:
-                evidence_records.extend(_create_evidence_records(item, matched_components, receipt_by_id))
+                evidence_records.extend(
+                    _create_evidence_records(
+                        item,
+                        matched_components,
+                        receipt_by_id,
+                        usage_mode=evidence_usage_mode_by_item.get(item.pk, USAGE_MODE_CONSUME),
+                    )
+                )
         if evidence_records:
             CardStatementReceiptEvidence.objects.bulk_create(evidence_records)
+
+        new_automatic_consume_fingerprints = {
+            record.component_fingerprint
+            for record in evidence_records
+            if record.usage_mode == StatementReceiptEvidenceUsageMode.CONSUME
+            and record.component_fingerprint
+        }
+        if new_automatic_consume_fingerprints != old_automatic_consume_fingerprints:
+            mark_later_card_statements_for_global_usage_refresh(statement)
 
         missing_count = sum(1 for item in items if item.receipt_required and item.match_status == StatementMatchStatus.UNMATCHED)
         review_count = sum(1 for item in items if item.receipt_required and item.match_status == StatementMatchStatus.NEEDS_REVIEW)
@@ -1709,6 +2665,7 @@ def reconcile_card_statement_items(statement_id: int, *, preserve_manual: bool =
             RECEIPT_CHANGE_RECONCILE_MARKER,
             CROSS_MONTH_CARD_NETTING_RECONCILE_MARKER,
             UNMATCHED_RECEIPT_EVENT_SCOPE_RECONCILE_MARKER,
+            GLOBAL_COMPONENT_USAGE_RECONCILE_MARKER,
         ):
             extraction_memo = extraction_memo.replace(marker, "")
         extraction_memo = extraction_memo.strip()
@@ -1726,7 +2683,7 @@ def reconcile_card_statement_items(statement_id: int, *, preserve_manual: bool =
         unused_report_scope_count = len(unmatched_report_receipt_ids)
         internal_reference_only_count = max(len(receipts) - unused_report_scope_count, 0)
         receipt_scope_summary = (
-            f"照合候補PDF{len(receipts)}件（明細未使用一覧の表示対象PDF{unused_report_scope_count}件"
+            f"照合候補PDF{len(receipts)}件（全明細で未消費の構成要素を確認する表示対象PDF{unused_report_scope_count}件"
         )
         if internal_reference_only_count:
             receipt_scope_summary += f"、無関係な月跨ぎ補助候補PDF{internal_reference_only_count}件を表示対象外"
@@ -1736,15 +2693,23 @@ def reconcile_card_statement_items(statement_id: int, *, preserve_manual: bool =
             f"{receipt_scope_summary}を、ファイル名や利用者ではなくPDF本文の取引構成要素で照合しました。"
             f"直接一致{direct_count}件、返金書内の元決済{original_count}件、紐付返金相殺{linked_count}件、"
             f"法人カード単位の後日返金相殺{merchant_net_count}件、推定対応{inferred_count}件、解析要確認{review_count}件、未一致{missing_count}件、"
-            f"明細未使用の対象月・関連月跨ぎPDF{len(unmatched_receipt_snapshot)}件です。"
+            f"全明細で未消費の構成要素を含む対象月・関連月跨ぎPDF{len(unmatched_receipt_snapshot)}件です。"
+            f"過去または保存済み手動割当で金額計算に使用済みの構成要素{len(reconciliation.reserved_component_keys)}件は候補から除外しました。"
             f"通常取引は金額・通貨完全一致、請求元一致または既知の決済名義対応、利用日±{DATE_MATCH_TOLERANCE_DAYS}日を全体最適化で一対一割当し、"
             "明示Invoice/Transaction IDが同じ重複書類は1取引として扱っています。通常照合では利用者特定を条件に含めません。"
             "返品行は同一請求元・同一利用日の元決済を参照し、同一法人カードの後日返金は最大45日後まで厳密な金額一致で全体最適割当します。"
+            "取引構成要素は再アップロード後も同じフィンガープリントで識別し、金額計算に使うconsumeは全明細を通じて1回だけ、返品元確認等のreferenceは金額を消費せず再参照可能として保存します。"
             "直接一致しない明細についてのみ、当月の契約変更書類に明記されたBill to利用者・旧プラン終了情報と、"
             "過去領収書または前月カード明細の同一請求元・金額通貨完全一致・前月同請求日の実績が揃う場合に限り、"
             "管理者確認前の推定対応として提示します。前月カード明細は領収書提出証拠ではなく、旧プランの請求周期を裏付ける補助証拠です。"
-            "未使用一覧は当月書類と実明細に関連する月跨ぎ書類だけを対象とし、照合候補として読み込んだだけの無関係な過去月PDFは表示しません。"
+            "未使用一覧は当月書類と実明細に関連する月跨ぎ書類だけを対象とし、全明細で未消費の構成要素が残るPDFだけを表示します。"
+            "一部だけ使用済みの返金PDFは構成要素別に使用先を表示し、全構成要素を消費済みのPDFと、照合候補として読み込んだだけの無関係な過去月PDFは表示しません。"
         )
+        if released_later_item_ids:
+            reconciliation_memo += (
+                f" より前の明細を優先するため、後続明細{len(preempted_statement_ids)}件・"
+                f"明細行{len(released_later_item_ids)}件の自動割当を解放し、再照合待ちにしました。"
+            )
         if reconciliation.deduplicated_component_keys:
             reconciliation_memo += f" 重複証拠{len(reconciliation.deduplicated_component_keys)}件を二重計上から除外しました。"
         if no_usage_conflicts:
@@ -1759,6 +2724,44 @@ def reconcile_card_statement_items(statement_id: int, *, preserve_manual: bool =
             ]
         )
     return statement
+
+
+def reconcile_card_statement_items(
+    statement_id: int,
+    *,
+    preserve_manual: bool = True,
+) -> CardStatement:
+    """Atomically reconcile a statement with a global component-use lock.
+
+    Automatic allocations owned by this same statement are released and rebuilt
+    within the transaction, so pressing "reconcile" is safe.  Manual allocations
+    remain reserved.  Across different statements a monetary component can have
+    only one ``consume`` owner; ``reference`` rows (for example a card reversal
+    pointing at its original charge) do not consume the component.
+    """
+
+    for attempt in range(2):
+        try:
+            with transaction.atomic():
+                statement = (
+                    CardStatement.objects.select_for_update()
+                    .get(pk=statement_id)
+                )
+                return _reconcile_card_statement_items_impl(
+                    statement,
+                    preserve_manual=preserve_manual,
+                )
+        except IntegrityError:
+            if attempt:
+                raise
+            logger.warning(
+                "Card statement %s lost a concurrent component-consume claim; retrying once",
+                statement_id,
+                exc_info=True,
+            )
+
+    # The loop always returns or raises. This keeps static type checkers happy.
+    raise RuntimeError(f"Card statement {statement_id} reconciliation did not complete")
 
 
 def process_card_statement(statement_id: int):

@@ -16,7 +16,7 @@
     <div class="card"><span class="label">明細行</span><strong>{{ stats.line_count }}</strong></div>
     <div class="card"><span class="label">解析要確認</span><strong class="{% if stats.review_count %}warning{% endif %}">{{ stats.review_count }}</strong></div>
     <div class="card"><span class="label">未一致</span><strong class="{% if stats.unresolved_count %}danger{% endif %}">{{ stats.unresolved_count }}</strong><span class="muted small">推定対応を含む</span></div>
-    <div class="card"><span class="label">明細未使用の提出書類</span><strong class="{% if stats.unused_receipt_count %}warning{% endif %}">{{ stats.unused_receipt_count }}</strong></div>
+    <div class="card"><span class="label">全明細で未消費の提出書類</span><strong class="{% if stats.unused_receipt_count %}warning{% endif %}">{{ stats.unused_receipt_count }}</strong></div>
 </section>
 
 <section class="card section" data-tutorial-target="staff-statement-upload-section">

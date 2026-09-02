@@ -4,7 +4,7 @@ import csv
 import logging
 import json
 import zipfile
-from datetime import timedelta
+from datetime import date, timedelta
 from io import BytesIO, StringIO
 from pathlib import Path
 
@@ -88,6 +88,7 @@ from .models import (
     ServiceRegistrationSource,
     StatementMatchReason,
     StatementMatchStatus,
+    StatementReceiptEvidenceUsageMode,
     Submission,
     UserAccountStatus,
     SubmissionStatus,
@@ -99,6 +100,8 @@ from .models import (
 )
 from .monthly_status import build_user_month_summary
 from .statement_processing import (
+    mark_card_statements_for_global_usage_refresh,
+    mark_later_card_statements_for_global_usage_refresh,
     reconcile_card_statement_items,
     reconcile_pending_card_statement_month_semantics,
     start_background_statement_processing,
@@ -1533,119 +1536,49 @@ def staff_receipt_review(request, pk: int):
 
 
 def reconcile_card_statement_items_for_submission_month(period_month):
-    """提出サイクルに対応する領収書発行月の全社明細を再照合する。"""
+    """Reconcile every chronological statement affected by a receipt update.
 
-    statement_month = receipt_month_for_submission(period_month)
-    for statement_id in CardStatement.objects.filter(period_month=statement_month).exclude(
-        status__in=[CardStatementStatus.PROCESSING, CardStatementStatus.FAILED]
-    ).values_list("pk", flat=True):
-        reconcile_card_statement_items(statement_id)
+    A refund PDF uploaded in one submission cycle can contain an original
+    payment from an earlier month and a later refund.  All statements from the
+    earliest represented financial-event month are first marked pending, then
+    rebuilt in chronological fixed-point order.  This avoids leaving an earlier
+    statement snapshot stale after a later statement changes global ownership.
+    """
 
+    target_month = receipt_month_for_submission(period_month)
+    affected_months = {target_month}
+    receipt_components = Receipt.objects.filter(
+        submission__period_month=period_month,
+        submission__user__is_staff=False,
+        submission__user__is_superuser=False,
+    ).values_list("financial_transaction_components", flat=True)
+    for components in receipt_components:
+        for component in components or []:
+            if not isinstance(component, dict):
+                continue
+            raw_date = str(component.get("transaction_date") or "")[:10]
+            try:
+                event_date = date.fromisoformat(raw_date)
+            except (TypeError, ValueError):
+                continue
+            affected_months.add(event_date.replace(day=1))
 
-@staff_member_required
-@require_POST
-def staff_start_receipt_ai_processing(request, pk: int):
-    receipt = get_object_or_404(staff_receipt_queryset(), pk=pk)
-    force_reanalysis = request.POST.get("force_reanalysis") == "1"
-    if force_reanalysis and not (receipt.ai_is_queued or receipt.is_ai_processing):
-        # 通常の一括処理は従来どおりAI確認済みを再検査しない。
-        # 管理者が領収書確認画面から明示的に実行した場合だけ、
-        # 契約変更情報を含む最新スキーマでこの1件を再解析する。
-        reset_ai_processing_state(receipt, save=True, clear_extracted_values=False)
-    claimed_ids = claim_pending_receipts_for_ai_processing(
-        Receipt.objects.filter(pk=receipt.pk).available_files(),
-        limit=1,
+    earliest_month = min(affected_months)
+    statements = list(
+        CardStatement.objects.filter(period_month__gte=earliest_month)
+        .exclude(status__in=[CardStatementStatus.PROCESSING, CardStatementStatus.FAILED])
+        .only("pk", "period_month", "uploaded_at", "ai_admin_memo")
+        .order_by("period_month", "uploaded_at", "pk")
     )
-    if claimed_ids:
-        start_background_ai_processing(claimed_ids)
-        message = (
-            "AIで契約変更情報を含めて再解析中です。完了後、この画面へ自動反映します。"
-            if force_reanalysis
-            else "AIで情報を抽出中です。完了後、この画面へ自動反映します。"
-        )
-    elif receipt.ai_is_queued or receipt.is_ai_processing:
-        message = "この領収書はAIで情報を抽出中です。"
-    else:
-        message = "この領収書はすでにAI確認済みです。再検査せず、必要な補正は管理者確認欄で行ってください。"
+    if not statements:
+        return 0
 
-    payload = {"ok": True, "started": bool(claimed_ids), "message": message}
-    if request.headers.get("x-requested-with") == "XMLHttpRequest":
-        return JsonResponse(payload)
-    if claimed_ids:
-        messages.success(request, message)
-    else:
-        messages.info(request, message)
-    return redirect("staff_receipt_review", pk=receipt.pk)
-
-
-@staff_member_required
-def staff_receipt_ai_status(request, pk: int):
-    receipt = staff_receipt_queryset().filter(pk=pk).first()
-    if receipt is None:
-        resubmission = (
-            ReceiptResubmissionRequest.objects.select_related("user")
-            .filter(original_receipt_id=pk)
-            .order_by("-created_at")
-            .first()
-        )
-        redirect_url = reverse("history")
-        if resubmission is not None:
-            redirect_url = (
-                f"{reverse('staff_user_month_status', args=[resubmission.user_id])}"
-                f"?month={month_query(resubmission.period_month)}"
-            )
-        return JsonResponse(
-            {
-                "ok": True,
-                "deleted": True,
-                "redirect_url": redirect_url,
-                "message": (
-                    "管理者が再提出を依頼したため、領収書を提出項目から取り下げました。"
-                    if resubmission is not None
-                    else "領収書が削除されたため、一覧へ戻ります。"
-                ),
-            }
-        )
-    html = render_to_string(
-        "receipts/_staff_receipt_review_panel.html",
-        {
-            "receipt": receipt,
-            "review_form": StaffReceiptReviewForm(receipt=receipt),
-        },
-        request=request,
-    )
-    return JsonResponse(
-        {
-            "ok": True,
-            "html": html,
-            "processing": receipt.ai_is_queued or receipt.is_ai_processing,
-            "status": receipt.ai_filename_status,
-        }
-    )
-
-
-@staff_member_required
-@xframe_options_sameorigin
-def staff_preview_receipt(request, pk: int):
-    receipt = get_object_or_404(staff_receipt_queryset(), pk=pk)
-    if not receipt.file_available:
-        raise Http404("保存期限が過ぎたか、領収書ファイルが削除済みです。")
-    filename = receipt.display_filename or receipt.original_filename or Path(receipt.file.name).name
-    content_type = {
-        ".pdf": "application/pdf",
-        ".png": "image/png",
-        ".jpg": "image/jpeg",
-        ".jpeg": "image/jpeg",
-        ".webp": "image/webp",
-    }.get(Path(filename).suffix.lower(), "application/octet-stream")
-    response = FileResponse(
-        receipt.file.open("rb"),
-        as_attachment=False,
-        filename=filename,
-        content_type=content_type,
-    )
-    response["X-Content-Type-Options"] = "nosniff"
-    return response
+    # Reuse the public invalidation helper for the whole affected range. The
+    # helper writes the global-usage marker and clears stale unused-file
+    # snapshots without deleting current evidence rows.
+    mark_card_statements_for_global_usage_refresh(period_month_gte=earliest_month)
+    latest_month = max(statement.period_month for statement in statements)
+    return reconcile_pending_card_statement_month_semantics(period_month=latest_month)
 
 
 @staff_member_required
@@ -2100,7 +2033,7 @@ def prepare_statement_result_display(statements, result_filter: str):
     # `unmatched` は管理者が確認したい3区分をまとめる。
     #   1. 契約変更等による推定対応
     #   2. 直接・推定ともに根拠がない未一致
-    #   3. 明細のどの行にも使われなかった提出書類
+    #   3. 全カード明細を通じて未消費の構成要素が残る提出書類
     counts = {
         "all": 0,
         "unmatched": 0,
@@ -2302,7 +2235,10 @@ def staff_download_card_statement(request, pk: int):
 @staff_member_required
 def staff_download_card_statement_report(request, pk: int):
     base_statement = get_object_or_404(CardStatement, pk=pk)
-    reconcile_pending_card_statement_month_semantics(statement_id=base_statement.pk)
+    # A direct report download must settle any earlier pending ownership changes
+    # first; otherwise the selected statement could be exported with a component
+    # that an older statement is about to reclaim.
+    reconcile_pending_card_statement_month_semantics(period_month=base_statement.period_month)
     statement = get_object_or_404(global_statement_queryset(base_statement.period_month), pk=pk)
     if statement.status in {CardStatementStatus.PROCESSING, CardStatementStatus.FAILED}:
         raise Http404("AI解析・照合が完了してから照合結果PDFをダウンロードしてください。")
@@ -2325,6 +2261,10 @@ def staff_delete_card_statement(request, pk: int):
     selected_month = statement.period_month
     result_filter = normalize_statement_result_filter(request.POST.get("result"))
     filename = statement.original_filename or "ご利用代金明細書"
+    # Deleting an earlier statement releases its consumed evidence. Queue every
+    # downstream statement so the newly available components and unused-file
+    # snapshots are rebuilt chronologically.
+    mark_later_card_statements_for_global_usage_refresh(statement)
     statement.delete()
     messages.success(request, f"{filename} と全ユーザー照合履歴を削除しました。")
     return redirect(
@@ -2374,6 +2314,14 @@ def staff_update_statement_item(request, pk: int):
     )
 
     inference = getattr(item, "plan_change_inference", None)
+    old_statement_consume_fingerprints = set(
+        CardStatementReceiptEvidence.objects.filter(
+            statement_item__statement=item.statement,
+            usage_mode=StatementReceiptEvidenceUsageMode.CONSUME,
+        )
+        .exclude(component_fingerprint="")
+        .values_list("component_fingerprint", flat=True)
+    )
 
     if action == "confirm_plan_change":
         if inference is None or inference.status != PlanChangeInferenceStatus.PENDING:
@@ -2494,6 +2442,21 @@ def staff_update_statement_item(request, pk: int):
         messages.success(request, f"明細 {item.line_reference or item.pk} を領収書照合対象へ戻しました。")
     else:
         messages.error(request, "この操作は廃止されました。最新の領収書と再照合してください。")
+
+    new_statement_consume_fingerprints = set(
+        CardStatementReceiptEvidence.objects.filter(
+            statement_item__statement=item.statement,
+            usage_mode=StatementReceiptEvidenceUsageMode.CONSUME,
+        )
+        .exclude(component_fingerprint="")
+        .values_list("component_fingerprint", flat=True)
+    )
+    if old_statement_consume_fingerprints != new_statement_consume_fingerprints:
+        # The item action may delete its evidence before the statement-level
+        # reconciler can observe the old set. Explicitly invalidate every other
+        # statement so a released component can be reclaimed and all global
+        # unused snapshots are refreshed.
+        mark_later_card_statements_for_global_usage_refresh(item.statement)
 
     return redirect(redirect_url)
 

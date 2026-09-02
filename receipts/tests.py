@@ -52,6 +52,7 @@ from .models import (
     CardStatement,
     CardStatementItem,
     CardStatementPlanChangeInference,
+    CardStatementReceiptEvidence,
     CardStatementStatus,
     EmailDeliveryLog,
     EmailReminderSchedule,
@@ -75,6 +76,8 @@ from .models import (
     ServiceRegistrationSource,
     StatementMatchReason,
     StatementMatchStatus,
+    StatementReceiptEvidenceRole,
+    StatementReceiptEvidenceUsageMode,
     Submission,
     SubmissionStatus,
     UserAccountStatus,
@@ -3759,6 +3762,99 @@ class FinalWorkflowAcceptanceTests(TestCase):
             filename=filename,
         )
 
+
+    def create_financial_receipt(
+        self,
+        *,
+        service=None,
+        submission_month=date(2026, 8, 1),
+        filename="financial.pdf",
+        file_bytes=b"%PDF-1.4 financial-event",
+        issued_on=date(2026, 7, 5),
+        amount="22.00",
+        currency="USD",
+        payee="Anthropic, PBC",
+        service_label="Claude",
+        document_kind=ReceiptFinancialDocumentKind.CHARGE,
+        components=None,
+    ):
+        service = service or self.subscription
+        submission, _ = Submission.objects.get_or_create(
+            user=service.user,
+            period_month=submission_month,
+        )
+        if components is None:
+            components = [
+                {
+                    "component_key": "primary",
+                    "role": "charge",
+                    "signed_amount": amount,
+                    "currency": currency,
+                    "transaction_date": issued_on.isoformat(),
+                    "payee": payee,
+                    "service_label": service_label,
+                    "source_label": "主要取引",
+                    "document_kind": document_kind,
+                }
+            ]
+        return Receipt.objects.create(
+            submission=submission,
+            service=service,
+            service_name_snapshot=service.name,
+            billing_type_snapshot=service.billing_type,
+            p_card_usage_snapshot=True,
+            original_filename=filename,
+            generated_filename=filename,
+            file=SimpleUploadedFile(filename, file_bytes, content_type="application/pdf"),
+            issued_on=issued_on,
+            amount=Decimal(amount),
+            currency=currency,
+            ai_extracted_payee=payee,
+            ai_extracted_service_label=service_label,
+            financial_document_kind=document_kind,
+            financial_transaction_components=components,
+            financial_metadata_checked_at=timezone.now(),
+            plan_change_metadata_checked_at=timezone.now(),
+            expires_at=timezone.now() + timedelta(days=30),
+        )
+
+    def create_reconciliation_statement(
+        self,
+        *,
+        period_month,
+        line_reference,
+        transaction_date,
+        merchant_name="ANTHROPIC* CLAUDE",
+        original_amount="22.00",
+        original_currency="USD",
+    ):
+        statement = CardStatement.objects.create(
+            period_month=period_month,
+            file=SimpleUploadedFile(
+                f"statement-{period_month:%Y-%m}-{line_reference}.pdf",
+                b"%PDF-1.4 statement",
+                content_type="application/pdf",
+            ),
+            original_filename=f"statement-{period_month:%Y-%m}-{line_reference}.pdf",
+            status=CardStatementStatus.NEEDS_REVIEW,
+            card_last4="7210",
+            statement_period=f"{period_month:%Y-%m}",
+            uploaded_by=self.superuser,
+            expires_at=timezone.now() + timedelta(days=30),
+        )
+        item = CardStatementItem.objects.create(
+            statement=statement,
+            sequence=1,
+            line_reference=line_reference,
+            transaction_date=transaction_date,
+            merchant_name=merchant_name,
+            original_amount=Decimal(original_amount),
+            original_currency=original_currency,
+            match_status=StatementMatchStatus.UNMATCHED,
+            receipt_required=True,
+        )
+        return statement, item
+
     def test_submission_requires_receipt_or_no_usage_for_every_service(self):
         receipt = self.create_receipt(service=self.subscription)
         submission = receipt.submission
@@ -5025,7 +5121,7 @@ class FinalWorkflowAcceptanceTests(TestCase):
         self.assertContains(response, "UNMATCHED GITHUB LINE")
         self.assertContains(response, "INFERRED CLAUDE LINE")
         self.assertNotContains(response, "MATCHED GOOGLE ONE LINE")
-        self.assertContains(response, "明細に紐づかなかった提出書類")
+        self.assertContains(response, "全明細で未消費の構成要素が残る提出書類")
         self.assertContains(response, '<span class="label">明細行</span>', html=True)
         self.assertContains(response, '<span class="label">解析要確認</span>', html=True)
         self.assertContains(response, '<span class="label">未一致</span>', html=True)
@@ -5042,7 +5138,7 @@ class FinalWorkflowAcceptanceTests(TestCase):
         self.assertNotContains(response, ">すべて</a>")
         self.assertContains(response, f'id="inferred-group-{statement.pk}"', html=False)
         self.assertContains(response, f'id="unmatched-group-{statement.pk}"', html=False)
-        self.assertContains(response, "推定対応 1件・未一致 1件・明細未使用 1件")
+        self.assertContains(response, "推定対応 1件・未一致 1件・全明細で未消費 1件")
         content = response.content.decode()
         self.assertLess(content.index(f'id="inferred-group-{statement.pk}"'), content.index(f'id="unmatched-group-{statement.pk}"'))
         self.assertLess(content.index(f'id="unmatched-group-{statement.pk}"'), content.index(f'id="unused-receipts-{statement.pk}"'))
@@ -5109,7 +5205,7 @@ class FinalWorkflowAcceptanceTests(TestCase):
 
         self.assertTrue(payload.startswith(b"%PDF-"))
         rendered_text = "\n".join(captured_text)
-        self.assertIn("明細に紐づかなかった提出書類", rendered_text)
+        self.assertIn("全明細で未消費の構成要素が残る提出書類", rendered_text)
         self.assertIn("GitHub_Copilot_11_USD", rendered_text)
         self.assertIn("明細0385は1.10 USD", rendered_text)
 
@@ -5663,10 +5759,455 @@ class FinalWorkflowAcceptanceTests(TestCase):
         self.assertNotIn(june_unrelated_receipt.pk, unused_ids)
         self.assertNotIn(june_reuploaded_in_current_cycle.pk, unused_ids)
         self.assertIn("無関係な月跨ぎ補助候補PDF2件を表示対象外", statement.ai_admin_memo)
-        self.assertIn("明細未使用の対象月・関連月跨ぎPDF1件", statement.ai_admin_memo)
+        self.assertIn("全明細で未消費の構成要素を含む対象月・関連月跨ぎPDF1件", statement.ai_admin_memo)
+
+
+    def test_global_component_consume_is_not_reused_by_a_later_statement(self):
+        claude_catalog = ServiceCatalog.objects.create(
+            name="Claude",
+            billing_type=BillingType.SUBSCRIPTION,
+            merchant_aliases="ANTHROPIC, ANTHROPIC.COM, CLAUDE",
+            created_by=self.superuser,
+        )
+        claude_service = RegisteredService.objects.create(
+            user=self.user,
+            catalog_service=claude_catalog,
+            name="Claude",
+            billing_type=BillingType.SUBSCRIPTION,
+            registered_by=self.superuser,
+        )
+        receipt = self.create_financial_receipt(
+            service=claude_service,
+            filename="invoice-LN81OSYJ-0002.pdf",
+            components=[
+                {
+                    "component_key": "charge",
+                    "role": "charge",
+                    "signed_amount": "22.00",
+                    "currency": "USD",
+                    "transaction_date": "2026-07-05",
+                    "payee": "Anthropic, PBC",
+                    "service_label": "Claude Pro",
+                    "invoice_number": "LN81OSYJ-0002",
+                    "source_label": "主要取引",
+                    "document_kind": "invoice",
+                }
+            ],
+        )
+        earlier, earlier_item = self.create_reconciliation_statement(
+            period_month=date(2026, 7, 1),
+            line_reference="A",
+            transaction_date=date(2026, 7, 5),
+        )
+        later, later_item = self.create_reconciliation_statement(
+            period_month=date(2026, 8, 1),
+            line_reference="B",
+            transaction_date=date(2026, 7, 5),
+        )
+
+        reconcile_card_statement_items(earlier.pk)
+        reconcile_card_statement_items(later.pk)
+
+        earlier_item.refresh_from_db()
+        later_item.refresh_from_db()
+        self.assertEqual(earlier_item.match_status, StatementMatchStatus.MATCHED)
+        self.assertEqual(later_item.match_status, StatementMatchStatus.UNMATCHED)
+        consuming = CardStatementReceiptEvidence.objects.filter(
+            receipt=receipt,
+            usage_mode=StatementReceiptEvidenceUsageMode.CONSUME,
+        )
+        self.assertEqual(consuming.count(), 1)
+        self.assertEqual(consuming.get().statement_item_id, earlier_item.pk)
+
+    def test_reconciling_same_statement_releases_and_reclaims_its_own_auto_evidence(self):
+        claude_catalog = ServiceCatalog.objects.create(
+            name="Claude Same Statement",
+            billing_type=BillingType.SUBSCRIPTION,
+            merchant_aliases="ANTHROPIC, CLAUDE",
+            created_by=self.superuser,
+        )
+        service = RegisteredService.objects.create(
+            user=self.user,
+            catalog_service=claude_catalog,
+            name=claude_catalog.name,
+            billing_type=claude_catalog.billing_type,
+            registered_by=self.superuser,
+        )
+        receipt = self.create_financial_receipt(
+            service=service,
+            filename="same-statement.pdf",
+            components=[
+                {
+                    "component_key": "charge",
+                    "role": "charge",
+                    "signed_amount": "22.00",
+                    "currency": "USD",
+                    "transaction_date": "2026-07-05",
+                    "payee": "Anthropic, PBC",
+                    "service_label": "Claude Pro",
+                    "invoice_number": "SAME-INV-1",
+                    "source_label": "主要取引",
+                    "document_kind": "receipt",
+                }
+            ],
+        )
+        statement, item = self.create_reconciliation_statement(
+            period_month=date(2026, 7, 1),
+            line_reference="SAME",
+            transaction_date=date(2026, 7, 5),
+        )
+
+        reconcile_card_statement_items(statement.pk)
+        first_fingerprint = CardStatementReceiptEvidence.objects.get(
+            statement_item=item,
+            usage_mode=StatementReceiptEvidenceUsageMode.CONSUME,
+        ).component_fingerprint
+        reconcile_card_statement_items(statement.pk)
+
+        item.refresh_from_db()
+        evidences = CardStatementReceiptEvidence.objects.filter(
+            statement_item=item,
+            usage_mode=StatementReceiptEvidenceUsageMode.CONSUME,
+        )
+        self.assertEqual(item.match_status, StatementMatchStatus.MATCHED)
+        self.assertEqual(evidences.count(), 1)
+        self.assertEqual(evidences.get().component_fingerprint, first_fingerprint)
+        self.assertEqual(evidences.get().receipt_id, receipt.pk)
+
+    def test_renamed_reupload_cannot_bypass_global_component_lock(self):
+        claude_catalog = ServiceCatalog.objects.create(
+            name="Claude Duplicate Upload",
+            billing_type=BillingType.SUBSCRIPTION,
+            merchant_aliases="ANTHROPIC, CLAUDE",
+            created_by=self.superuser,
+        )
+        service = RegisteredService.objects.create(
+            user=self.user,
+            catalog_service=claude_catalog,
+            name=claude_catalog.name,
+            billing_type=claude_catalog.billing_type,
+            registered_by=self.superuser,
+        )
+        common_components = [
+            {
+                "component_key": "primary",
+                "role": "charge",
+                "signed_amount": "22.00",
+                "currency": "USD",
+                "transaction_date": "2026-07-05",
+                "payee": "Anthropic, PBC",
+                "service_label": "Claude Pro",
+                "source_label": "主要取引",
+                "document_kind": "receipt",
+            }
+        ]
+        first_receipt = self.create_financial_receipt(
+            service=service,
+            filename="original-name.pdf",
+            file_bytes=b"%PDF-1.4 identical financial PDF bytes",
+            components=common_components,
+        )
+        second_receipt = self.create_financial_receipt(
+            service=service,
+            filename="renamed-copy.pdf",
+            file_bytes=b"%PDF-1.4 identical financial PDF bytes",
+            components=common_components,
+        )
+        earlier, earlier_item = self.create_reconciliation_statement(
+            period_month=date(2026, 7, 1),
+            line_reference="DUP-A",
+            transaction_date=date(2026, 7, 5),
+        )
+        later, later_item = self.create_reconciliation_statement(
+            period_month=date(2026, 8, 1),
+            line_reference="DUP-B",
+            transaction_date=date(2026, 7, 5),
+        )
+
+        reconcile_card_statement_items(earlier.pk)
+        reconcile_card_statement_items(later.pk)
+
+        first_receipt.refresh_from_db()
+        second_receipt.refresh_from_db()
+        later_item.refresh_from_db()
+        self.assertEqual(first_receipt.file_sha256, second_receipt.file_sha256)
+        self.assertEqual(later_item.match_status, StatementMatchStatus.UNMATCHED)
+        self.assertEqual(
+            CardStatementReceiptEvidence.objects.filter(
+                usage_mode=StatementReceiptEvidenceUsageMode.CONSUME,
+                component_fingerprint__gt="",
+                receipt_id__in=[first_receipt.pk, second_receipt.pk],
+            ).count(),
+            1,
+        )
+
+    def test_refund_pdf_snapshot_reports_partial_component_usage(self):
+        claude_catalog = ServiceCatalog.objects.create(
+            name="Claude Partial Refund",
+            billing_type=BillingType.SUBSCRIPTION,
+            merchant_aliases="ANTHROPIC, CLAUDE",
+            created_by=self.superuser,
+        )
+        service = RegisteredService.objects.create(
+            user=self.user,
+            catalog_service=claude_catalog,
+            name=claude_catalog.name,
+            billing_type=claude_catalog.billing_type,
+            registered_by=self.superuser,
+        )
+        receipt = self.create_financial_receipt(
+            service=service,
+            filename="takenaka-refund.pdf",
+            issued_on=date(2026, 7, 5),
+            amount="4.97",
+            document_kind=ReceiptFinancialDocumentKind.REFUND,
+            components=[
+                {
+                    "component_key": "original-charge",
+                    "role": "charge",
+                    "signed_amount": "22.00",
+                    "currency": "USD",
+                    "transaction_date": "2026-06-12",
+                    "payee": "Anthropic, PBC",
+                    "service_label": "Claude Pro",
+                    "invoice_number": "K6K8Q1LA-0002",
+                    "source_label": "Payment history",
+                    "document_kind": "refund",
+                },
+                {
+                    "component_key": "refund",
+                    "role": "refund",
+                    "signed_amount": "-4.97",
+                    "currency": "USD",
+                    "transaction_date": "2026-07-05",
+                    "payee": "Anthropic, PBC",
+                    "service_label": "Claude Pro",
+                    "invoice_number": "K6K8Q1LA-0002",
+                    "transaction_id": "K6K8Q1LA-0002-CN-01",
+                    "related_transaction_id": "K6K8Q1LA-0002",
+                    "source_label": "Credited total",
+                    "document_kind": "refund",
+                },
+            ],
+        )
+        statement, item = self.create_reconciliation_statement(
+            period_month=date(2026, 7, 1),
+            line_reference="PARTIAL",
+            transaction_date=date(2026, 6, 12),
+            original_amount="22.00",
+        )
+
+        reconcile_card_statement_items(statement.pk)
+
+        statement.refresh_from_db()
+        item.refresh_from_db()
+        self.assertEqual(item.match_status, StatementMatchStatus.MATCHED)
+        self.assertEqual(len(statement.unmatched_receipt_components), 1)
+        snapshot = statement.unmatched_receipt_components[0]
+        self.assertEqual(snapshot["receipt_id"], receipt.pk)
+        self.assertEqual(snapshot["usage_state"], "partial")
+        statuses = {row["role"]: row["status"] for row in snapshot["components"]}
+        self.assertEqual(statuses["charge"], "current_consumed")
+        self.assertEqual(statuses["refund"], "unused")
+
+    def test_fully_consumed_refund_pdf_is_omitted_from_unused_snapshot(self):
+        claude_catalog = ServiceCatalog.objects.create(
+            name="Claude Full Refund Net",
+            billing_type=BillingType.SUBSCRIPTION,
+            merchant_aliases="ANTHROPIC, CLAUDE",
+            created_by=self.superuser,
+        )
+        service = RegisteredService.objects.create(
+            user=self.user,
+            catalog_service=claude_catalog,
+            name=claude_catalog.name,
+            billing_type=claude_catalog.billing_type,
+            registered_by=self.superuser,
+        )
+        receipt = self.create_financial_receipt(
+            service=service,
+            filename="full-net-refund.pdf",
+            issued_on=date(2026, 7, 5),
+            amount="4.97",
+            document_kind=ReceiptFinancialDocumentKind.REFUND,
+            components=[
+                {
+                    "component_key": "original-charge",
+                    "role": "charge",
+                    "signed_amount": "22.00",
+                    "currency": "USD",
+                    "transaction_date": "2026-06-12",
+                    "payee": "Anthropic, PBC",
+                    "service_label": "Claude Pro",
+                    "invoice_number": "FULL-NET-INV",
+                    "source_label": "Payment history",
+                    "document_kind": "refund",
+                },
+                {
+                    "component_key": "refund",
+                    "role": "refund",
+                    "signed_amount": "-4.97",
+                    "currency": "USD",
+                    "transaction_date": "2026-07-05",
+                    "payee": "Anthropic, PBC",
+                    "service_label": "Claude Pro",
+                    "invoice_number": "FULL-NET-INV",
+                    "transaction_id": "FULL-NET-CN-01",
+                    "related_transaction_id": "FULL-NET-INV",
+                    "source_label": "Credited total",
+                    "document_kind": "refund",
+                },
+            ],
+        )
+        statement, item = self.create_reconciliation_statement(
+            period_month=date(2026, 7, 1),
+            line_reference="FULL-NET",
+            transaction_date=date(2026, 6, 12),
+            original_amount="17.03",
+        )
+
+        reconcile_card_statement_items(statement.pk)
+
+        statement.refresh_from_db()
+        item.refresh_from_db()
+        self.assertEqual(item.match_status, StatementMatchStatus.MATCHED)
+        self.assertEqual(statement.unmatched_receipt_components, [])
+        self.assertEqual(
+            CardStatementReceiptEvidence.objects.filter(
+                statement_item=item,
+                receipt=receipt,
+                usage_mode=StatementReceiptEvidenceUsageMode.CONSUME,
+            ).count(),
+            2,
+        )
+
+    def test_earlier_statement_preempts_a_later_automatic_owner(self):
+        claude_catalog = ServiceCatalog.objects.create(
+            name="Claude Chronological Ownership",
+            billing_type=BillingType.SUBSCRIPTION,
+            merchant_aliases="ANTHROPIC, CLAUDE",
+            created_by=self.superuser,
+        )
+        service = RegisteredService.objects.create(
+            user=self.user,
+            catalog_service=claude_catalog,
+            name=claude_catalog.name,
+            billing_type=claude_catalog.billing_type,
+            registered_by=self.superuser,
+        )
+        receipt = self.create_financial_receipt(
+            service=service,
+            filename="chronological-owner.pdf",
+            components=[
+                {
+                    "component_key": "charge",
+                    "role": "charge",
+                    "signed_amount": "22.00",
+                    "currency": "USD",
+                    "transaction_date": "2026-07-05",
+                    "payee": "Anthropic, PBC",
+                    "service_label": "Claude Pro",
+                    "invoice_number": "CHRONOLOGY-INV",
+                    "source_label": "主要取引",
+                    "document_kind": "receipt",
+                }
+            ],
+        )
+        earlier, earlier_item = self.create_reconciliation_statement(
+            period_month=date(2026, 7, 1),
+            line_reference="EARLIER",
+            transaction_date=date(2026, 7, 5),
+        )
+        later, later_item = self.create_reconciliation_statement(
+            period_month=date(2026, 8, 1),
+            line_reference="LATER",
+            transaction_date=date(2026, 7, 5),
+        )
+
+        reconcile_card_statement_items(later.pk)
+        later_item.refresh_from_db()
+        self.assertEqual(later_item.match_status, StatementMatchStatus.MATCHED)
+
+        reconcile_card_statement_items(earlier.pk)
+
+        earlier_item.refresh_from_db()
+        later_item.refresh_from_db()
+        later.refresh_from_db()
+        self.assertEqual(earlier_item.match_status, StatementMatchStatus.MATCHED)
+        self.assertEqual(later_item.match_status, StatementMatchStatus.UNMATCHED)
+        self.assertIsNone(later.reconciled_at)
+        self.assertEqual(later.unmatched_receipt_components, [])
+        owner = CardStatementReceiptEvidence.objects.get(
+            receipt=receipt,
+            usage_mode=StatementReceiptEvidenceUsageMode.CONSUME,
+        )
+        self.assertEqual(owner.statement_item_id, earlier_item.pk)
+
+    def test_later_consumption_invalidates_earlier_global_unused_snapshot(self):
+        claude_catalog = ServiceCatalog.objects.create(
+            name="Claude Snapshot Refresh",
+            billing_type=BillingType.SUBSCRIPTION,
+            merchant_aliases="ANTHROPIC, CLAUDE",
+            created_by=self.superuser,
+        )
+        service = RegisteredService.objects.create(
+            user=self.user,
+            catalog_service=claude_catalog,
+            name=claude_catalog.name,
+            billing_type=claude_catalog.billing_type,
+            registered_by=self.superuser,
+        )
+        receipt = self.create_financial_receipt(
+            service=service,
+            filename="snapshot-refresh.pdf",
+            components=[
+                {
+                    "component_key": "charge",
+                    "role": "charge",
+                    "signed_amount": "22.00",
+                    "currency": "USD",
+                    "transaction_date": "2026-07-05",
+                    "payee": "Anthropic, PBC",
+                    "service_label": "Claude Pro",
+                    "invoice_number": "SNAPSHOT-INV",
+                    "source_label": "主要取引",
+                    "document_kind": "receipt",
+                }
+            ],
+        )
+        earlier = CardStatement.objects.create(
+            period_month=date(2026, 7, 1),
+            file=SimpleUploadedFile("empty-july.pdf", b"%PDF-1.4 statement", content_type="application/pdf"),
+            original_filename="empty-july.pdf",
+            status=CardStatementStatus.NEEDS_REVIEW,
+            card_last4="7210",
+            statement_period="2026-07",
+            uploaded_by=self.superuser,
+            expires_at=timezone.now() + timedelta(days=30),
+        )
+        later, later_item = self.create_reconciliation_statement(
+            period_month=date(2026, 8, 1),
+            line_reference="SNAPSHOT-CONSUME",
+            transaction_date=date(2026, 7, 5),
+        )
+
+        reconcile_card_statement_items(earlier.pk)
+        earlier.refresh_from_db()
+        self.assertEqual(
+            [entry["receipt_id"] for entry in earlier.unmatched_receipt_components],
+            [receipt.pk],
+        )
+
+        reconcile_card_statement_items(later.pk)
+
+        earlier.refresh_from_db()
+        later_item.refresh_from_db()
+        self.assertEqual(later_item.match_status, StatementMatchStatus.MATCHED)
+        self.assertIsNone(earlier.reconciled_at)
+        self.assertEqual(earlier.unmatched_receipt_components, [])
 
     def test_version_file_is_present_without_web_display_requirement(self):
-        self.assertEqual(Path("VERSION").read_text(encoding="utf-8").strip(), "1.16.1")
+        self.assertEqual(Path("VERSION").read_text(encoding="utf-8").strip(), "1.16.2")
 
 
 @override_settings(PASSWORD_HASHERS=FAST_PASSWORD_HASHERS)

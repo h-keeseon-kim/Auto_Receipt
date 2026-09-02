@@ -52,6 +52,7 @@
                     {% for evidence in item.receipt_evidences.all %}
                         <li>
                             <span class="badge {% if evidence.role == 'refund' %}draft{% else %}submitted{% endif %}">{{ evidence.get_role_display }}</span>
+                            <span class="badge {% if evidence.usage_mode == 'reference' %}neutral{% else %}submitted{% endif %}">{{ evidence.get_usage_mode_display }}</span>
                             {% if evidence.receipt and evidence.receipt.file_available %}
                                 <a href="{% url 'download_receipt' evidence.receipt.pk %}">{{ evidence.filename_snapshot }}</a>
                             {% else %}
@@ -63,7 +64,7 @@
                         </li>
                     {% endfor %}
                 </ul>
-                {% if item.evidence_count > 1 %}<p class="muted small"><strong>純額:</strong> {{ item.evidence_calculation }}</p>{% endif %}
+                {% if item.evidence_calculation %}<p class="muted small"><strong>構成:</strong> {{ item.evidence_calculation }}</p>{% endif %}
             {% elif item.match_status == 'needs_review' %}
                 <p class="warning"><strong>提出ファイルはありますが、照合に必要な情報を抽出できていません。</strong></p>
             {% elif item.receipt_required %}

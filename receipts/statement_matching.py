@@ -57,6 +57,9 @@ MATCH_REVERSAL_ORIGINAL_CHARGE = "reversal_original_charge"
 STATEMENT_ROLE_CHARGE = "charge"
 STATEMENT_ROLE_REVERSAL = "reversal"
 
+USAGE_MODE_CONSUME = "consume"
+USAGE_MODE_REFERENCE = "reference"
+
 DEFAULT_REFUND_LOOKBACK_DAYS = 14
 DEFAULT_REFUND_LOOKAHEAD_DAYS = 45
 DEFAULT_MAX_REFUNDS_PER_NET = 8
@@ -147,6 +150,7 @@ class EvidenceComponent:
     source_label: str = ""
     payee: str = ""
     service_label: str = ""
+    fingerprint: str = ""
 
     def __post_init__(self):
         object.__setattr__(self, "signed_amount", Decimal(str(self.signed_amount)))
@@ -176,6 +180,7 @@ class MatchAssignment:
     component_keys: tuple[str, ...]
     amount_basis: str = ""
     memo: str = ""
+    usage_mode: str = USAGE_MODE_CONSUME
 
 
 @dataclass
@@ -183,6 +188,9 @@ class ReconciliationResult:
     assignments: dict[str, MatchAssignment] = field(default_factory=dict)
     components_by_key: dict[str, EvidenceComponent] = field(default_factory=dict)
     deduplicated_component_keys: set[str] = field(default_factory=set)
+    reserved_component_keys: set[str] = field(default_factory=set)
+    consumed_component_keys: set[str] = field(default_factory=set)
+    referenced_component_keys: set[str] = field(default_factory=set)
     unused_component_keys: set[str] = field(default_factory=set)
 
     @property
@@ -212,6 +220,8 @@ def _normalise_reference(value: str) -> str:
 
 
 def _dedupe_identity(component: EvidenceComponent) -> tuple | None:
+    if component.fingerprint:
+        return ("fingerprint", component.fingerprint)
     invoice = _normalise_reference(component.invoice_number)
     # Charge evidence often exposes both an invoice number and a receipt/
     # payment-history identifier.  A paid receipt and the original-payment row
@@ -316,6 +326,7 @@ def _global_direct_matching(
     components: Sequence[EvidenceComponent],
     *,
     date_tolerance_days: int,
+    unavailable_keys: set[str] | None = None,
 ) -> list[tuple[StatementLine, EvidenceComponent, str, str]]:
     line_count = len(lines)
     component_count = len(components)
@@ -330,6 +341,7 @@ def _global_direct_matching(
     for component_index in range(component_count):
         _add_edge(graph, component_offset + component_index, sink, 1, 0)
 
+    unavailable_keys = set(unavailable_keys or ())
     candidate_edges: dict[tuple[int, int], tuple[_FlowEdge, str, str]] = {}
     for line_index, line in enumerate(lines):
         if line.statement_role == STATEMENT_ROLE_REVERSAL:
@@ -337,7 +349,7 @@ def _global_direct_matching(
         if not line.transaction_date or not line.merchant_key:
             continue
         for component_index, component in enumerate(components):
-            if component.role != ROLE_CHARGE:
+            if component.key in unavailable_keys or component.role != ROLE_CHARGE:
                 continue
             merchant_relation = merchant_match_kind(line.merchant_key, component.merchant_key)
             if merchant_relation is None:
@@ -764,7 +776,7 @@ def _match_reversal_lines(
     result: ReconciliationResult,
     lines: Sequence[StatementLine],
     components: Sequence[EvidenceComponent],
-    used_component_keys: set[str],
+    referenced_component_keys: set[str],
     date_tolerance_days: int,
 ) -> None:
     """Reference the original charge for card return/cancellation rows.
@@ -843,9 +855,10 @@ def _match_reversal_lines(
                 "カード明細の返品・取消行です。同一請求元・同一利用日の元決済領収書を確認し、"
                 "同日の正味再計上で使われた元決済と同一取引として参照しました。"
             ),
+            usage_mode=USAGE_MODE_REFERENCE,
         )
         referenced_by_reversal.add(charge.key)
-        used_component_keys.add(charge.key)
+        referenced_component_keys.add(charge.key)
 
 
 def reconcile_statement(
@@ -856,20 +869,25 @@ def reconcile_statement(
     refund_lookback_days: int = DEFAULT_REFUND_LOOKBACK_DAYS,
     refund_lookahead_days: int = DEFAULT_REFUND_LOOKAHEAD_DAYS,
     max_refunds_per_net: int = DEFAULT_MAX_REFUNDS_PER_NET,
+    unavailable_component_keys: set[str] | None = None,
 ) -> ReconciliationResult:
     components, deduplicated_keys = deduplicate_components(evidence_components)
     components_by_key = {component.key: component for component in components}
+    reserved_component_keys = set(unavailable_component_keys or ()).intersection(components_by_key)
     result = ReconciliationResult(
         components_by_key=components_by_key,
         deduplicated_component_keys=deduplicated_keys,
+        reserved_component_keys=reserved_component_keys,
     )
-    used_component_keys: set[str] = set()
+    consumed_component_keys: set[str] = set(reserved_component_keys)
+    referenced_component_keys: set[str] = set()
 
     normal_lines = [line for line in lines if line.statement_role != STATEMENT_ROLE_REVERSAL]
     direct_matches = _global_direct_matching(
         normal_lines,
         components,
         date_tolerance_days=date_tolerance_days,
+        unavailable_keys=consumed_component_keys,
     )
     for line, component, amount_basis, merchant_relation in direct_matches:
         match_type = (
@@ -909,14 +927,14 @@ def reconcile_statement(
             amount_basis=amount_basis,
             memo=memo,
         )
-        used_component_keys.add(component.key)
+        consumed_component_keys.add(component.key)
 
     # Explicit invoice/transaction linkage is stronger and is allocated first.
     _apply_refund_net_phase(
         result=result,
         lines=normal_lines,
         components=components,
-        used_component_keys=used_component_keys,
+        used_component_keys=consumed_component_keys,
         date_tolerance_days=date_tolerance_days,
         require_explicit_link=True,
         refund_lookback_days=refund_lookback_days,
@@ -930,7 +948,7 @@ def reconcile_statement(
         result=result,
         lines=normal_lines,
         components=components,
-        used_component_keys=used_component_keys,
+        used_component_keys=consumed_component_keys,
         date_tolerance_days=date_tolerance_days,
         require_explicit_link=False,
         refund_lookback_days=refund_lookback_days,
@@ -942,11 +960,17 @@ def reconcile_statement(
         result=result,
         lines=lines,
         components=components,
-        used_component_keys=used_component_keys,
+        referenced_component_keys=referenced_component_keys,
         date_tolerance_days=date_tolerance_days,
     )
 
-    result.unused_component_keys = set(components_by_key) - used_component_keys
+    result.consumed_component_keys = set(consumed_component_keys) - reserved_component_keys
+    result.referenced_component_keys = referenced_component_keys
+    # ``reference`` proves a relationship (for example a reversal row pointing
+    # at the original charge) but does not spend the monetary evidence.  Keep
+    # reference-only components in the globally available/unused set so a later
+    # statement can still consume them exactly once.
+    result.unused_component_keys = set(components_by_key) - consumed_component_keys
     return result
 
 

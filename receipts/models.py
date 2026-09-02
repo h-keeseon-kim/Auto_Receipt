@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 from calendar import monthrange
+from datetime import date
 from pathlib import Path
 from uuid import uuid4
 
 from django.conf import settings
-from django.core.exceptions import ValidationError
+from django.core.exceptions import ObjectDoesNotExist, ValidationError
 from django.core.validators import FileExtensionValidator, MinValueValidator
 from django.db import models, transaction
 from django.db.models import Q
@@ -132,6 +133,11 @@ class ReceiptFinancialDocumentKind(models.TextChoices):
 class StatementReceiptEvidenceRole(models.TextChoices):
     CHARGE = "charge", "請求・支払"
     REFUND = "refund", "返金"
+
+
+class StatementReceiptEvidenceUsageMode(models.TextChoices):
+    CONSUME = "consume", "金額計算に使用"
+    REFERENCE = "reference", "参照のみ"
 
 
 class ResubmissionRequestStatus(models.TextChoices):
@@ -788,6 +794,13 @@ class Receipt(models.Model):
         ],
     )
     original_filename = models.CharField("元ファイル名", max_length=255, blank=True)
+    file_sha256 = models.CharField(
+        "ファイルSHA-256",
+        max_length=64,
+        blank=True,
+        db_index=True,
+        help_text="同一PDFの再アップロードを識別し、取引構成要素の二重使用を防止します。",
+    )
     generated_filename = models.CharField("AI修正ファイル名", max_length=255, blank=True)
     ai_filename_status = models.CharField(
         "AIファイル名ステータス",
@@ -1379,12 +1392,12 @@ class CardStatement(models.Model):
     payment_date = models.DateField("支払日", null=True, blank=True)
     ai_admin_memo = models.TextField("AI管理者メモ", blank=True)
     unmatched_receipt_components = models.JSONField(
-        "明細未使用の提出証拠",
+        "全明細で未消費の提出証拠",
         default=list,
         blank=True,
         help_text=(
-            "対象月に提出されたものの、カード明細のどの行にも使用されなかった領収書・取引構成要素です。"
-            "カード明細側の誤記や別取引の確認に利用します。"
+            "対象月または実明細に関連する月跨ぎPDFのうち、全カード明細を通じて金額計算に未使用の"
+            "取引構成要素が残る書類です。部分使用済みPDFは構成要素ごとの使用先も保存します。"
         ),
     )
     uploaded_by = models.ForeignKey(
@@ -1578,17 +1591,47 @@ class CardStatementItem(models.Model):
         evidences = list(self.receipt_evidences.all())
         if not evidences:
             return ""
-        parts = []
-        for evidence in evidences:
+
+        consuming = [
+            evidence
+            for evidence in evidences
+            if evidence.usage_mode == StatementReceiptEvidenceUsageMode.CONSUME
+        ]
+        references = [
+            evidence
+            for evidence in evidences
+            if evidence.usage_mode == StatementReceiptEvidenceUsageMode.REFERENCE
+        ]
+
+        parts: list[str] = []
+        for evidence in consuming:
             sign = "-" if evidence.role == StatementReceiptEvidenceRole.REFUND else ("+" if parts else "")
             amount = abs(evidence.signed_amount)
             text = format(amount, "f").rstrip("0").rstrip(".") or "0"
             role_label = "返金" if evidence.role == StatementReceiptEvidenceRole.REFUND else "決済"
-            parts.append(f"{sign}{text} {evidence.currency}（{role_label}）")
-        statement_amount = self.original_amount if self.original_amount is not None else self.amount_jpy
-        currency = self.original_currency or "JPY"
-        total_text = format(statement_amount, "f").rstrip("0").rstrip(".") if statement_amount is not None else "-"
-        return " ".join(parts) + f" = {total_text} {currency}"
+            parts.append(f"{sign}{text} {evidence.currency}（{role_label}・使用）")
+
+        result = ""
+        if parts:
+            statement_amount = self.original_amount if self.original_amount is not None else self.amount_jpy
+            currency = self.original_currency or "JPY"
+            total_text = (
+                format(statement_amount, "f").rstrip("0").rstrip(".")
+                if statement_amount is not None
+                else "-"
+            )
+            result = " ".join(parts) + f" = {total_text} {currency}"
+
+        if references:
+            reference_parts = []
+            for evidence in references:
+                amount = abs(evidence.signed_amount)
+                text = format(amount, "f").rstrip("0").rstrip(".") or "0"
+                role_label = "返金" if evidence.role == StatementReceiptEvidenceRole.REFUND else "決済"
+                reference_parts.append(f"{text} {evidence.currency}（{role_label}・参照のみ）")
+            reference_text = "、".join(reference_parts)
+            result = f"{result} / 参照: {reference_text}" if result else f"参照のみ: {reference_text}"
+        return result
 
     @property
     def matched_user_label(self) -> str:
@@ -1735,7 +1778,21 @@ class CardStatementReceiptEvidence(models.Model):
     component_key = models.CharField(
         "構成要素キー",
         max_length=160,
-        help_text="同じPDF内の元決済と返金を別々に識別するキーです。",
+        help_text="同じPDF内の元決済と返金を別々に識別するローカルキーです。",
+    )
+    component_fingerprint = models.CharField(
+        "構成要素フィンガープリント",
+        max_length=64,
+        blank=True,
+        db_index=True,
+        help_text="再アップロードや月跨ぎでも同じ金融イベントを識別する安定キーです。",
+    )
+    usage_mode = models.CharField(
+        "使用方法",
+        max_length=16,
+        choices=StatementReceiptEvidenceUsageMode.choices,
+        default=StatementReceiptEvidenceUsageMode.CONSUME,
+        help_text="金額計算に消費した証拠か、返品元として参照しただけかを区別します。",
     )
     role = models.CharField(
         "役割",
@@ -1763,14 +1820,34 @@ class CardStatementReceiptEvidence(models.Model):
             models.UniqueConstraint(
                 fields=["statement_item", "receipt", "component_key"],
                 name="unique_statement_receipt_component_evidence",
-            )
+            ),
+            models.UniqueConstraint(
+                fields=["component_fingerprint"],
+                condition=(
+                    Q(usage_mode=StatementReceiptEvidenceUsageMode.CONSUME)
+                    & ~Q(component_fingerprint="")
+                ),
+                name="uniq_consumed_component_fp",
+            ),
         ]
         indexes = [
             models.Index(fields=["statement_item", "role"], name="stmt_ev_item_role_idx"),
             models.Index(fields=["receipt", "component_key"], name="stmt_ev_receipt_comp_idx"),
+            models.Index(
+                fields=["component_fingerprint", "usage_mode"],
+                name="stmt_ev_fp_usage_idx",
+            ),
         ]
         verbose_name = "カード明細照合証拠"
         verbose_name_plural = "カード明細照合証拠"
+
+    @property
+    def is_consuming(self) -> bool:
+        return self.usage_mode == StatementReceiptEvidenceUsageMode.CONSUME
+
+    @property
+    def is_reference_only(self) -> bool:
+        return self.usage_mode == StatementReceiptEvidenceUsageMode.REFERENCE
 
     @property
     def amount_display(self) -> str:
@@ -1943,57 +2020,108 @@ def sync_user_account_status_after_service_delete(sender, instance: RegisteredSe
     sync_user_account_status_from_services(instance.user_id)
 
 
+def _receipt_event_months(instance: Receipt) -> set[date]:
+    """Return every financial-event month represented by one physical PDF.
+
+    Refund/Credit Note PDFs can contain an original payment from one month and a
+    refund from another. Both months can affect global component ownership. The
+    submission-derived receipt month is used only when the parent submission is
+    still available; during a cascading delete Django may already have removed
+    that relation, so signal handling must not fail merely while cleaning files.
+    """
+
+    months: set[date] = set()
+    try:
+        submission = instance.submission
+    except (AttributeError, ObjectDoesNotExist):
+        submission = None
+    if submission is not None and getattr(submission, "period_month", None):
+        months.add(receipt_month_for_submission(submission.period_month))
+    if instance.issued_on:
+        months.add(month_start(instance.issued_on))
+    for component in instance.financial_transaction_components or []:
+        if not isinstance(component, dict):
+            continue
+        raw = str(component.get("transaction_date") or "")[:10]
+        if not raw:
+            continue
+        try:
+            months.add(date.fromisoformat(raw).replace(day=1))
+        except ValueError:
+            continue
+    return months
+
+
+def _queue_statements_after_receipt_change(instance: Receipt) -> None:
+    event_months = _receipt_event_months(instance)
+    if not event_months:
+        return
+    earliest_month = min(event_months)
+
+    def mark_pending():
+        from .statement_processing import (
+            GLOBAL_COMPONENT_USAGE_RECONCILE_MARKER,
+            RECEIPT_CHANGE_RECONCILE_MARKER,
+        )
+
+        statements = list(
+            CardStatement.objects.filter(period_month__gte=earliest_month)
+            .exclude(status__in=[CardStatementStatus.PROCESSING, CardStatementStatus.FAILED])
+            .only("pk", "ai_admin_memo")
+            .order_by("period_month", "uploaded_at", "pk")
+        )
+        for statement in statements:
+            memo = statement.ai_admin_memo or ""
+            for marker in (RECEIPT_CHANGE_RECONCILE_MARKER, GLOBAL_COMPONENT_USAGE_RECONCILE_MARKER):
+                if marker not in memo:
+                    memo = f"{marker} {memo}".strip()
+            CardStatement.objects.filter(pk=statement.pk).update(
+                ai_admin_memo=memo[:5000],
+                reconciled_at=None,
+                unmatched_receipt_components=[],
+                updated_at=timezone.now(),
+            )
+
+    # Only invalidate statements after the receipt transaction commits.
+    transaction.on_commit(mark_pending)
+
+
 @receiver(post_save, sender=Receipt)
 def mark_statement_reconciliation_pending_after_receipt_save(sender, instance: Receipt, **kwargs):
-    """領収書保存を明細再照合から切り離す。
+    """Queue every chronological statement that can be affected by the PDF.
 
-    以前は Receipt.save() の post_save 内で全明細を同期再照合していたため、
-    再照合中のメタデータ保存がさらに post_save を発火し、再帰的な再照合と
-    アップロード要求のタイムアウトを引き起こし得た。領収書保存は先に完了させ、
-    管理者が明細ページを開いた時または「最新の領収書と再照合」を押した時に
-    一度だけ最新状態で再照合する。
+    A newly parsed refund can change ownership not only in its issue month but
+    also in the month of the original payment, and every later statement must
+    rebuild its global consume ledger.  Reconciliation itself uses QuerySet
+    updates when enriching metadata, so this signal does not recurse.
     """
 
     if not instance.file_available:
         return
-
-    # 領収書は「発行月の翌月」の提出サイクルに保存される。
-    # カード明細には前月末の遅延計上が含まれるため、同じ発行月の明細に
-    # 加えて翌月明細も再照合待ちにする。実際の候補採否は明細内利用日と
-    # 金額・通貨・請求元の厳密条件で決まる。
-    receipt_month = receipt_month_for_submission(instance.submission.period_month)
-    statement_months = {receipt_month, add_months(receipt_month, 1)}
-
-    def mark_pending():
-        from .statement_processing import RECEIPT_CHANGE_RECONCILE_MARKER
-
-        statements = list(
-            CardStatement.objects.filter(period_month__in=statement_months)
-            .exclude(status__in=[CardStatementStatus.PROCESSING, CardStatementStatus.FAILED])
-            .only("pk", "ai_admin_memo")
-        )
-        for statement in statements:
-            memo = statement.ai_admin_memo or ""
-            if RECEIPT_CHANGE_RECONCILE_MARKER not in memo:
-                memo = f"{memo} {RECEIPT_CHANGE_RECONCILE_MARKER}".strip()
-            CardStatement.objects.filter(pk=statement.pk).update(
-                ai_admin_memo=memo[:5000],
-                reconciled_at=None,
-                updated_at=timezone.now(),
-            )
-
-    # 外側の領収書保存トランザクションが成功した場合だけ再照合待ちにする。
-    transaction.on_commit(mark_pending)
+    _queue_statements_after_receipt_change(instance)
 
 
 @receiver(post_delete, sender=Receipt)
 def delete_receipt_file(sender, instance: Receipt, **kwargs):
+    # Keep the historical evidence ledger (the FK becomes NULL) but refresh
+    # affected statement snapshots after the physical receipt record is removed.
+    _queue_statements_after_receipt_change(instance)
     if instance.file:
         instance.file.delete(save=False)
 
 
 @receiver(post_delete, sender=CardStatement)
 def delete_card_statement_file(sender, instance: CardStatement, **kwargs):
+    # A statement owns global ``consume`` rows through its items. Deleting it
+    # releases those components, so every remaining statement must refresh its
+    # ownership and global-unused snapshot. This signal covers Django admin and
+    # shell deletions in addition to the dedicated staff view.
+    def refresh_remaining_statements():
+        from .statement_processing import mark_card_statements_for_global_usage_refresh
+
+        mark_card_statements_for_global_usage_refresh()
+
+    transaction.on_commit(refresh_remaining_statements)
     if instance.file:
         instance.file.delete(save=False)
 

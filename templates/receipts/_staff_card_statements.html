@@ -14,7 +14,7 @@
     <div class="statement-result-filter-summary-main">
         <strong>{{ result_filter_label }}を表示中</strong>
         {% if result_filter == 'unmatched' %}
-            <span class="muted small">推定対応 {{ result_filter_counts.inferred }}件・未一致 {{ result_filter_counts.unmatched_only }}件・明細未使用 {{ result_filter_counts.unused_receipts }}件</span>
+            <span class="muted small">推定対応 {{ result_filter_counts.inferred }}件・未一致 {{ result_filter_counts.unmatched_only }}件・全明細で未消費 {{ result_filter_counts.unused_receipts }}件</span>
         {% endif %}
     </div>
     <span>{{ result_filter_count }}件 / 全{{ result_filter_counts.all }}件</span>
@@ -56,7 +56,7 @@
         <div class="card"><span class="label">明細行</span><strong>{{ statement.items.count }}</strong></div>
         <div class="card"><span class="label">解析要確認</span><strong class="{% if statement.manual_review_count %}warning{% endif %}">{{ statement.manual_review_count }}</strong></div>
         <div class="card"><span class="label">未一致</span><strong class="{% if statement.unresolved_count %}danger{% endif %}">{{ statement.unresolved_count }}</strong><span class="muted small">推定対応を含む</span></div>
-        <div class="card"><span class="label">明細未使用の提出書類</span><strong class="{% if statement.unmatched_receipt_components %}warning{% endif %}">{{ statement.unmatched_receipt_components|length }}</strong></div>
+        <div class="card"><span class="label">全明細で未消費の提出書類</span><strong class="{% if statement.unmatched_receipt_components %}warning{% endif %}">{{ statement.unmatched_receipt_components|length }}</strong></div>
     </section>
 
     {% if statement.ai_admin_memo %}
@@ -68,7 +68,7 @@
     {% elif statement.items.count or statement.display_unused_receipts %}
         <div class="message notice statement-match-rule-notice">
             <strong>照合条件：</strong>
-            通常取引は、金額・通貨完全一致、ご利用先・払先または本文上のサービス名の関連、明細利用日と領収書日付が±1日以内の候補を、明細全体で最大件数となるよう一対一割り当てします。前月利用行は前月の領収書も参照し、同一法人カード・同一請求元の返金は最大45日後まで厳密な金額一致で重複なく全体割り当てします。返品行は同日元決済と正味再計上を同一決済グループとして扱います。
+            通常取引は、金額・通貨完全一致、ご利用先・払先または本文上のサービス名の関連、明細利用日と領収書日付が±1日以内の候補を、明細全体で最大件数となるよう一対一割り当てします。前月利用行は前月の領収書も参照し、同一法人カード・同一請求元の返金は最大45日後まで厳密な金額一致で重複なく全体割り当てします。返品行は同日元決済と正味再計上を同一決済グループとして扱います。取引構成要素は再アップロード後も同一金融イベントとして識別し、<strong>金額計算に使用した構成要素は前月・翌月を含む他の明細では再使用しません。</strong>返品元確認などの参照だけは金額を消費せず、使用履歴と分けて保存します。
             法的な販売者名とサービス名は別に保持します。例えば「Google Asia Pacific Pte. Ltd.」が販売者でも、本文に「Google One」と明示されていればGoogle One明細として照合します。
             通常照合では利用者の特定を判定条件に含めません。直接一致しない明細に限り、当月の契約変更書類にBill to利用者・旧プラン終了情報が明記され、過去領収書または前月カード明細の同一請求元・完全一致金額・請求周期が揃うときは「推定対応」として管理者確認に回します。前月カード明細は領収書提出の証拠ではなく、旧プランの定期請求実績を裏付ける補助証拠です。<strong>赤色は未一致、橙色は推定対応、黄色は提出ファイルの解析要確認です。</strong>
         </div>
@@ -129,26 +129,28 @@
                 <section class="statement-unused-receipts" aria-labelledby="unused-receipts-{{ statement.pk }}">
                     <div class="section-header compact">
                         <div>
-                            <h3 id="unused-receipts-{{ statement.pk }}">明細に紐づかなかった提出書類</h3>
-                            <p class="muted">PDF本文の書類日・取引日が選択中の領収書発行月に属する提出ファイル、または明細に含まれる月跨ぎ取引と日付・請求元が関連する提出ファイルのうち、どの決済グループにも使用されなかった物理PDFです。照合候補として内部参照しただけの無関係な過去月書類は表示しません。同じ返金PDF内の元決済・返金構成要素は1ファイルとして表示します。</p>
+                            <h3 id="unused-receipts-{{ statement.pk }}">全明細で未消費の構成要素が残る提出書類</h3>
+                            <p class="muted">対象月または実明細に関連する月跨ぎPDFのうち、前月・当月・翌月を含むどのカード明細でも金額計算にまだ使用されていない取引構成要素が残る書類です。返金PDFの元決済だけが他の明細で使用済みで返金部分が未使用の場合は「一部使用済み」として構成要素別の使用先を表示します。全構成要素を使用済みのPDFと、照合候補として読み込んだだけの無関係な過去月書類は表示しません。</p>
                         </div>
                         <span class="badge draft">{{ statement.display_unused_receipts|length }}件</span>
                     </div>
                     {% if statement.display_unused_receipts %}
                     <div class="statement-unused-receipt-grid">
                         {% for entry in statement.display_unused_receipts %}
-                            <article class="statement-unused-receipt-card{% if entry.reason_code == 'amount_mismatch' %} amount-mismatch{% elif entry.reason_code == 'parse_review' %} review{% endif %}">
+                            <article class="statement-unused-receipt-card {{ entry.usage_state|default:'unused' }}{% if entry.reason_code == 'amount_mismatch' %} amount-mismatch{% elif entry.reason_code == 'parse_review' %} review{% endif %}">
                                 <div class="statement-unused-receipt-heading">
                                     <div>
-                                        <span class="badge {% if entry.reason_code == 'amount_mismatch' %}danger{% else %}draft{% endif %}">
-                                            {% if entry.reason_code == 'amount_mismatch' %}金額不一致{% elif entry.reason_code == 'parse_review' %}解析要確認{% elif entry.reason_code == 'surplus_evidence' %}余剰・重複候補{% else %}明細未使用{% endif %}
-                                        </span>
+                                        <div class="statement-unused-receipt-badges">
+                                            <span class="badge {% if entry.usage_state == 'partial' %}inferred{% elif entry.usage_state == 'referenced' %}submitted{% elif entry.usage_state == 'unknown' %}draft{% else %}draft{% endif %}">{{ entry.usage_state_label|default:"全期間未使用" }}</span>
+                                            {% if entry.reason_code == 'amount_mismatch' %}<span class="badge danger">金額不一致</span>{% elif entry.reason_code == 'parse_review' %}<span class="badge draft">解析要確認</span>{% elif entry.reason_code == 'surplus_evidence' %}<span class="badge draft">余剰・重複候補</span>{% endif %}
+                                        </div>
                                         <h4>
                                             {% if entry.receipt_id %}<a href="{% url 'download_receipt' entry.receipt_id %}">{{ entry.filename }}</a>{% else %}{{ entry.filename }}{% endif %}
                                         </h4>
                                     </div>
                                     {% if entry.amount %}<strong>{{ entry.amount|floatformat:-2 }} {{ entry.currency }}</strong>{% endif %}
                                 </div>
+                                {% if entry.usage_summary %}<p class="statement-unused-receipt-usage-summary">{{ entry.usage_summary }}</p>{% endif %}
                                 <dl class="statement-unused-receipt-details">
                                     <div><dt>利用者</dt><dd>{{ entry.user|default:"-" }}</dd></div>
                                     <div><dt>登録項目</dt><dd>{{ entry.service|default:"その他" }}</dd></div>
@@ -159,13 +161,36 @@
                                         <div><dt>最も近い明細</dt><dd>{{ entry.closest_line_reference|default:entry.closest_line_sequence }}{% if entry.closest_statement_date %} / {{ entry.closest_statement_date }}{% endif %}{% if entry.closest_statement_amount %} / {{ entry.closest_statement_amount }} {{ entry.closest_statement_currency }}{% endif %}</dd></div>
                                     {% endif %}
                                 </dl>
+                                {% if entry.components %}
+                                    <details class="statement-component-usage-details"{% if entry.usage_state == 'partial' or entry.usage_state == 'referenced' %} open{% endif %}>
+                                        <summary>PDF内の取引構成要素（{{ entry.component_count }}件）</summary>
+                                        <ul class="statement-component-usage-list">
+                                            {% for component in entry.components %}
+                                                <li class="statement-component-usage-row {{ component.status }}">
+                                                    <div class="statement-component-usage-main">
+                                                        <strong>{% if component.role == 'refund' %}返金{% else %}決済{% endif %} {{ component.amount|floatformat:-2 }} {{ component.currency }}</strong>
+                                                        <span class="muted small">{{ component.event_date|default:"日付未抽出" }}</span>
+                                                    </div>
+                                                    <span class="statement-component-status">{{ component.status_label }}</span>
+                                                    {% if component.used_in %}
+                                                        <ul class="statement-component-owner-list">
+                                                            {% for usage in component.used_in %}
+                                                                <li>{{ usage.statement_month|slice:":7" }}明細 / 明細No. {{ usage.line_reference|default:"-" }}{% if usage.usage_mode == 'reference' %} / 参照のみ{% else %} / 金額計算に使用{% endif %}</li>
+                                                            {% endfor %}
+                                                        </ul>
+                                                    {% endif %}
+                                                </li>
+                                            {% endfor %}
+                                        </ul>
+                                    </details>
+                                {% endif %}
                                 <p class="statement-unused-receipt-reason">{{ entry.reason }}</p>
                                 {% if entry.original_filename and entry.original_filename != entry.filename %}<p class="muted small">元ファイル: {{ entry.original_filename }}</p>{% endif %}
                             </article>
                         {% endfor %}
                     </div>
                     {% else %}
-                        <div class="card statement-group-empty">明細に紐づかなかった提出書類はありません。</div>
+                        <div class="card statement-group-empty">全明細で未消費の構成要素が残る提出書類はありません。</div>
                     {% endif %}
                 </section>
             {% endif %}

@@ -2463,3 +2463,131 @@ body.tutorial-open { overflow-x: hidden; }
         width: min(22rem, calc(100vw - 2rem));
     }
 }
+
+/* v1.16.2: global, component-level evidence usage ledger */
+.statement-unused-receipt-card.partial {
+    border-color: #e3a64d;
+    background: #fff7e8;
+    box-shadow: inset 4px 0 0 #b66a00;
+}
+
+.statement-unused-receipt-card.referenced {
+    border-color: #8fc7a0;
+    background: #f2fbf5;
+    box-shadow: inset 4px 0 0 #2f855a;
+}
+
+.statement-unused-receipt-badges {
+    display: flex;
+    align-items: center;
+    gap: 0.35rem;
+    flex-wrap: wrap;
+}
+
+.statement-unused-receipt-usage-summary {
+    margin: 0 0 0.7rem;
+    padding: 0.55rem 0.65rem;
+    border: 1px solid rgba(100, 116, 139, 0.2);
+    border-radius: 9px;
+    background: rgba(255, 255, 255, 0.7);
+    font-size: 0.84rem;
+    line-height: 1.55;
+}
+
+.statement-component-usage-details {
+    margin-top: 0.75rem;
+    padding-top: 0.65rem;
+    border-top: 1px solid rgba(100, 116, 139, 0.2);
+}
+
+.statement-component-usage-details > summary {
+    cursor: pointer;
+    color: var(--primary);
+    font-size: 0.82rem;
+    font-weight: 800;
+}
+
+.statement-component-usage-list,
+.statement-component-owner-list {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+}
+
+.statement-component-usage-list {
+    display: grid;
+    gap: 0.45rem;
+    margin-top: 0.55rem;
+}
+
+.statement-component-usage-row {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 0.3rem 0.65rem;
+    padding: 0.55rem 0.6rem;
+    border: 1px solid rgba(100, 116, 139, 0.18);
+    border-radius: 9px;
+    background: rgba(255, 255, 255, 0.82);
+}
+
+.statement-component-usage-row.current_consumed,
+.statement-component-usage-row.past_consumed {
+    background: #f3f4f6;
+    opacity: 0.9;
+}
+
+.statement-component-usage-row.current_reference,
+.statement-component-usage-row.past_reference {
+    border-color: #9acbab;
+    background: #f4fbf6;
+}
+
+.statement-component-usage-row.unused {
+    border-color: #e4c45c;
+    background: #fffdf5;
+}
+
+.statement-component-usage-row.duplicate {
+    border-style: dashed;
+    color: var(--muted);
+}
+
+.statement-component-usage-main {
+    min-width: 0;
+    display: flex;
+    align-items: baseline;
+    gap: 0.4rem 0.65rem;
+    flex-wrap: wrap;
+}
+
+.statement-component-status {
+    align-self: start;
+    max-width: 16rem;
+    color: var(--muted);
+    font-size: 0.76rem;
+    font-weight: 800;
+    text-align: right;
+}
+
+.statement-component-owner-list {
+    grid-column: 1 / -1;
+    display: grid;
+    gap: 0.15rem;
+    color: var(--muted);
+    font-size: 0.76rem;
+}
+
+.statement-component-owner-list li::before {
+    content: "↳ ";
+}
+
+@media (max-width: 760px) {
+    .statement-component-usage-row {
+        grid-template-columns: 1fr;
+    }
+
+    .statement-component-status {
+        max-width: none;
+        text-align: left;
+    }
+}

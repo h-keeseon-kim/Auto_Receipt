@@ -1,5 +1,36 @@
 # Changelog
 
+## 1.16.2 — 2026-09-02
+
+領収書・返金PDF内の取引構成要素について、前月・当月・翌月をまたいだ二重使用を防止し、使用先と部分使用状態を永続化する版です。
+
+### Added
+
+- `Receipt.file_sha256`と取引署名を使う安定した`component_fingerprint`
+- `CardStatementReceiptEvidence.usage_mode`（`consume`／`reference`）
+- 全明細共通の`consume`一意制約`uniq_consumed_component_fp`
+- 過去明細の使用済み構成要素を照合候補から除外するグローバル使用台帳
+- Refund PDFの構成要素別使用先・未使用状態の表示
+- 再アップロード、ファイル名変更、AI再解析をまたぐ同一金融イベント判定
+
+### Changed
+
+- 同一明細の再照合では、その明細自身の旧自動割当を解放して再構築
+- 管理者確定を自動照合より優先し、自動照合同士は時系列の古い明細を優先
+- 先行明細が証拠を取り戻した場合、後続明細の計算グループ全体を未一致へ戻す
+- 「明細に紐づかなかった提出書類」を全期間の構成要素使用履歴に基づいて再構築
+
+### Migration
+
+- `receipts.0041_global_component_usage_ledger`
+- `receipts.0042_global_component_usage_consistency`
+
+### Validation
+
+- 純Python回帰テスト44件成功
+- Python構文解析・`compileall`成功
+- Django依存環境での`manage.py check`とDB統合テストはデプロイ先で実行
+
 ## 1.16.1 — 2026-09-02
 
 月跨ぎ照合の候補プールを拡張した結果、過去の領収書を現在の提出サイクルへ再アップロードした場合にも「明細に紐づかなかった提出書類」へ大量表示される問題を修正した版です。

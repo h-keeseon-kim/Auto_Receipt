@@ -19,6 +19,7 @@ from receipts.statement_matching import (
     ROLE_CHARGE,
     ROLE_REFUND,
     STATEMENT_ROLE_REVERSAL,
+    USAGE_MODE_REFERENCE,
     StatementLine,
     deduplicate_components,
     reconcile_statement,
@@ -49,6 +50,7 @@ def component(
     invoice: str = "",
     transaction: str = "",
     related: str = "",
+    fingerprint: str = "",
 ) -> EvidenceComponent:
     return EvidenceComponent(
         key=key,
@@ -64,6 +66,7 @@ def component(
         invoice_number=invoice,
         transaction_id=transaction,
         related_transaction_id=related,
+        fingerprint=fingerprint,
         source_label="test",
         payee=merchant,
     )
@@ -583,6 +586,85 @@ class StatementMatchingEngineTests(unittest.TestCase):
 
         self.assertEqual(result.assignments["L"].component_keys, ("exact",))
         self.assertEqual(result.assignments["L"].match_type, MATCH_DIRECT)
+
+
+    def test_unavailable_component_cannot_be_directly_consumed(self):
+        blocked = component(
+            "blocked", 1, 1, 10, "ANTHROPIC", "22", fingerprint="fp-blocked"
+        )
+        result = reconcile_statement(
+            [line("L", 1, 10, "ANTHROPIC", "22")],
+            [blocked],
+            unavailable_component_keys={"blocked"},
+        )
+        self.assertNotIn("L", result.assignments)
+        self.assertEqual(result.reserved_component_keys, {"blocked"})
+
+    def test_unavailable_charge_or_refund_cannot_be_used_in_net_calculation(self):
+        charge = component(
+            "charge", 1, 1, 10, "ANTHROPIC", "110", fingerprint="fp-charge"
+        )
+        refund = component(
+            "refund", 2, 2, 11, "ANTHROPIC", "-5.26",
+            role=ROLE_REFUND, kind=DOC_REFUND, fingerprint="fp-refund",
+        )
+        target = [line("L", 1, 10, "ANTHROPIC", "104.74")]
+        for unavailable in ({"charge"}, {"refund"}):
+            with self.subTest(unavailable=unavailable):
+                result = reconcile_statement(
+                    target,
+                    [charge, refund],
+                    unavailable_component_keys=set(unavailable),
+                )
+                self.assertNotIn("L", result.assignments)
+
+    def test_globally_consumed_charge_can_still_be_reference_for_reversal(self):
+        reversal = StatementLine(
+            key="RETURN",
+            sequence=1,
+            transaction_date=date(2026, 6, 10),
+            merchant_key="ANTHROPIC",
+            amount_options=(AmountOption(Decimal("220"), "USD", "statement"),),
+            statement_role=STATEMENT_ROLE_REVERSAL,
+        )
+        original = component(
+            "original", 1, 1, 10, "ANTHROPIC", "220", fingerprint="fp-original"
+        )
+        result = reconcile_statement(
+            [reversal],
+            [original],
+            unavailable_component_keys={"original"},
+        )
+        self.assertEqual(result.assignments["RETURN"].component_keys, ("original",))
+        self.assertEqual(result.assignments["RETURN"].usage_mode, USAGE_MODE_REFERENCE)
+        self.assertNotIn("original", result.unused_component_keys)
+        self.assertEqual(result.reserved_component_keys, {"original"})
+
+    def test_reference_only_component_remains_available_for_future_consume(self):
+        reversal = StatementLine(
+            key="RETURN",
+            sequence=1,
+            transaction_date=date(2026, 6, 10),
+            merchant_key="ANTHROPIC",
+            amount_options=(AmountOption(Decimal("220"), "USD", "statement"),),
+            statement_role=STATEMENT_ROLE_REVERSAL,
+        )
+        original = component("original", 1, 1, 10, "ANTHROPIC", "220")
+        result = reconcile_statement([reversal], [original])
+        self.assertIn("original", result.referenced_component_keys)
+        self.assertIn("original", result.unused_component_keys)
+        self.assertNotIn("original", result.consumed_component_keys)
+
+    def test_duplicate_fingerprint_is_deduplicated_across_reuploaded_rows(self):
+        first = component(
+            "upload-a", 1, 1, 10, "ANTHROPIC", "22", fingerprint="stable-financial-event"
+        )
+        second = component(
+            "upload-b", 2, 2, 10, "ANTHROPIC", "22", fingerprint="stable-financial-event"
+        )
+        unique, removed = deduplicate_components([first, second])
+        self.assertEqual(len(unique), 1)
+        self.assertEqual(removed, {"upload-b"})
 
     def test_unrelated_merchant_does_not_match_even_if_amount_and_date_match(self):
         result = reconcile_statement(
