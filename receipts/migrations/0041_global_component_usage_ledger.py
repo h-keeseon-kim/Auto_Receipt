@@ -109,10 +109,22 @@ def _is_reversal_item(item) -> bool:
 
 
 def backfill_global_component_usage(apps, schema_editor):
+    """Backfill the new ledger fields with a bounded number of SQL writes.
+
+    v1.16.2 updated each evidence row with an individual UPDATE statement and
+    then repeated most of the work in migration 0042. On a remote PostgreSQL
+    database that can consume Railway's five-minute healthcheck window. This
+    implementation preserves the same ownership rule while using bulk updates.
+    """
+
     Evidence = apps.get_model("receipts", "CardStatementReceiptEvidence")
     Statement = apps.get_model("receipts", "CardStatement")
 
-    rows = list(
+    consume_owner: dict[str, int] = {}
+    pending_updates = []
+    evidence_count = 0
+
+    queryset = (
         Evidence.objects.select_related("statement_item__statement")
         .order_by(
             "statement_item__statement__period_month",
@@ -121,49 +133,84 @@ def backfill_global_component_usage(apps, schema_editor):
             "pk",
         )
     )
-    consume_owner: dict[str, int] = {}
-    statements_to_reconcile: set[int] = set()
 
-    for evidence in rows:
+    for evidence in queryset.iterator(chunk_size=1000):
+        evidence_count += 1
         item = evidence.statement_item
-        usage_mode = "reference" if _is_reversal_item(item) and evidence.role == "charge" else "consume"
+        usage_mode = (
+            "reference"
+            if _is_reversal_item(item) and evidence.role == "charge"
+            else "consume"
+        )
         fingerprint = _explicit_fingerprint(evidence)
 
         if usage_mode == "consume" and fingerprint:
             existing_owner = consume_owner.get(fingerprint)
             if existing_owner is not None:
                 is_manual = bool(
-                    item.match_confidence >= 1.0
+                    float(item.match_confidence or 0) >= 1.0
                     and str(item.match_memo or "").startswith("管理者")
                 )
                 if is_manual:
-                    # Preserve a historical manual override. Leaving the stable
-                    # key blank prevents the new constraint from deleting or
-                    # mutating an administrator decision; the statement is
-                    # explicitly queued for review/reconciliation.
+                    # Keep the administrator decision visible without violating
+                    # the global unique constraint. Migration 0042 performs the
+                    # final consistency pass and annotates conflicts.
                     fingerprint = ""
                 else:
                     usage_mode = "reference"
-                statements_to_reconcile.add(item.statement_id)
             else:
                 consume_owner[fingerprint] = evidence.pk
 
-        Evidence.objects.filter(pk=evidence.pk).update(
-            component_fingerprint=fingerprint,
-            usage_mode=usage_mode,
+        evidence.component_fingerprint = fingerprint
+        evidence.usage_mode = usage_mode
+        pending_updates.append(evidence)
+
+        if len(pending_updates) >= 1000:
+            Evidence.objects.bulk_update(
+                pending_updates,
+                ["component_fingerprint", "usage_mode"],
+                batch_size=1000,
+            )
+            pending_updates.clear()
+
+    if pending_updates:
+        Evidence.objects.bulk_update(
+            pending_updates,
+            ["component_fingerprint", "usage_mode"],
+            batch_size=1000,
         )
 
-    statements = Statement.objects.exclude(status__in=["processing", "failed"])
-    for statement in statements.iterator():
+    statement_updates = []
+    for statement in Statement.objects.exclude(
+        status__in=["processing", "failed"]
+    ).iterator(chunk_size=500):
         memo = str(statement.ai_admin_memo or "")
         if RECONCILE_MARKER not in memo:
             memo = f"{RECONCILE_MARKER} {memo}".strip()
-        Statement.objects.filter(pk=statement.pk).update(
-            ai_admin_memo=memo[:5000],
-            reconciled_at=None,
-            unmatched_receipt_components=[],
+        statement.ai_admin_memo = memo[:5000]
+        statement.reconciled_at = None
+        statement.unmatched_receipt_components = []
+        statement_updates.append(statement)
+
+        if len(statement_updates) >= 500:
+            Statement.objects.bulk_update(
+                statement_updates,
+                ["ai_admin_memo", "reconciled_at", "unmatched_receipt_components"],
+                batch_size=500,
+            )
+            statement_updates.clear()
+
+    if statement_updates:
+        Statement.objects.bulk_update(
+            statement_updates,
+            ["ai_admin_memo", "reconciled_at", "unmatched_receipt_components"],
+            batch_size=500,
         )
 
+    print(
+        f"ReceiptHub 0041: initialized {evidence_count} evidence rows "
+        "with bulk updates."
+    )
 
 def reverse_backfill(apps, schema_editor):
     Evidence = apps.get_model("receipts", "CardStatementReceiptEvidence")

@@ -3,6 +3,9 @@ builder = "DOCKERFILE"
 dockerfilePath = "Dockerfile"
 
 [deploy]
+# Database migrations run before the web container is started. This prevents
+# a long data migration from consuming Railway's HTTP healthcheck window.
+preDeployCommand = ["/app/predeploy.sh"]
 startCommand = "/app/start.sh"
 healthcheckPath = "/health/"
 healthcheckTimeout = 300

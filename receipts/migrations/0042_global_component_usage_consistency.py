@@ -195,6 +195,14 @@ def _statement_order(evidence):
 
 
 def rebuild_global_component_usage(apps, schema_editor):
+    """Rebuild global ownership using bulk SQL operations.
+
+    The original v1.16.2 migration issued one UPDATE per evidence row and one
+    UPDATE per statement. Moving migrations to Railway pre-deploy prevents an
+    HTTP healthcheck timeout, while this bulk implementation also makes the
+    migration itself substantially faster and easier to observe in deploy logs.
+    """
+
     Evidence = apps.get_model("receipts", "CardStatementReceiptEvidence")
     Item = apps.get_model("receipts", "CardStatementItem")
     Inference = apps.get_model("receipts", "CardStatementPlanChangeInference")
@@ -210,6 +218,7 @@ def rebuild_global_component_usage(apps, schema_editor):
             "pk",
         )
     )
+    print(f"ReceiptHub 0042: examining {len(rows)} evidence rows.")
 
     fingerprints: dict[int, str] = {}
     modes: dict[int, str] = {}
@@ -228,15 +237,12 @@ def rebuild_global_component_usage(apps, schema_editor):
 
     automatic_loser_item_ids: set[int] = set()
     manual_conflict_evidence_ids: set[int] = set()
-    for fingerprint, consumers in grouped_consumers.items():
+    for consumers in grouped_consumers.values():
         consumers.sort(key=_statement_order)
         manual_consumers = [row for row in consumers if _is_manual(row.statement_item)]
         if manual_consumers:
             manual_consumers.sort(key=_statement_order)
             winner = manual_consumers[0]
-            # Multiple administrator decisions are not silently changed. Keep the
-            # earliest stable owner and leave later manual fingerprints blank so
-            # the conflict remains visible and does not break the unique index.
             for conflict in manual_consumers[1:]:
                 manual_conflict_evidence_ids.add(conflict.pk)
             for row in consumers:
@@ -248,8 +254,8 @@ def rebuild_global_component_usage(apps, schema_editor):
             for row in consumers[1:]:
                 automatic_loser_item_ids.add(row.statement_item_id)
 
-    # A net calculation becomes invalid when even one of its components loses
-    # global ownership, so remove the whole automatic evidence group together.
+    # A net calculation becomes invalid when even one component loses global
+    # ownership. Remove the full automatic evidence group in one database pass.
     if automatic_loser_item_ids:
         Evidence.objects.filter(statement_item_id__in=automatic_loser_item_ids).delete()
         Inference.objects.filter(statement_item_id__in=automatic_loser_item_ids).delete()
@@ -267,15 +273,17 @@ def rebuild_global_component_usage(apps, schema_editor):
             ),
         )
 
+    evidence_updates = []
+    manual_item_warnings: dict[int, str] = {}
     for evidence in rows:
         if evidence.statement_item_id in automatic_loser_item_ids:
             continue
-        fingerprint = "" if evidence.pk in manual_conflict_evidence_ids else fingerprints[evidence.pk]
-        usage_mode = modes[evidence.pk]
-        Evidence.objects.filter(pk=evidence.pk).update(
-            component_fingerprint=fingerprint,
-            usage_mode=usage_mode,
+        evidence.component_fingerprint = (
+            "" if evidence.pk in manual_conflict_evidence_ids else fingerprints[evidence.pk]
         )
+        evidence.usage_mode = modes[evidence.pk]
+        evidence_updates.append(evidence)
+
         if evidence.pk in manual_conflict_evidence_ids:
             item = evidence.statement_item
             memo = str(item.match_memo or "")
@@ -284,20 +292,65 @@ def rebuild_global_component_usage(apps, schema_editor):
                 "どちらを正しい所有先とするか確認してください。"
             )
             if warning not in memo:
-                Item.objects.filter(pk=item.pk).update(match_memo=f"{warning} {memo}"[:4000])
+                manual_item_warnings[item.pk] = f"{warning} {memo}"[:4000]
+
+    if evidence_updates:
+        Evidence.objects.bulk_update(
+            evidence_updates,
+            ["component_fingerprint", "usage_mode"],
+            batch_size=1000,
+        )
+
+    if manual_item_warnings:
+        warning_items = list(Item.objects.filter(pk__in=manual_item_warnings))
+        for item in warning_items:
+            item.match_memo = manual_item_warnings[item.pk]
+        Item.objects.bulk_update(warning_items, ["match_memo"], batch_size=500)
 
     now = timezone.now()
-    for statement in Statement.objects.exclude(status__in=["processing", "failed"]).iterator():
+    statement_updates = []
+    for statement in Statement.objects.exclude(
+        status__in=["processing", "failed"]
+    ).iterator(chunk_size=500):
         memo = str(statement.ai_admin_memo or "")
         if RECONCILE_MARKER not in memo:
             memo = f"{RECONCILE_MARKER} {memo}".strip()
-        Statement.objects.filter(pk=statement.pk).update(
-            ai_admin_memo=memo[:5000],
-            reconciled_at=None,
-            unmatched_receipt_components=[],
-            updated_at=now,
+        statement.ai_admin_memo = memo[:5000]
+        statement.reconciled_at = None
+        statement.unmatched_receipt_components = []
+        statement.updated_at = now
+        statement_updates.append(statement)
+
+        if len(statement_updates) >= 500:
+            Statement.objects.bulk_update(
+                statement_updates,
+                [
+                    "ai_admin_memo",
+                    "reconciled_at",
+                    "unmatched_receipt_components",
+                    "updated_at",
+                ],
+                batch_size=500,
+            )
+            statement_updates.clear()
+
+    if statement_updates:
+        Statement.objects.bulk_update(
+            statement_updates,
+            [
+                "ai_admin_memo",
+                "reconciled_at",
+                "unmatched_receipt_components",
+                "updated_at",
+            ],
+            batch_size=500,
         )
 
+    print(
+        "ReceiptHub 0042: global usage rebuild complete; "
+        f"released {len(automatic_loser_item_ids)} conflicting automatic item(s), "
+        f"flagged {len(manual_conflict_evidence_ids)} manual conflict(s)."
+    )
 
 def reverse_rebuild(apps, schema_editor):
     Evidence = apps.get_model("receipts", "CardStatementReceiptEvidence")

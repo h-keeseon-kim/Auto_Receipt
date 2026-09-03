@@ -1,5 +1,12 @@
 # ReceiptHub
 
+## Railway v1.16.3 deployment
+
+`railway.toml`の`preDeployCommand`でmigrationとDjango checkを実行し、
+`start.sh`はGunicornのみを起動します。Network Healthcheckが約5分で失敗した
+v1.16.2以前の起動順序を解消しています。
+
+
 **Version: 1.16.2**
 
 ReceiptHubは、社内で利用しているサブスクリプション、従量課金/API、一回払いサービスの領収書を月単位で回収・検査・管理するDjangoアプリです。

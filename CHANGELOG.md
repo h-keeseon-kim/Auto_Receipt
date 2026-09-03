@@ -1,5 +1,12 @@
 # Changelog
 
+## v1.16.3
+
+- RailwayのDB migrationをWeb起動前のpre-deploy段階へ移動。
+- Healthcheck待機中にmigrationを実行しない構成へ変更。
+- migration 0041/0042の行単位UPDATEをbulk updateへ最適化。
+- pre-deployログへ処理件数と競合解放件数を出力。
+
 ## 1.16.2 — 2026-09-02
 
 領収書・返金PDF内の取引構成要素について、前月・当月・翌月をまたいだ二重使用を防止し、使用先と部分使用状態を永続化する版です。

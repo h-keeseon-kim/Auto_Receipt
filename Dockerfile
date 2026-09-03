@@ -14,5 +14,5 @@ COPY . /app/
 ENV SECRET_KEY=docker-build-placeholder         DEBUG=False         ALLOWED_HOSTS=*
 RUN python manage.py collectstatic --noinput
 
-RUN chmod +x /app/start.sh
+RUN chmod +x /app/start.sh /app/predeploy.sh
 CMD ["/app/start.sh"]
