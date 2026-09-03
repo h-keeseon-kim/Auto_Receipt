@@ -1,5 +1,15 @@
 # Changelog
 
+## v1.16.4
+
+- `staff_start_receipt_ai_processing`を復元し、単票AI検査・明示的再解析を再有効化。
+- `staff_receipt_ai_status`を復元し、管理者確認画面のAIポーリングを再有効化。
+- `staff_preview_receipt`を復元し、同一オリジンの領収書プレビューを再有効化。
+- URLconfが参照するview属性をDjango非依存で検査する`check_url_view_contract.py`を追加。
+- Pre-deployで`manage.py check`をmigrationより前に実行し、コードエラーを即時表示。
+- migration再試行時は`--skip-checks`を使用し、確認済みのURL/system checkを重複実行しない。
+- `receipt-reminder-*`サービスでは既定でmigrationをスキップし、同一DBへの並列DDLを防止。
+
 ## v1.16.3
 
 - RailwayのDB migrationをWeb起動前のpre-deploy段階へ移動。

@@ -1583,6 +1583,112 @@ def reconcile_card_statement_items_for_submission_month(period_month):
 
 @staff_member_required
 @require_POST
+def staff_start_receipt_ai_processing(request, pk: int):
+    receipt = get_object_or_404(staff_receipt_queryset(), pk=pk)
+    force_reanalysis = request.POST.get("force_reanalysis") == "1"
+    if force_reanalysis and not (receipt.ai_is_queued or receipt.is_ai_processing):
+        # 通常の一括処理は従来どおりAI確認済みを再検査しない。
+        # 管理者が領収書確認画面から明示的に実行した場合だけ、
+        # 契約変更情報を含む最新スキーマでこの1件を再解析する。
+        reset_ai_processing_state(receipt, save=True, clear_extracted_values=False)
+    claimed_ids = claim_pending_receipts_for_ai_processing(
+        Receipt.objects.filter(pk=receipt.pk).available_files(),
+        limit=1,
+    )
+    if claimed_ids:
+        start_background_ai_processing(claimed_ids)
+        message = (
+            "AIで契約変更情報を含めて再解析中です。完了後、この画面へ自動反映します。"
+            if force_reanalysis
+            else "AIで情報を抽出中です。完了後、この画面へ自動反映します。"
+        )
+    elif receipt.ai_is_queued or receipt.is_ai_processing:
+        message = "この領収書はAIで情報を抽出中です。"
+    else:
+        message = "この領収書はすでにAI確認済みです。再検査せず、必要な補正は管理者確認欄で行ってください。"
+
+    payload = {"ok": True, "started": bool(claimed_ids), "message": message}
+    if request.headers.get("x-requested-with") == "XMLHttpRequest":
+        return JsonResponse(payload)
+    if claimed_ids:
+        messages.success(request, message)
+    else:
+        messages.info(request, message)
+    return redirect("staff_receipt_review", pk=receipt.pk)
+
+
+@staff_member_required
+def staff_receipt_ai_status(request, pk: int):
+    receipt = staff_receipt_queryset().filter(pk=pk).first()
+    if receipt is None:
+        resubmission = (
+            ReceiptResubmissionRequest.objects.select_related("user")
+            .filter(original_receipt_id=pk)
+            .order_by("-created_at")
+            .first()
+        )
+        redirect_url = reverse("history")
+        if resubmission is not None:
+            redirect_url = (
+                f"{reverse('staff_user_month_status', args=[resubmission.user_id])}"
+                f"?month={month_query(resubmission.period_month)}"
+            )
+        return JsonResponse(
+            {
+                "ok": True,
+                "deleted": True,
+                "redirect_url": redirect_url,
+                "message": (
+                    "管理者が再提出を依頼したため、領収書を提出項目から取り下げました。"
+                    if resubmission is not None
+                    else "領収書が削除されたため、一覧へ戻ります。"
+                ),
+            }
+        )
+    html = render_to_string(
+        "receipts/_staff_receipt_review_panel.html",
+        {
+            "receipt": receipt,
+            "review_form": StaffReceiptReviewForm(receipt=receipt),
+        },
+        request=request,
+    )
+    return JsonResponse(
+        {
+            "ok": True,
+            "html": html,
+            "processing": receipt.ai_is_queued or receipt.is_ai_processing,
+            "status": receipt.ai_filename_status,
+        }
+    )
+
+
+@staff_member_required
+@xframe_options_sameorigin
+def staff_preview_receipt(request, pk: int):
+    receipt = get_object_or_404(staff_receipt_queryset(), pk=pk)
+    if not receipt.file_available:
+        raise Http404("保存期限が過ぎたか、領収書ファイルが削除済みです。")
+    filename = receipt.display_filename or receipt.original_filename or Path(receipt.file.name).name
+    content_type = {
+        ".pdf": "application/pdf",
+        ".png": "image/png",
+        ".jpg": "image/jpeg",
+        ".jpeg": "image/jpeg",
+        ".webp": "image/webp",
+    }.get(Path(filename).suffix.lower(), "application/octet-stream")
+    response = FileResponse(
+        receipt.file.open("rb"),
+        as_attachment=False,
+        filename=filename,
+        content_type=content_type,
+    )
+    response["X-Content-Type-Options"] = "nosniff"
+    return response
+
+
+@staff_member_required
+@require_POST
 def staff_replace_receipt_file(request, pk: int):
     receipt = get_object_or_404(staff_receipt_queryset(), pk=pk)
     form = ReceiptFileReplaceForm(request.POST, request.FILES)
