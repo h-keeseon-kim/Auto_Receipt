@@ -51,16 +51,20 @@
                 <ul class="statement-evidence-list">
                     {% for evidence in item.receipt_evidences.all %}
                         <li>
-                            <span class="badge {% if evidence.role == 'refund' %}draft{% else %}submitted{% endif %}">{{ evidence.get_role_display }}</span>
-                            <span class="badge {% if evidence.usage_mode == 'reference' %}neutral{% else %}submitted{% endif %}">{{ evidence.get_usage_mode_display }}</span>
-                            {% if evidence.receipt and evidence.receipt.file_available %}
-                                <a href="{% url 'download_receipt' evidence.receipt.pk %}">{{ evidence.filename_snapshot }}</a>
-                            {% else %}
-                                <span>{{ evidence.filename_snapshot }}</span>
-                            {% endif %}
-                            <span class="muted small">{{ evidence.amount_display }}{% if evidence.event_date %} / {{ evidence.event_date|date:"Y-m-d" }}{% endif %}</span>
-                            {% if evidence.service_label_snapshot %}<span class="statement-evidence-service">サービス: {{ evidence.service_label_snapshot }}</span>{% endif %}
-                            {% if evidence.payee_snapshot and evidence.payee_snapshot != evidence.service_label_snapshot %}<span class="muted small">販売者: {{ evidence.payee_snapshot }}</span>{% endif %}
+                            <div class="statement-evidence-badges">
+                                <span class="badge {% if evidence.role == 'refund' %}draft{% else %}submitted{% endif %}">{{ evidence.get_role_display }}</span>
+                                <span class="badge {% if evidence.usage_mode == 'reference' %}neutral{% else %}submitted{% endif %}">{{ evidence.get_usage_mode_display }}</span>
+                            </div>
+                            <div class="statement-evidence-body">
+                                {% if evidence.receipt and evidence.receipt.file_available %}
+                                    <a href="{% url 'download_receipt' evidence.receipt.pk %}" class="statement-evidence-filename">{{ evidence.filename_snapshot }}</a>
+                                {% else %}
+                                    <span class="statement-evidence-filename">{{ evidence.filename_snapshot }}</span>
+                                {% endif %}
+                                <span class="muted small statement-evidence-meta">{{ evidence.amount_display }}{% if evidence.event_date %} / {{ evidence.event_date|date:"Y-m-d" }}{% endif %}</span>
+                                {% if evidence.service_label_snapshot %}<span class="statement-evidence-service">サービス: {{ evidence.service_label_snapshot }}</span>{% endif %}
+                                {% if evidence.payee_snapshot and evidence.payee_snapshot != evidence.service_label_snapshot %}<span class="muted small statement-evidence-payee">販売者: {{ evidence.payee_snapshot }}</span>{% endif %}
+                            </div>
                         </li>
                     {% endfor %}
                 </ul>
