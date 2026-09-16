@@ -1,0 +1,34 @@
+{% extends "base.html" %}
+{% block title %}{{ title }} - ReceiptHub{% endblock %}
+{% block content %}
+<section class="auth-card wide">
+    <h1>{{ title }}</h1>
+    <p class="muted">管理者がサービスマスターに登録した一覧から、現在利用しているサービスを選択します。登録時にPカード利用有無を必ず選択してください。ここでの登録に管理者承認は必要ありません。</p>
+    <div class="notice section compact-notice">
+        <strong>一覧にサービスがない場合</strong>
+        <p class="muted small">サービスマスターに存在しない新規サービスだけ、例外申請を提出してください。</p>
+        <div class="actions">
+            <a href="{{ exception_request_url }}" class="button primary" data-tutorial-target="service-exception-button">新規サービス例外申請</a>
+        </div>
+    </div>
+    {% if available_catalog_count %}
+        <form method="post" class="stack">
+            {% csrf_token %}
+            {{ form.as_p }}
+            <div class="actions">
+                <button type="submit" class="button primary">{{ submit_label|default:"登録する" }}</button>
+                <a href="{{ back_url }}" class="button">戻る</a>
+            </div>
+        </form>
+    {% else %}
+        <div class="empty-state">
+            <p>現在、新しく利用登録できるサービスはありません。</p>
+            <p class="muted small">すでにすべて登録済みか、必要なサービスがサービスマスターに存在しません。新規サービスの場合は例外申請を行ってください。</p>
+            <div class="actions">
+                <a href="{{ exception_request_url }}" class="button primary">新規サービス例外申請</a>
+                <a href="{{ back_url }}" class="button">戻る</a>
+            </div>
+        </div>
+    {% endif %}
+</section>
+{% endblock %}

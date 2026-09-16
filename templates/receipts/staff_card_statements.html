@@ -1,0 +1,57 @@
+{% extends "base.html" %}
+{% load static %}
+{% block title %}ご利用代金明細 - ReceiptHub{% endblock %}
+{% block content %}
+<div class="page-title">
+    <div>
+        <h1>ご利用代金明細</h1>
+        <p class="muted">照合対象月は利用分の月です。カード支払月とは分け、月跨ぎの利用行も対応する領収書で照合します。</p>
+    </div>
+    <form method="get" class="month-form auto-month-form" data-month-picker-form>
+        {% include "receipts/_month_picker.html" with field=month_form.month selected_month=selected_month label="照合対象月（利用分）" %}
+    </form>
+</div>
+
+<section class="status-grid compact-statement-result-stats">
+    <div class="card"><span class="label">明細行</span><strong data-statement-stat="line_count">{{ stats.line_count }}</strong></div>
+    <div class="card"><span class="label">解析要確認</span><strong class="{% if stats.review_count %}warning{% endif %}" data-statement-stat="review_count">{{ stats.review_count }}</strong></div>
+    <div class="card"><span class="label">未一致</span><strong class="{% if stats.unresolved_count %}danger{% endif %}" data-statement-stat="unresolved_count">{{ stats.unresolved_count }}</strong><span class="muted small">推定対応を含む</span></div>
+    <div class="card"><span class="label">全明細で未消費の提出書類</span><strong class="{% if stats.unused_receipt_count %}warning{% endif %}" data-statement-stat="unused_receipt_count">{{ stats.unused_receipt_count }}</strong></div>
+</section>
+
+<section class="card section" data-tutorial-target="staff-statement-upload-section">
+    <div class="section-header">
+        <div>
+            <h2>{{ selected_month|date:"Y年m月" }}分の全社明細書をアップロード</h2>
+            <p class="muted">ユーザーは選択しません。AIが全明細行を抽出した後、明細月に加えて明細内の実利用月（前月決済を含む）の全ユーザー領収書を参照します。通常取引は全体一対一で照合し、同一法人カード・同一請求元の後日返金を差し引いた純額や、返品行と再計上行が共有する元決済も確認します。直接一致しない明細では、契約変更書類のBill to利用者・旧プラン終了日と、過去領収書または前月カード明細の完全一致金額・請求周期が揃う場合だけ推定対応として提示します。前月カード明細は提出領収書の代わりではなく、旧プラン実績を裏付ける補助証拠として使用します。前月の提出履歴から提出者候補も表示しますが、未確定の参考情報です。前月の領収書を今月の金額計算へ再使用せず、候補が見つかっても提出済みにはしません。未一致は赤色、契約変更の推定対応は橙色、解析・照合要確認は黄色です。</p>
+        </div>
+    </div>
+    <form method="post" enctype="multipart/form-data" action="{% url 'staff_upload_card_statement' %}" class="statement-upload-form">
+        {% csrf_token %}
+        <input type="hidden" name="month" value="{{ selected_month|date:'Y-m' }}">
+        <div class="form-row">
+            {{ statement_form.file.errors }}
+            {{ statement_form.file.label_tag }}
+            <div class="file-dropzone statement-dropzone" data-file-dropzone data-max-files="1">
+                {{ statement_form.file }}
+                <button type="button" class="file-dropzone-trigger" data-file-dropzone-trigger>
+                    <span class="file-dropzone-icon" aria-hidden="true">＋</span>
+                    <strong>ご利用代金明細書を選択</strong>
+                    <span>またはPDF・画像をここへドラッグ＆ドロップ</span>
+                </button>
+                <div class="file-dropzone-files muted small" data-file-dropzone-files>ファイル未選択</div>
+            </div>
+            {% if statement_form.file.help_text %}<span class="helptext">{{ statement_form.file.help_text }}</span>{% endif %}
+        </div>
+        <button type="submit" class="button primary">明細書をアップロードして全ユーザー照合</button>
+    </form>
+</section>
+
+<div data-statement-results data-tutorial-target="staff-statement-results" data-status-url="{% url 'staff_card_statement_status' %}?month={{ selected_month|date:'Y-m' }}&result={{ result_filter }}">
+    {% include "receipts/_staff_card_statements.html" %}
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script src="{% static 'js/staff_statement_processing.js' %}" defer></script>
+{% endblock %}

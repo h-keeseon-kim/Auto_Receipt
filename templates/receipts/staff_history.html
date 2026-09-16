@@ -1,0 +1,200 @@
+{% extends "base.html" %}
+{% load static %}
+{% block title %}提出履歴 - ReceiptHub{% endblock %}
+{% block content %}
+<div class="page-title">
+    <div>
+        <h1>提出履歴</h1>
+        <p class="muted">ユーザー別の提出進捗、未提出サービス、AI確認対象、アップロード済み領収書を確認できます。</p>
+    </div>
+    <form method="get" class="month-form auto-month-form" data-tutorial-target="staff-month-form" data-month-picker-form>
+        {% include "receipts/_month_picker.html" with field=month_form.receipt_month selected_month=target_receipt_month label="領収書発行月" %}
+    </form>
+</div>
+
+<section class="status-grid compact-admin-history-stats">
+    <div class="card">
+        <span class="label">AI未確認</span>
+        <strong data-ai-summary="ai_pending_count">{{ stats.ai_pending_count }}</strong>
+    </div>
+    <div class="card">
+        <span class="label">未提出ユーザー（API利用確認待ちを含む）</span>
+        <strong class="{% if stats.incomplete_users %}danger{% endif %}">{{ stats.incomplete_users }}人</strong>
+        <span class="muted small">うちAPI利用確認待ち {{ stats.api_pending_user_count }}人</span>
+    </div>
+</section>
+
+<section class="card section" data-tutorial-target="staff-status-section">
+    <div class="section-header">
+        <div>
+            <h2>提出状況</h2>
+            <p class="muted">ユーザー名順です。「月別状況」からサービス単位の提出状況を確認できます。全社カード明細は専用ページで一括照合します。</p>
+        </div>
+        <div class="actions nowrap">
+            <a class="button" href="{% url 'staff_card_statements' %}?month={{ target_receipt_month|date:'Y-m' }}">ご利用代金明細</a>
+            <a class="button primary" href="{% url 'staff_download_month' %}?month={{ selected_month|date:'Y-m' }}">提出済みZIP</a>
+        </div>
+    </div>
+    <div class="table-wrap scroll-box medium table-scroll-wide" aria-label="提出状況テーブル" data-tutorial-target="staff-status-table">
+        <table class="staff-status-table">
+            <thead><tr><th>ユーザー</th><th>利用状態</th><th>提出</th><th>API確認待ち</th><th>操作</th></tr></thead>
+            <tbody>
+                {% for row in rows %}
+                    <tr class="{% if row.needs_attention %}attention-row{% endif %}">
+                        <td><strong>{{ row.user.username }}</strong><div class="muted small">{{ row.user.email|default:"-" }}</div></td>
+                        <td><span class="badge {% if row.user.profile.account_status == 'active' %}submitted{% else %}neutral{% endif %}">{{ row.user.profile.get_account_status_display }}</span></td>
+                        <td><span class="badge {{ row.status_class }}">{{ row.status }}</span></td>
+                        <td>{% if row.monthly_summary.api_pending_count %}<span class="badge draft">{{ row.monthly_summary.api_pending_count }}</span>{% else %}<span class="badge submitted">0</span>{% endif %}</td>
+                        <td>
+                            <div class="table-actions">
+                                <a class="button small primary" href="{% url 'staff_user_month_status' row.user.pk %}?month={{ selected_month|date:'Y-m' }}">月別状況</a>
+                                <a class="button small" href="{% url 'staff_user_month_status' row.user.pk %}?month={{ selected_month|date:'Y-m' }}#staff-receipt-upload">代理アップロード</a>
+                                <a class="button small" href="{% url 'staff_services' %}?tab=users&user={{ row.user.pk }}">サービス</a>
+                                {% if row.submission %}
+                                    <a class="button small" href="{% url 'staff_submission_detail' row.submission.pk %}">提出詳細</a>
+                                    <a class="button small" href="{% url 'staff_download_submission' row.submission.pk %}">ZIP</a>
+                                {% endif %}
+                            </div>
+                        </td>
+                    </tr>
+                {% empty %}
+                    <tr><td colspan="5" class="muted center">対象ユーザーがいません。</td></tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</section>
+
+<section class="card section">
+    <div class="section-header">
+        <div>
+            <h2>再提出依頼管理</h2>
+            <p class="muted">AIは領収書を自動で取り下げません。管理者が再提出依頼を実行した項目がここへ登録され、対象ユーザーにはアプリ内通知とメールを送信します。依頼を削除するとユーザー画面の通知も消えます。</p>
+        </div>
+        {% if all_resubmission_request_count %}
+            <div class="actions nowrap">
+                {% if month_resubmission_request_count %}
+                    <form method="post" action="{% url 'staff_delete_resubmission_requests' %}" onsubmit="return confirm('表示中の月の再提出依頼をすべて削除しますか？ユーザー画面の通知も削除されます。過去に削除された領収書ファイルは復元されません。');">
+                        {% csrf_token %}
+                        <input type="hidden" name="scope" value="month">
+                        <input type="hidden" name="month" value="{{ selected_month|date:'Y-m' }}">
+                        <input type="hidden" name="next" value="{{ request.get_full_path }}">
+                        <button type="submit" class="button danger-outline">この月の依頼をすべて削除</button>
+                    </form>
+                {% endif %}
+                <form method="post" action="{% url 'staff_delete_resubmission_requests' %}" class="form-grid" onsubmit="return confirm('全期間の再提出依頼をすべて削除しますか？未対応・対応済みを含むすべての依頼とユーザー画面の通知が削除されます。過去に削除された領収書ファイルは復元されません。');">
+                    {% csrf_token %}
+                    <input type="hidden" name="scope" value="all">
+                    <input type="hidden" name="next" value="{{ request.get_full_path }}">
+                    <label class="small"><input type="checkbox" name="confirm_all" value="delete_all" required> 全期間・全状態の依頼を削除することを確認しました</label>
+                    <button type="submit" class="button danger-outline">全期間の依頼をすべて削除</button>
+                </form>
+            </div>
+        {% endif %}
+    </div>
+
+    {% if month_resubmission_requests %}
+        <div class="table-wrap scroll-box medium horizontal-scroll">
+            <table class="wide-table status-table">
+                <thead><tr><th>ユーザー</th><th>対象サービス</th><th>元ファイル</th><th>ステータス</th><th>依頼日時</th><th>内容</th><th>操作</th></tr></thead>
+                <tbody>
+                    {% for request_item in month_resubmission_requests %}
+                        <tr>
+                            <td><strong>{{ request_item.user.username }}</strong></td>
+                            <td>
+                                <strong>{{ request_item.service_display_name_snapshot }}</strong>
+                                {% if request_item.receipt_memo_snapshot %}<div class="muted small">{{ request_item.receipt_memo_snapshot|linebreaksbr }}</div>{% endif %}
+                            </td>
+                            <td>{{ request_item.display_filename|default:request_item.original_filename|default:"-" }}</td>
+                            <td><span class="badge {% if request_item.is_open %}draft{% else %}submitted{% endif %}">{{ request_item.get_status_display }}</span></td>
+                            <td>
+                                {{ request_item.created_at|date:"Y-m-d H:i" }}
+                                {% if request_item.created_by %}<div class="muted small">依頼者: {{ request_item.created_by.username }}</div>{% endif %}
+                            </td>
+                            <td>{{ request_item.message }}</td>
+                            <td>
+                                <form method="post" action="{% url 'staff_delete_resubmission_request' request_item.pk %}" onsubmit="return confirm('この再提出依頼を削除しますか？ユーザー画面の通知も削除されます。過去に削除された領収書ファイルは復元されません。');">
+                                    {% csrf_token %}
+                                    <input type="hidden" name="next" value="{{ request.get_full_path }}">
+                                    <button type="submit" class="button small danger-outline">依頼を削除</button>
+                                </form>
+                            </td>
+                        </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+    {% else %}
+        <p class="muted">表示中の月に再提出依頼はありません。全期間の保存件数: {{ all_resubmission_request_count }}件</p>
+    {% endif %}
+</section>
+
+<section class="card section" id="uploaded-receipts" data-tutorial-target="staff-receipts-section">
+    <div class="section-header receipt-review-section-header">
+        <div>
+            <h2>アップロード済み領収書</h2>
+            <p class="muted">領収書発行月 {{ target_receipt_month|date:"Y年m月" }} の領収書をアップロード日時の新しい順に表示します。確認ステータスを選ぶと、対応が必要な領収書だけに絞り込めます。</p>
+        </div>
+        <form method="post" action="{% url 'staff_start_ai_processing' %}" class="ai-process-form" data-ai-process-form data-status-url="{% url 'staff_ai_processing_status' %}?month={{ selected_month|date:'Y-m' }}&receipt_status={{ selected_receipt_status }}">
+            <span hidden data-ai-summary="ai_processing_count">{{ stats.ai_processing_count }}</span>
+            {% csrf_token %}
+            <input type="hidden" name="month" value="{{ selected_month|date:'Y-m' }}">
+            <input type="hidden" name="receipt_status" value="{{ selected_receipt_status }}">
+            <input type="hidden" name="limit" value="50">
+            <button
+                type="submit"
+                class="button primary"
+                data-ai-process-button
+                aria-busy="{% if stats.ai_processing_count %}true{% else %}false{% endif %}"
+                {% if stats.ai_processing_count or not stats.ai_ready_count %}disabled{% endif %}
+                {% if stats.ai_processing_count %}title="AI処理中です。完了までお待ちください。"{% elif not stats.ai_ready_count %}title="AI未確認の領収書はありません。"{% endif %}
+            >{% if stats.ai_processing_count %}AIで情報を抽出中{% else %}AIでファイル名を修正・検査{% endif %}</button>
+            <span class="muted small" data-ai-process-message>{% if stats.ai_processing_count %}AIで情報を抽出中です。完了した領収書から順番に反映されます。{% elif stats.ai_ready_count %}AI未確認の領収書だけを処理します。{% else %}処理済み項目は再検査しません。{% endif %}</span>
+        </form>
+    </div>
+
+    <nav class="receipt-status-filters" aria-label="領収書確認ステータス">
+        {% for option in receipt_status_options %}
+            <a
+                class="receipt-status-filter receipt-status-filter-{{ option.key }}{% if option.active %} active{% endif %}"
+                href="?month={{ selected_month|date:'Y-m' }}&receipt_status={{ option.key }}#uploaded-receipts"
+                {% if option.active %}aria-current="page"{% endif %}
+            >
+                <span>{{ option.label }}</span>
+                <strong data-ai-summary="receipt_status_count_{{ option.key }}">{{ option.count }}</strong>
+            </a>
+        {% endfor %}
+    </nav>
+
+    <div class="receipt-status-guide" aria-label="確認ステータスの説明">
+        <span><strong>再提出判断待ち:</strong> AIが明確な不一致候補を検出</span>
+        <span><strong>確認が必要:</strong> 曖昧・未確認項目があり管理者確認が必要</span>
+        <span><strong>AI未確認:</strong> AIによるファイル名修正・検査が未実行</span>
+    </div>
+
+    <div class="receipt-review-list-summary">
+        <span class="receipt-review-list-summary-label"><strong>{{ selected_receipt_status_label }}</strong><span>を表示中</span></span>
+        <span class="muted"><span data-ai-visible-count>{{ receipts|length }}</span>件 / 全<span data-ai-summary="receipt_status_count_all">{{ stats.receipt_status_count_all }}</span>件</span>
+    </div>
+
+    <div class="table-wrap scroll-box large receipt-review-table-wrap" aria-label="アップロード済み領収書テーブル" data-tutorial-target="staff-receipt-table">
+        <table class="receipt-review-table">
+            <thead>
+                <tr>
+                    <th>利用者 / 領収書月</th>
+                    <th>サービス / ファイル</th>
+                    <th>確認状況</th>
+                    <th>操作</th>
+                </tr>
+            </thead>
+            <tbody data-ai-receipt-table-body>
+                {% include "receipts/_staff_receipt_rows.html" %}
+            </tbody>
+        </table>
+    </div>
+</section>
+{% endblock %}
+
+{% block scripts %}
+<script src="{% static 'js/staff_ai_processing.js' %}" defer></script>
+{% endblock %}

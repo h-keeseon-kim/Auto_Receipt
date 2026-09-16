@@ -10,6 +10,9 @@ migration_mode="${RECEIPTHUB_PREDEPLOY_MIGRATIONS:-auto}"
 # Fail immediately for deterministic application errors (for example a URL
 # that points to a missing view). Retrying those errors only hides the real
 # traceback and never reaches the database migration phase.
+echo "Checking URL handlers and template/static package before migrations..."
+python scripts/check_url_view_contract.py --django
+
 echo "Running Django system checks before migrations..."
 python manage.py check
 

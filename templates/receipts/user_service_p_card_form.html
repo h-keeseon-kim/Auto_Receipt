@@ -1,0 +1,21 @@
+{% extends "base.html" %}
+{% block title %}Pカード利用設定 - ReceiptHub{% endblock %}
+{% block content %}
+<section class="auth-card wide">
+    <h1>Pカード利用設定</h1>
+    <p class="muted">対象サービス: <strong>{{ service.display_name }}</strong></p>
+    <div class="notice section compact-notice">
+        <strong>設定による違い</strong>
+        <p class="muted small"><strong>利用する:</strong> 領収書提出、リマインドメール、全社ご利用代金明細との照合対象になります。</p>
+        <p class="muted small"><strong>利用しない:</strong> サービスは利用中のまま残りますが、領収書提出とリマインドは不要になります。既存の領収書履歴は削除されません。</p>
+    </div>
+    <form method="post" class="stack">
+        {% csrf_token %}
+        {{ form.as_p }}
+        <div class="actions">
+            <button type="submit" class="button primary">Pカード設定を保存</button>
+            <a href="{{ back_url }}" class="button">戻る</a>
+        </div>
+    </form>
+</section>
+{% endblock %}

@@ -1,0 +1,161 @@
+{% extends "base.html" %}
+{% block title %}ユーザー管理 - ReceiptHub{% endblock %}
+{% block content %}
+<div class="page-title">
+    <div>
+        <h1>ユーザー管理</h1>
+        <p class="muted">アカウント作成・削除、利用ステータス、パスワード再発行を管理します。スーパーアカウントは権限と自身の連絡先メールアドレスも変更できます。</p>
+    </div>
+</div>
+
+{% if generated_user and generated_password %}
+<section class="card section credential-card">
+    <h2>作成したアカウント</h2>
+    <p class="muted">初期パスワードはこの画面でのみ確認できます。対象ユーザーへ安全な方法で伝えてください。</p>
+    <div class="credential-grid">
+        <div><span class="label">アカウント名</span><code class="credential-value">{{ generated_user.username }}</code></div>
+        <div><span class="label">初期パスワード</span><code class="credential-value">{{ generated_password }}</code></div>
+        <div><span class="label">権限</span><strong>{% if generated_user.is_staff %}管理者ユーザー{% else %}一般ユーザー{% endif %}</strong></div>
+    </div>
+    <div class="notice message">初回ログイン時は、一般ユーザー・管理者ユーザーともにパスワード変更が必須です。</div>
+    {% if not generated_user.is_staff %}<p><a class="button primary" href="{% url 'staff_user_services' generated_user.pk %}">このユーザーの利用サービスを登録する</a></p>{% endif %}
+</section>
+{% endif %}
+
+{% if password_result_user and password_result %}
+<section class="card section credential-card">
+    <h2>変更後パスワード</h2>
+    <p class="muted">変更後パスワードはこの画面でのみ確認できます。既存パスワードはハッシュ化保存のため復元表示できません。</p>
+    <div class="credential-grid">
+        <div><span class="label">アカウント名</span><code class="credential-value">{{ password_result_user.username }}</code></div>
+        <div><span class="label">{% if password_result_was_random %}再発行パスワード{% else %}変更後パスワード{% endif %}</span><code class="credential-value">{{ password_result }}</code></div>
+        <div><span class="label">次回ログイン</span><strong>パスワード変更必須</strong></div>
+    </div>
+</section>
+{% endif %}
+
+<section class="card section">
+    <div class="section-header">
+        <div>
+            <h2>新規ユーザー作成</h2>
+            <p class="muted">メールアドレスをアカウント名として登録し、ランダムな初期パスワードを発行します。</p>
+        </div>
+    </div>
+    <form method="post" class="form-grid">
+        {% csrf_token %}
+        <input type="hidden" name="action" value="create_user">
+        {{ form.non_field_errors }}
+        {% for field in form %}
+            <div class="form-row">
+                {{ field.errors }}
+                {{ field.label_tag }}
+                {{ field }}
+                {% if field.help_text %}<span class="helptext">{{ field.help_text }}</span>{% endif %}
+            </div>
+        {% endfor %}
+        <button type="submit" class="button primary">パスワード生成・ユーザー作成</button>
+    </form>
+</section>
+
+<section class="card section">
+    <div class="section-header">
+        <div>
+            <h2>登録アカウント</h2>
+            <p class="muted">現在のパスワードは表示できません。必要な場合は新しいパスワードを設定またはランダム再発行します。</p>
+        </div>
+    </div>
+    <div class="table-wrap scroll-box large table-scroll-wide">
+        <table class="user-management-table">
+            <thead><tr><th>アカウント</th><th>権限</th><th>利用ステータス</th><th>利用中サービス</th><th>初回変更</th><th>パスワード操作</th><th>関連画面</th><th>削除</th></tr></thead>
+            <tbody>
+                {% for account in managed_accounts %}
+                    <tr>
+                        <td><strong>{{ account.username }}</strong><div class="muted small">{{ account.email|default:"-" }}</div></td>
+                        <td>
+                            {% if can_manage_roles %}
+                                <form method="post" class="inline-form nowrap">
+                                    {% csrf_token %}
+                                    <input type="hidden" name="action" value="update_role">
+                                    <input type="hidden" name="user_id" value="{{ account.pk }}">
+                                    <select name="account_role" class="compact-select">
+                                        {% for value, label in role_choices %}<option value="{{ value }}" {% if value == 'admin' and account.is_staff or value == 'general' and not account.is_staff %}selected{% endif %}>{{ label }}</option>{% endfor %}
+                                    </select>
+                                    <button class="button small" type="submit">変更</button>
+                                </form>
+                            {% else %}
+                                <span class="badge {% if account.is_staff %}role-badge-admin{% else %}neutral{% endif %}">{% if account.is_staff %}管理者{% else %}一般{% endif %}</span>
+                            {% endif %}
+                        </td>
+                        <td>
+                            {% if account.is_staff %}
+                                <span class="muted">対象外</span>
+                            {% else %}
+                                <form method="post" class="inline-form nowrap">
+                                    {% csrf_token %}
+                                    <input type="hidden" name="action" value="update_status">
+                                    <input type="hidden" name="user_id" value="{{ account.pk }}">
+                                    <select name="account_status" class="compact-select">
+                                        {% for value, label in status_choices %}<option value="{{ value }}" {% if account.profile.account_status == value %}selected{% endif %}>{{ label }}</option>{% endfor %}
+                                    </select>
+                                    <button class="button small" type="submit">変更</button>
+                                </form>
+                            {% endif %}
+                        </td>
+                        <td>{% if account.is_staff %}-{% else %}{{ account.active_service_count }}{% endif %}</td>
+                        <td>{% if account.profile.must_change_password %}<span class="badge draft">変更必須</span>{% else %}<span class="badge submitted">変更済み</span>{% endif %}</td>
+                        <td class="password-reset-cell">
+                            <form method="post" class="password-reset-form">
+                                {% csrf_token %}
+                                <input type="hidden" name="action" value="reset_password">
+                                <input type="hidden" name="user_id" value="{{ account.pk }}">
+                                <input type="password" name="new_password" class="compact-password" placeholder="空欄なら自動生成" autocomplete="new-password">
+                                <input type="password" name="new_password_confirm" class="compact-password" placeholder="確認用" autocomplete="new-password">
+                                <button class="button small" type="submit">変更 / 再発行</button>
+                            </form>
+                        </td>
+                        <td>
+                            <div class="table-actions">
+                                {% if not account.is_staff %}
+                                    <a class="button small" href="{% url 'staff_user_month_status' account.pk %}">月別状況</a>
+                                {% else %}<span class="muted">管理者画面を利用</span>{% endif %}
+                            </div>
+                        </td>
+                        <td>
+                            <form method="post" class="delete-user-form" onsubmit="return confirm('このユーザーを削除しますか？関連するサービス、提出履歴、領収書ファイルもすべて削除されます。全社カード明細自体は削除されません。この操作は元に戻せません。');">
+                                {% csrf_token %}
+                                <input type="hidden" name="action" value="delete_user">
+                                <input type="hidden" name="user_id" value="{{ account.pk }}">
+                                <button class="button small danger-outline" type="submit">ユーザー削除</button>
+                            </form>
+                        </td>
+                    </tr>
+                {% empty %}
+                    <tr><td colspan="8" class="muted center">管理対象アカウントはありません。</td></tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</section>
+{% if superuser_email_form %}
+<section class="card section">
+    <div class="section-header">
+        <div>
+            <h2>スーパーアカウント設定</h2>
+            <p class="muted">連絡先メールアドレスは任意です。空欄にしても、ログイン名「{{ request.user.username }}」とパスワードは変更されません。</p>
+        </div>
+    </div>
+    <form method="post" class="form-grid">
+        {% csrf_token %}
+        <input type="hidden" name="action" value="update_superuser_email">
+        {{ superuser_email_form.non_field_errors }}
+        <div class="form-row">
+            {{ superuser_email_form.email.errors }}
+            {{ superuser_email_form.email.label_tag }}
+            {{ superuser_email_form.email }}
+            {% if superuser_email_form.email.help_text %}<span class="helptext">{{ superuser_email_form.email.help_text }}</span>{% endif %}
+        </div>
+        <button type="submit" class="button">連絡先メールを保存</button>
+    </form>
+</section>
+{% endif %}
+{% endblock %}

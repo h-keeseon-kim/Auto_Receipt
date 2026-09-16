@@ -12,7 +12,9 @@ RUN pip install --upgrade pip && pip install -r requirements.txt
 COPY . /app/
 
 ENV SECRET_KEY=docker-build-placeholder         DEBUG=False         ALLOWED_HOSTS=*
-RUN python manage.py collectstatic --noinput
+# Refuse incomplete template/static packages before publishing the image.
+RUN python scripts/check_url_view_contract.py --django \
+    && python manage.py collectstatic --noinput
 
 RUN chmod +x /app/start.sh /app/predeploy.sh
 CMD ["/app/start.sh"]
