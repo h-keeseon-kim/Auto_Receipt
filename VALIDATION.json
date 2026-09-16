@@ -1,17 +1,33 @@
 {
-  "base_version": "1.16.4",
-  "base_settings_git_blob_sha": "b808340fa1acd57010445f1f92e19781504d6450",
-  "changed_application_files": [
-    "auto_receipt/settings.py"
-  ],
-  "change_scope": "Append LOGGING only; no business logic, schema, startup, or DEBUG changes",
-  "python_syntax": "passed",
-  "stdlib_logging_exception_to_stderr": "passed",
-  "exception_emitted_once": "passed",
-  "request_extra_not_dumped": "passed",
-  "info_messages_not_emitted": "passed",
-  "receipts_namespace_error_logged": "passed",
-  "django_integration_test": "not run; Django unavailable and dependency installation failed",
-  "railway_deployment": "not run",
-  "production_500_root_cause": "not yet confirmed"
+  "purpose": "Restore missing auto_receipt package files, retaining the current logging settings",
+  "normal_source_commit": "eea22285e6a5f8fa2f8b9cfc887bb80d55ffb72f",
+  "observed_current_commit": "63da4c30394af471156ab26f6c0c369ae15095d1",
+  "restored_file_count": 4,
+  "folder_file_count": 5,
+  "git_blob_hashes_verified": {
+    "__init__.py": "e69de29bb2d1d6434b8b29ae775ad8c2e48c5391",
+    "asgi.py": "bca86a516643274f7c1ce2c9e46612763cfe02d6",
+    "urls.py": "afe57689cee024ec82af610202e0978d886971b4",
+    "wsgi.py": "860caf4b1878cce0fb9abf673c6a70734be42099",
+    "settings.py": "ceffbdf0b50263aa3643a46d7fc832e69f3a995b"
+  },
+  "sha256": {
+    "__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "asgi.py": "babaea838a9d967a949d1beb3746c190ed6dc88a2f67a3cf962d968436e38ae2",
+    "urls.py": "b818b11c7a5df7bd12cdc4c6647e2f9e91654b7d76b4ba966aeb3b4a5b42df15",
+    "wsgi.py": "3c874ddc534080c5d3978324a26730f617edf90a634e44e2f3e6a335069a75ce",
+    "settings.py": "8a0b202a83c27878d25713ffa95b3a7eba43d59c29792d8e882760fdeb14eb2f"
+  },
+  "project_python_ast_count": 83,
+  "url_view_reference_count": 53,
+  "missing_url_views": [],
+  "importlib_find_spec": "passed (module discovery only, not Django initialization)",
+  "restore_script_check_no_writes": "passed",
+  "restore_script_apply_preserves_settings": "passed",
+  "restore_script_idempotent": "passed",
+  "restore_script_conflict_no_writes": "passed",
+  "django_check": "NOT RUN: Django missing and pip dependency installation failed due to DNS resolution failure",
+  "production_db_test": "NOT RUN",
+  "original_statement_500_fix_included": false,
+  "repository_or_deployment_modified": false
 }
