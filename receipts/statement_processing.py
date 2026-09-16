@@ -5,7 +5,8 @@ import logging
 import re
 import threading
 import unicodedata
-from datetime import date
+from dataclasses import replace
+from datetime import date, timedelta
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
@@ -25,6 +26,7 @@ from .models import (
     CardStatementStatus,
     BillingType,
     MonthlyServiceDeclaration,
+    UserAccountStatus,
     PlanChangeInferenceStatus,
     Receipt,
     ReceiptAdminReviewStatus,
@@ -47,6 +49,8 @@ from .receipt_component_identity import (
 from .statement_ai import generate_card_statement_analysis
 from .plan_change_matching import (
     HistoricalPlanReceipt,
+    HistoricalSubmitterUsage,
+    suggest_previous_month_submitters,
     PlanAmountOption,
     PlanChangeDocument,
     PlanStatementLine,
@@ -55,6 +59,7 @@ from .plan_change_matching import (
 )
 from .statement_matching import (
     AmountOption,
+    assess_statement_period,
     EvidenceComponent,
     MATCH_BILLING_BRIDGE,
     MATCH_DIRECT,
@@ -128,7 +133,11 @@ GLOBAL_COMPONENT_USAGE_RECONCILE_MARKER = (
     "【照合使用履歴更新】取引構成要素の全明細共通フィンガープリントと消費・参照区分を導入し、過去明細で使用済みの証拠を再利用しないため再照合します。"
 )
 
-# 実データでは通常一致56件がすべて同日または1日差だった。
+STATEMENT_PERIOD_AND_SUBMITTER_RECONCILE_MARKER = (
+    "【対象月・候補表示更新】支払月と利用対象月を分離し、提出者候補を前月履歴の参照として再構築します。"
+)
+
+# 通常決済は利用日と書類日が同日または1日差の候補を照合する。
 DATE_MATCH_TOLERANCE_DAYS = 1
 
 GENERIC_IDENTITY_TOKENS = {
@@ -183,6 +192,7 @@ def reconcile_pending_card_statement_month_semantics(*, period_month=None, state
         | Q(ai_admin_memo__contains=CROSS_MONTH_CARD_NETTING_RECONCILE_MARKER)
         | Q(ai_admin_memo__contains=UNMATCHED_RECEIPT_EVENT_SCOPE_RECONCILE_MARKER)
         | Q(ai_admin_memo__contains=GLOBAL_COMPONENT_USAGE_RECONCILE_MARKER)
+        | Q(ai_admin_memo__contains=STATEMENT_PERIOD_AND_SUBMITTER_RECONCILE_MARKER)
     )
 
     def pending_ids() -> list[int]:
@@ -320,6 +330,10 @@ def _statement_gate_errors(statement: CardStatement) -> list[str]:
         errors.append("明細書のカード末尾を確認できません。")
     elif statement.card_last4 != target_last4:
         errors.append(f"明細書のカード末尾が{target_last4}ではなく{statement.card_last4}です。")
+    validation = statement.period_validation or {}
+    if validation.get("rules_version") == 1:
+        errors.extend(validation.get("errors", []))
+        return errors
     expected_period = statement.period_month.strftime("%Y-%m")
     if not statement.statement_period:
         errors.append("明細書の対象月を確認できません。")
@@ -359,7 +373,12 @@ def _available_receipts_for_statement_month(
     receipt_months = {date(statement_month.year, statement_month.month, 1)}
     for transaction_date in transaction_dates or ():
         if transaction_date:
-            receipt_months.add(date(transaction_date.year, transaction_date.month, 1))
+            # The normal ±1-day receipt rule also crosses month/year boundaries.
+            # Load adjacent storage cycles when a boundary transaction needs them;
+            # display filtering and the global consume lock still apply.
+            for offset in (-DATE_MATCH_TOLERANCE_DAYS, 0, DATE_MATCH_TOLERANCE_DAYS):
+                evidence_day = transaction_date + timedelta(days=offset)
+                receipt_months.add(date(evidence_day.year, evidence_day.month, 1))
     submission_months = [
         submission_month_for_receipt(receipt_month)
         for receipt_month in sorted(receipt_months)
@@ -1306,6 +1325,147 @@ def _historical_receipts_for_statement_month(statement_month: date) -> list[Rece
     )
 
 
+
+def _submitter_usage_rows(receipts, catalogs, *, active_user_ids, active_service_ids, matched_ids):
+    """Read stored metadata only. Do not hash files, reserve or consume receipts."""
+    rows = []
+    for receipt in receipts:
+        user = receipt.submission.user
+        if user.pk not in active_user_ids:
+            continue
+        if receipt.service_id and receipt.service_id not in active_service_ids:
+            continue
+        if receipt.ai_extracted_card_last4 and receipt.ai_extracted_card_last4 != str(
+                getattr(settings, "RECEIPT_CARD_LAST4", "7210"))[-4:]:
+            continue
+        # Refunds/cancellations must not masquerade as recurring purchases.
+        if receipt.financial_document_kind == ReceiptFinancialDocumentKind.REFUND:
+            continue
+        raw_rows = receipt.financial_transaction_components or []
+        if not raw_rows and receipt.financial_document_kind in {
+                ReceiptFinancialDocumentKind.CHARGE, ReceiptFinancialDocumentKind.INVOICE}:
+            raw_rows = [{"role": "charge", "signed_amount": receipt.amount,
+                         "currency": receipt.currency, "transaction_date": receipt.issued_on,
+                         "invoice_number": receipt.financial_transaction_reference}]
+        for raw in raw_rows:
+            if not isinstance(raw, dict) or raw.get("role", "charge") != "charge":
+                continue
+            amount = _parse_decimal(raw.get("signed_amount"))
+            event_date = _parse_date(raw.get("transaction_date"))
+            currency = str(raw.get("currency") or receipt.currency or "").upper()
+            label = str(raw.get("service_label") or receipt.ai_extracted_service_label or "")
+            payee = str(raw.get("payee") or receipt.ai_extracted_payee or "")
+            merchant = _known_merchant_key(label) or _canonical_merchant_key(payee, catalogs)
+            if amount is None or not amount.is_finite() or amount <= 0 or not event_date or not currency or not merchant:
+                continue
+            source = str(raw.get("transaction_id") or raw.get("invoice_number")
+                         or receipt.financial_transaction_reference or receipt.file_sha256 or receipt.pk)
+            rows.append(HistoricalSubmitterUsage(
+                user_id=user.pk, user_label=user.get_full_name() or user.get_username(),
+                service_id=receipt.service_id,
+                service_label=receipt.service_display_name_snapshot or label,
+                merchant_key=merchant, event_date=event_date, amount=amount, currency=currency,
+                receipt_id=receipt.pk, filename=receipt.display_filename,
+                billing_type=receipt.billing_type_snapshot,
+                source_key=f"{merchant}:{source}:{event_date}:{amount}:{currency}",
+                previously_matched=receipt.pk in matched_ids,
+            ))
+    return rows
+
+
+def _attach_previous_month_submitter_candidates(statement, items, receipts, historical_receipts, catalogs):
+    """Persist suggestions separately from matched_user and the evidence ledger."""
+    for item in items:
+        item.submitter_candidates = {}
+    if _statement_gate_errors(statement):
+        return
+    candidates_for = [item for item in items if item.receipt_required
+                      and item.match_status in {StatementMatchStatus.UNMATCHED, StatementMatchStatus.NEEDS_REVIEW}
+                      and not _statement_item_is_reversal(item)]
+    if not candidates_for:
+        return
+    active_users = set(get_user_model().objects.filter(
+        is_active=True, is_staff=False, is_superuser=False,
+        profile__account_status=UserAccountStatus.ACTIVE,
+    ).values_list("pk", flat=True))
+    services = _registered_services_for_period(statement.period_month)
+    service_ids = {service.pk for service in services}
+    # Confirmed previous allocations only strengthen a historical clue. Merely
+    # existing in the ledger (reference rows, or AI service classification) does not.
+    historical_allocations = list(CardStatementReceiptEvidence.objects.filter(
+        statement_item__statement__period_month__lt=statement.period_month,
+        statement_item__match_status=StatementMatchStatus.MATCHED,
+        usage_mode=StatementReceiptEvidenceUsageMode.CONSUME,
+        role=StatementReceiptEvidenceRole.CHARGE,
+        receipt_id__in=[r.pk for r in historical_receipts],
+    ).select_related("statement_item__statement"))
+    matched_ids = {evidence.receipt_id for evidence in historical_allocations}
+    options = dict(active_user_ids=active_users, active_service_ids=service_ids, matched_ids=matched_ids)
+    history = _submitter_usage_rows(historical_receipts, catalogs, **options)
+    # A June 30 receipt can support a confirmed July 1 card transaction. Use
+    # that card date for cadence only when it is a direct, amount-identical
+    # association within the normal one-day window. Never use an inferred/net
+    # allocation to change the date, and do not create any new evidence usage.
+    card_dated_history = []
+    for history_row in history:
+        for evidence in historical_allocations:
+            old_item = evidence.statement_item
+            if (evidence.receipt_id != history_row.receipt_id or
+                    old_item.match_reason_code not in {
+                        StatementMatchReason.AUTO_STRONG, StatementMatchReason.MANUAL_CONFIRMED} or
+                    not old_item.transaction_date or _statement_item_is_reversal(old_item) or
+                    evidence.signed_amount != history_row.amount or evidence.currency != history_row.currency or
+                    abs((old_item.transaction_date - history_row.event_date).days) > DATE_MATCH_TOLERANCE_DAYS):
+                continue
+            card_dated_history.append(replace(
+                history_row, event_date=old_item.transaction_date,
+                historical_statement_id=old_item.statement_id,
+                historical_line_reference=old_item.line_reference or str(old_item.sequence),
+                document_event_date=history_row.event_date,
+            ))
+    history.extend(card_dated_history)
+    current = _submitter_usage_rows(receipts, catalogs, **options)
+    for item in candidates_for:
+        line = _statement_line(item, catalogs)
+        hint = suggest_previous_month_submitters(_plan_statement_line(line), history, current_charges=current)
+        # Absence of parseable current charges is not proof of non-submission.
+        for candidate in hint["candidates"]:
+            if candidate["current_receipts"]:
+                continue
+            possible = [r for r in receipts
+                        if r.submission.user_id == candidate["user_id"]
+                        and r.submission.period_month == statement.submission_month
+                        and candidate["service_id"] is not None
+                        and r.service_id == candidate["service_id"]
+                        and r.financial_document_kind != ReceiptFinancialDocumentKind.REFUND
+                        and (r.issued_on is None or
+                             (r.issued_on.year, r.issued_on.month) ==
+                             (item.transaction_date.year, item.transaction_date.month))
+                        and r.file_available]
+            if possible:
+                candidate["submission_state"] = "uploaded_review"
+                candidate["submission_label"] = "当月の同サービス書類あり・不足／解析内容を要確認"
+                candidate["current_receipts"] = [
+                    {"receipt_id": r.pk, "filename": r.display_filename} for r in possible[:5]]
+        hint["statement_month"] = statement.period_month.isoformat()
+        hint["generated_at"] = timezone.now().isoformat()
+        item.submitter_candidates = hint
+
+
+def _refresh_statement_period_validation(statement, items):
+    previous = statement.period_validation or {}
+    raw_period = previous.get("reported_period", statement.statement_period)
+    validation = assess_statement_period(
+        target_month=statement.period_month,
+        transaction_dates=[item.transaction_date for item in items],
+        payment_date=statement.payment_date, reported_period=raw_period,
+    )
+    validation["source_summary"] = previous.get("source_summary") or (
+        statement.ai_admin_memo or "").split("【照合結果】", 1)[0][:5000]
+    statement.period_validation = validation
+    statement.statement_period = validation["verified_period"]
+
+
 def _recipient_email(value: str) -> str:
     match = re.search(r"[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}", value or "", flags=re.I)
     return match.group(0).lower() if match else ""
@@ -2147,6 +2307,7 @@ def _reconcile_card_statement_items_impl(
     statement: CardStatement,
     *,
     preserve_manual: bool = True,
+    finish_processing: bool = False,
 ) -> CardStatement:
     """Reconcile one already locked card statement.
 
@@ -2157,7 +2318,9 @@ def _reconcile_card_statement_items_impl(
     """
 
     if statement.status == CardStatementStatus.PROCESSING:
-        return statement
+        if not finish_processing:
+            return statement
+        statement.status = CardStatementStatus.NEEDS_REVIEW
 
     items = list(
         statement.items.select_related(
@@ -2168,6 +2331,7 @@ def _reconcile_card_statement_items_impl(
             "plan_change_inference__user",
         ).order_by("sequence", "id")
     )
+    _refresh_statement_period_validation(statement, items)
     receipts = _available_receipts_for_statement_month(
         statement.period_month,
         transaction_dates=[item.transaction_date for item in items if item.transaction_date],
@@ -2538,6 +2702,10 @@ def _reconcile_card_statement_items_impl(
         current_component_usage=current_component_usage,
     )
 
+    _attach_previous_month_submitter_candidates(
+        statement, items, receipts, historical_receipts, catalogs,
+    )
+
     no_usage_conflicts: list[str] = []
     for item in items:
         if item.match_status == StatementMatchStatus.MATCHED and item.matched_service_id:
@@ -2609,6 +2777,7 @@ def _reconcile_card_statement_items_impl(
                 update_fields=[
                     "matched_user", "matched_catalog_service", "matched_service", "matched_receipt",
                     "match_status", "match_reason_code", "match_confidence", "match_memo", "receipt_required",
+                    "submitter_candidates",
                 ]
             )
         evidence_records: list[CardStatementReceiptEvidence] = []
@@ -2637,9 +2806,9 @@ def _reconcile_card_statement_items_impl(
         if new_automatic_consume_fingerprints != old_automatic_consume_fingerprints:
             mark_later_card_statements_for_global_usage_refresh(statement)
 
-        missing_count = sum(1 for item in items if item.receipt_required and item.match_status == StatementMatchStatus.UNMATCHED)
-        review_count = sum(1 for item in items if item.receipt_required and item.match_status == StatementMatchStatus.NEEDS_REVIEW)
-        inferred_count = sum(1 for item in items if item.receipt_required and item.match_status == StatementMatchStatus.INFERRED)
+        missing_count = sum(1 for item in items if item.receipt_required and item.effective_match_status == StatementMatchStatus.UNMATCHED)
+        review_count = sum(1 for item in items if item.receipt_required and item.effective_match_status == StatementMatchStatus.NEEDS_REVIEW)
+        inferred_count = sum(1 for item in items if item.receipt_required and item.effective_match_status == StatementMatchStatus.INFERRED)
         direct_count = sum(1 for item in items if item.match_reason_code == StatementMatchReason.AUTO_STRONG)
         original_count = sum(1 for item in items if item.match_reason_code == StatementMatchReason.ORIGINAL_CHARGE)
         linked_count = sum(1 for item in items if item.match_reason_code == StatementMatchReason.LINKED_REFUND_NET)
@@ -2653,27 +2822,13 @@ def _reconcile_card_statement_items_impl(
                 else CardStatementStatus.COMPLETED
             )
 
-        extraction_memo = (statement.ai_admin_memo or "").split("【照合結果】", 1)[0]
-        for marker in (
-            CARD_STATEMENT_MONTH_SEMANTICS_RECONCILE_MARKER,
-            CARD_STATEMENT_SAME_MONTH_RECEIPT_RECONCILE_MARKER,
-            CARD_STATEMENT_MATCHING_RULES_RECONCILE_MARKER,
-            CARD_LAST4_EVIDENCE_RECONCILE_MARKER,
-            EXACT_AMOUNT_MATCHING_RECONCILE_MARKER,
-            SIMPLE_RECEIPT_MATCHING_RECONCILE_MARKER,
-            EMPIRICAL_MATCHING_RECONCILE_MARKER,
-            SERVICE_LABEL_RECONCILE_MARKER,
-            BILLING_DESCRIPTOR_BRIDGE_RECONCILE_MARKER,
-            PLAN_CHANGE_INFERENCE_RECONCILE_MARKER,
-            PLAN_CHANGE_METADATA_REFRESH_RECONCILE_MARKER,
-            PLAN_CHANGE_USER_INFERENCE_RECONCILE_MARKER,
-            RECEIPT_CHANGE_RECONCILE_MARKER,
-            CROSS_MONTH_CARD_NETTING_RECONCILE_MARKER,
-            UNMATCHED_RECEIPT_EVENT_SCOPE_RECONCILE_MARKER,
-            GLOBAL_COMPONENT_USAGE_RECONCILE_MARKER,
-        ):
-            extraction_memo = extraction_memo.replace(marker, "")
-        extraction_memo = extraction_memo.strip()
+        # Keep the original AI summary in the audit metadata, not as a current
+        # error message after the stored transaction dates disprove it.
+        extraction_memo = " ".join([
+            *statement.period_validation.get("errors", []),
+            statement.period_validation.get("summary", ""),
+            f"抽出済み利用明細{len(items)}行を照合しました。",
+        ])
         target_receipt_months = sorted(
             {
                 date(statement.period_month.year, statement.period_month.month, 1),
@@ -2707,6 +2862,7 @@ def _reconcile_card_statement_items_impl(
             "直接一致しない明細についてのみ、当月の契約変更書類に明記されたBill to利用者・旧プラン終了情報と、"
             "過去領収書または前月カード明細の同一請求元・金額通貨完全一致・前月同請求日の実績が揃う場合に限り、"
             "管理者確認前の推定対応として提示します。前月カード明細は領収書提出証拠ではなく、旧プランの請求周期を裏付ける補助証拠です。"
+            "別枠の提出者候補は前月履歴からの問い合わせ先候補で、当月提出済み・金額一致の根拠にはせず、使用済み台帳を更新しません。"
             "未使用一覧は当月書類と実明細に関連する月跨ぎ書類だけを対象とし、全明細で未消費の構成要素が残るPDFだけを表示します。"
             "一部だけ使用済みの返金PDFは構成要素別に使用先を表示し、全構成要素を消費済みのPDFと、照合候補として読み込んだだけの無関係な過去月PDFは表示しません。"
         )
@@ -2725,7 +2881,7 @@ def _reconcile_card_statement_items_impl(
         statement.save(
             update_fields=[
                 "status", "ai_admin_memo", "unmatched_receipt_components",
-                "reconciled_at", "updated_at",
+                "reconciled_at", "updated_at", "statement_period", "period_validation",
             ]
         )
     return statement
@@ -2735,6 +2891,7 @@ def reconcile_card_statement_items(
     statement_id: int,
     *,
     preserve_manual: bool = True,
+    finish_processing: bool = False,
 ) -> CardStatement:
     """Atomically reconcile a statement with a global component-use lock.
 
@@ -2755,6 +2912,7 @@ def reconcile_card_statement_items(
                 return _reconcile_card_statement_items_impl(
                     statement,
                     preserve_manual=preserve_manual,
+                    finish_processing=finish_processing,
                 )
         except IntegrityError:
             if attempt:
@@ -2823,15 +2981,22 @@ def process_card_statement(statement_id: int):
                     original_amount=extracted.original_amount,
                     original_currency=extracted.original_currency,
                     matched_catalog_service=catalog_by_id.get(extracted.service_catalog_id),
-                    match_status=extracted.match_status,
-                    match_confidence=extracted.confidence,
+                    # Classification of the merchant is not receipt evidence.
+                    match_status=(StatementMatchStatus.NEEDS_REVIEW if extracted.receipt_required
+                                  else StatementMatchStatus.IGNORED),
+                    match_reason_code=(StatementMatchReason.PARSE_REVIEW if extracted.receipt_required
+                                       else StatementMatchReason.IGNORED),
+                    match_confidence=0.0,
                     match_memo=extracted.reason,
                     receipt_required=extracted.receipt_required,
                 )
                 for sequence, extracted in enumerate(result.items, start=1)
             ]
         )
-        statement.status = result.status
+        statement.status = (CardStatementStatus.FAILED if result.status == CardStatementStatus.FAILED
+                            else CardStatementStatus.PROCESSING)
+        statement.reconciled_at = None
+        statement.period_validation = result.period_validation
         statement.card_last4 = result.card_last4
         statement.statement_period = result.statement_period
         statement.payment_date = result.payment_date
@@ -2840,12 +3005,12 @@ def process_card_statement(statement_id: int):
         statement.save(
             update_fields=[
                 "status", "card_last4", "statement_period", "payment_date",
-                "ai_admin_memo", "processed_at", "updated_at",
+                "ai_admin_memo", "processed_at", "updated_at", "period_validation", "reconciled_at",
             ]
         )
 
     if result.status != CardStatementStatus.FAILED:
-        reconcile_card_statement_items(statement.pk, preserve_manual=False)
+        reconcile_card_statement_items(statement.pk, preserve_manual=False, finish_processing=True)
     return result
 
 

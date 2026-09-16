@@ -978,7 +978,7 @@ def format_evidence_calculation(components: Sequence[EvidenceComponent], target:
     parts: list[str] = []
     for component in components:
         amount = abs(component.signed_amount)
-        number = format(amount, "f").rstrip("0").rstrip(".") or "0"
+        number = (format(amount, "f").rstrip("0").rstrip(".") if "." in format(amount, "f") else format(amount, "f")) or "0"
         if not parts:
             prefix = "-" if component.signed_amount < 0 else ""
         else:
@@ -986,6 +986,57 @@ def format_evidence_calculation(components: Sequence[EvidenceComponent], target:
         role = "返金" if component.role == ROLE_REFUND else "決済"
         parts.append(f"{prefix}{number} {component.currency}（{role}）")
     if target is not None:
-        number = format(target.amount, "f").rstrip("0").rstrip(".") or "0"
+        number = (format(target.amount, "f").rstrip("0").rstrip(".") if "." in format(target.amount, "f") else format(target.amount, "f")) or "0"
         return " ".join(parts) + f" = {number} {target.currency}"
     return " ".join(parts)
+
+
+# These are accounting-period rules, not the card issuer's payment calendar.
+STATEMENT_PERIOD_RULES_VERSION = 1
+
+
+def assess_statement_period(
+    *, target_month: date, transaction_dates: Iterable[date | None],
+    payment_date: date | None = None, reported_period: str = "",
+) -> dict:
+    """Validate the selected receipt/usage month independently of settlement.
+
+    Never calculate the accounting month as payment_month - 1.  Late postings
+    from earlier months are allowed only alongside dated transactions in the
+    selected month. A file with no selected-month transactions is kept for
+    review rather than silently relabelled to make it match the user's choice.
+    """
+    dates = sorted(d for d in transaction_dates if isinstance(d, date))
+    target = target_month.replace(day=1).isoformat()[:7]
+    counts: dict[str, int] = {}
+    for d in dates:
+        key = d.isoformat()[:7]
+        counts[key] = counts.get(key, 0) + 1
+    months = sorted(counts)
+    errors = []
+    if not dates:
+        errors.append("利用日を確認できないため、照合対象月を検証できません。")
+    elif target not in counts:
+        errors.append(f"選択した照合対象月{target}の利用行がありません。利用月は{'・'.join(months)}です。")
+    elif any(month > target for month in months):
+        errors.append(f"照合対象月{target}より後の利用行を含みます。対象月と明細ファイルを確認してください。")
+    verified = not errors
+    # On failure retain an independently observed month, never the payment month.
+    observed = target if verified else (months[0] if len(months) == 1 else "")
+    payment = payment_date.isoformat() if isinstance(payment_date, date) else ""
+    span = f"{dates[0].isoformat()}～{dates[-1].isoformat()}" if dates else "未確認"
+    summary = (
+        f"照合対象月{target}、利用日範囲{span}"
+        f"（利用月{'・'.join(months) or '未確認'}）。"
+        f"カード支払日{payment or '未確認'}は別項目として保持し、照合対象月には使用しません。"
+    )
+    return {
+        "rules_version": STATEMENT_PERIOD_RULES_VERSION,
+        "target_month": target, "reported_period": str(reported_period or "")[:7],
+        "verified_period": observed, "valid": verified,
+        "payment_date": payment, "transaction_months": months,
+        "transaction_month_counts": counts,
+        "transaction_date_min": dates[0].isoformat() if dates else "",
+        "transaction_date_max": dates[-1].isoformat() if dates else "",
+        "errors": errors, "summary": summary,
+    }

@@ -62,7 +62,7 @@ def _decimal_text(value: Decimal | None, *, places: int | None = None) -> str:
         return "-"
     if places is not None:
         return f"{value:,.{places}f}"
-    text = format(value, "f").rstrip("0").rstrip(".")
+    text = (format(value, "f").rstrip("0").rstrip(".") if "." in format(value, "f") else format(value, "f"))
     whole, dot, fraction = text.partition(".")
     try:
         whole = f"{int(whole):,}"
@@ -81,15 +81,15 @@ def _amount_text(item: CardStatementItem) -> str:
 
 
 def _is_unmatched(item: CardStatementItem) -> bool:
-    return bool(item.receipt_required and item.match_status == StatementMatchStatus.UNMATCHED)
+    return bool(item.receipt_required and item.effective_match_status == StatementMatchStatus.UNMATCHED)
 
 
 def _is_review(item: CardStatementItem) -> bool:
-    return bool(item.receipt_required and item.match_status == StatementMatchStatus.NEEDS_REVIEW)
+    return bool(item.receipt_required and item.effective_match_status == StatementMatchStatus.NEEDS_REVIEW)
 
 
 def _is_inferred(item: CardStatementItem) -> bool:
-    return bool(item.receipt_required and item.match_status == StatementMatchStatus.INFERRED)
+    return bool(item.receipt_required and item.effective_match_status == StatementMatchStatus.INFERRED)
 
 
 def _evidence_text(item: CardStatementItem) -> str:
@@ -106,6 +106,12 @@ def _evidence_text(item: CardStatementItem) -> str:
                 f"{_decimal_text(inference.amount)} {inference.currency}",
             ]
             return "\n".join(parts)
+        candidates = (item.submitter_candidates or {}).get("candidates", [])
+        if candidates:
+            return "提出者候補（未確定・前月参照のみ）\n" + "\n".join(
+                f"{_short_text(c['user_label'], 50)} / {c['support_label']} / {c['submission_label']}\n"
+                f"前月: {c['historical_event_date']} {c['historical_amount']} {c['currency']} / "
+                f"{_short_text(c['historical_filename'], 65)}" for c in candidates[:3])
         return "-"
     filenames = list(dict.fromkeys(evidence.filename_snapshot for evidence in evidences if evidence.filename_snapshot))
     text = " / ".join(filenames) or "-"
@@ -121,9 +127,9 @@ def _row_background(item: CardStatementItem):
         return INFERRED_BG
     if _is_review(item):
         return REVIEW_BG
-    if item.match_status == StatementMatchStatus.MATCHED:
+    if item.effective_match_status == StatementMatchStatus.MATCHED:
         return MATCHED_BG
-    if item.match_status == StatementMatchStatus.IGNORED:
+    if item.effective_match_status == StatementMatchStatus.IGNORED:
         return NEUTRAL_BG
     return WHITE
 
@@ -216,7 +222,7 @@ def _metadata_table(statement: CardStatement, styles: dict[str, ParagraphStyle])
             _paragraph(statement.get_status_display(), styles["body"]),
         ],
         [
-            _paragraph("AI判定明細月", styles["small"]),
+            _paragraph("利用日検証月", styles["small"]),
             _paragraph(statement.statement_period or "-", styles["body"]),
             _paragraph("支払日", styles["small"]),
             _paragraph(statement.payment_date.strftime("%Y-%m-%d") if statement.payment_date else "-", styles["body"]),
@@ -277,7 +283,7 @@ def _action_items_table(items: list[CardStatementItem], styles: dict[str, Paragr
             _paragraph(item.transaction_date.strftime("%Y-%m-%d") if item.transaction_date else "-", styles["small"]),
             _paragraph(item.merchant_name, styles["small"]),
             _paragraph(_amount_text(item), styles["small"]),
-            _paragraph(item.get_match_status_display(), styles["small"]),
+            _paragraph(item.display_match_status, styles["small"]),
             _paragraph(evidence_and_memo, styles["tiny"]),
         ])
     table = Table(
@@ -370,7 +376,7 @@ def _all_items_table(items: list[CardStatementItem], styles: dict[str, Paragraph
         _paragraph("ご利用先", styles["header"]),
         _paragraph("金額", styles["header"]),
         _paragraph("照合状態", styles["header"]),
-        _paragraph("対応領収書", styles["header"]),
+        _paragraph("提出証拠 / 参考候補", styles["header"]),
         _paragraph("判定メモ", styles["header"]),
     ]]
     for item in items:
@@ -380,7 +386,7 @@ def _all_items_table(items: list[CardStatementItem], styles: dict[str, Paragraph
             _paragraph(item.transaction_date.strftime("%Y-%m-%d") if item.transaction_date else "-", styles["small"]),
             _paragraph(item.merchant_name, styles["small"]),
             _paragraph(_amount_text(item), styles["small"]),
-            _paragraph(item.get_match_status_display(), styles["small"]),
+            _paragraph(item.display_match_status, styles["small"]),
             _paragraph(receipt_name, styles["small"]),
             _paragraph(_short_text(item.match_memo or "-", max_chars=120), styles["tiny"]),
         ])
@@ -457,7 +463,7 @@ def build_card_statement_reconciliation_pdf(statement: CardStatement) -> bytes:
             Spacer(1, 3 * mm),
             Paragraph("明細に紐づかなかった提出書類", styles["section"]),
             Paragraph(
-                "PDF本文の書類日・取引日が選択中の領収書発行月に属する提出ファイル、または明細に含まれる月跨ぎ取引と日付・請求元が関連する提出ファイルのうち、どの決済グループにも使用されなかった物理PDFです。照合候補として内部参照しただけの無関係な過去月書類は含めません。",
+                "対象月または実明細に関連する月跨ぎPDFのうち、全明細を通じて未消費の取引構成要素が残る書類です。元決済だけ使用済みで返金が未消費の場合等は一部使用済みとして残ります。無関係な過去月書類は含めません。",
                 styles["subtitle"],
             ),
             _unused_receipts_table(unused_entries, styles),

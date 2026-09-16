@@ -325,3 +325,138 @@ def allocate_unique_plan_change_candidates(
         used_change_receipts.add(candidate.change_receipt_id)
         used_historical_evidence.add(candidate.historical_evidence_key)
     return allocated
+
+
+@dataclass(frozen=True)
+class HistoricalSubmitterUsage:
+    """Read-only history for finding a contact; never current payment evidence."""
+
+    user_id: int
+    user_label: str
+    service_id: int | None
+    service_label: str
+    merchant_key: str
+    event_date: date
+    amount: Decimal
+    currency: str
+    receipt_id: int | None = None
+    filename: str = ""
+    billing_type: str = ""
+    source_key: str = ""
+    previously_matched: bool = False
+    historical_statement_id: int | None = None
+    historical_line_reference: str = ""
+    document_event_date: date | None = None
+
+
+def _next_month_same_day(value: date) -> date:
+    from calendar import monthrange
+    year = value.year + (value.month == 12)
+    month = 1 if value.month == 12 else value.month + 1
+    return date(year, month, min(value.day, monthrange(year, month)[1]))
+
+
+def suggest_previous_month_submitters(
+    line: PlanStatementLine,
+    history: list[HistoricalSubmitterUsage],
+    *, current_charges: list[HistoricalSubmitterUsage] | None = None,
+    date_tolerance_days: int = 3, limit: int = 5,
+) -> dict:
+    """Return transparent, non-consuming candidate contacts, not an assignment.
+
+    Fixed subscriptions: exact amount + monthly cadence gives strong support.
+    Metered purchases have no assumed monthly cycle: exact amount is a weaker
+    clue, and varying amounts require at least two prior-month usages plus a
+    similar date. Ties remain ties; one contact may be a clue for several API
+    purchases. Existing current-month documents are shown as 'check matching',
+    never as a missing-receipt accusation.
+    """
+    from .statement_matching import merchant_keys_compatible
+
+    result = {"version": 1, "suggestion_only": True, "consumes_receipts": False,
+              "candidates": [], "total_candidates": 0, "truncated": False}
+    if not line.transaction_date or not line.merchant_key or not line.amount_options:
+        return result
+    limit = max(1, min(int(limit), 20))
+    date_tolerance_days = max(0, min(int(date_tolerance_days), 7))
+    previous = _previous_month(line.transaction_date)
+    usable = [h for h in history if h.event_date and (h.event_date.year, h.event_date.month) == previous
+              and h.amount.is_finite() and h.amount > 0 and h.user_id
+              and merchant_keys_compatible(line.merchant_key, h.merchant_key)]
+    distinct_events: dict[tuple, set[str]] = {}
+    for h in usable:
+        group = (h.user_id, h.service_id, h.merchant_key)
+        distinct_events.setdefault(group, set()).add(h.source_key or f"{h.receipt_id}:{h.event_date}:{h.amount}")
+    best: dict[int, tuple[tuple, dict]] = {}
+    for h in usable:
+        same_currency = [a for a in line.amount_options if a.currency == h.currency
+                         and a.amount.is_finite() and a.amount > 0]
+        if not same_currency:
+            continue
+        exact = any(a.amount == h.amount for a in same_currency)
+        expected = _next_month_same_day(h.event_date)
+        distance = abs((line.transaction_date - expected).days)
+        recurring = h.billing_type == "subscription"
+        reasons = ["前月の同じ請求元（または既知の決済名義）の提出履歴", f"前月利用日 {h.event_date.isoformat()}"]
+        if exact and recurring and distance <= date_tolerance_days:
+            level, label = 3, "有力候補（未確定）"
+            reasons += ["金額・通貨が一致", f"翌月同日から{distance}日差の定期請求"]
+        elif exact:
+            level, label = 1, "参考候補（未確定）"
+            reasons += ["金額・通貨が一致", "請求周期の一致は未確認"]
+        elif recurring and distance <= date_tolerance_days:
+            level, label = 1, "参考候補（未確定）"
+            reasons += [f"翌月同日から{distance}日差", "金額が異なるため、値上げ・プラン変更・別取引を要確認"]
+        elif (h.billing_type == "metered" and distance <= date_tolerance_days
+              and len(distinct_events[(h.user_id, h.service_id, h.merchant_key)]) >= 2):
+            level, label = 1, "参考候補（従量課金・未確定）"
+            reasons += ["前月に複数の従量課金実績", "金額は異なり、今月の購入者を特定する根拠ではありません"]
+        else:
+            continue
+        if h.previously_matched:
+            reasons.append("前月明細と提出書類の紐付け実績あり")
+        if h.historical_statement_id is not None:
+            reasons.append(f"利用日は前月明細 {h.historical_line_reference} の確定済み対応から参照")
+        current = []
+        for c in current_charges or []:
+            if c.user_id != h.user_id or not c.event_date or not c.amount.is_finite() or c.amount <= 0:
+                continue
+            if not merchant_keys_compatible(line.merchant_key, c.merchant_key):
+                continue
+            # Limit 'already uploaded' to the relevant financial event, not all
+            # PDFs of this merchant or a different API top-up from this user.
+            if (any(a.currency == c.currency and a.amount == c.amount for a in line.amount_options)
+                    and abs((c.event_date - line.transaction_date).days) <= date_tolerance_days):
+                current.append({"receipt_id": c.receipt_id, "filename": c.filename})
+        current = list({(x["receipt_id"], x["filename"]): x for x in current}.values())
+        candidate = {
+            "user_id": h.user_id, "user_label": h.user_label,
+            "service_id": h.service_id, "service_label": h.service_label,
+            "support_level": level, "support_label": label,
+            "reasons": reasons, "ambiguous": False,
+            "historical_receipt_id": h.receipt_id, "historical_filename": h.filename,
+            "historical_statement_id": h.historical_statement_id,
+            "historical_line_reference": h.historical_line_reference,
+            "historical_document_date": (h.document_event_date or h.event_date).isoformat(),
+            "historical_event_date": h.event_date.isoformat(),
+            "historical_amount": format(h.amount, "f"), "currency": h.currency,
+            "expected_date": expected.isoformat(), "date_distance": distance,
+            "current_receipts": current,
+            "submission_state": "uploaded_review" if current else "not_confirmed",
+            "submission_label": "当月書類あり・照合要確認" if current else "当該取引の領収書は未確認",
+            "reference_only": True,
+        }
+        score = (level, int(h.previously_matched), -distance)
+        if h.user_id not in best or score > best[h.user_id][0]:
+            best[h.user_id] = (score, candidate)
+    ranked = sorted(best.values(), key=lambda pair: (tuple(-v for v in pair[0]), pair[1]["user_label"]))
+    top_score = ranked[0][0] if ranked else None
+    top_tie = sum(1 for score, _ in ranked if score == top_score) > 1
+    for score, candidate in ranked:
+        candidate["ambiguous"] = bool(top_tie and score == top_score)
+        if candidate["ambiguous"]:
+            candidate["reasons"].append("同条件の候補者が複数いるため一人に特定できません")
+    result["candidates"] = [candidate for _, candidate in ranked[:limit]]
+    result["total_candidates"] = len(ranked)
+    result["truncated"] = len(ranked) > limit
+    return result

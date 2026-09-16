@@ -3853,6 +3853,14 @@ class FinalWorkflowAcceptanceTests(TestCase):
             match_status=StatementMatchStatus.UNMATCHED,
             receipt_required=True,
         )
+        if transaction_date.replace(day=1) != period_month.replace(day=1):
+            # Real cross-month statements also contain target-month usage.
+            # Keep the late-posted row under test, plus an ignored anchor row.
+            CardStatementItem.objects.create(
+                statement=statement, sequence=2, line_reference="CURRENT-MONTH-ANCHOR",
+                transaction_date=period_month, merchant_name="OUT OF RECEIPT SCOPE",
+                amount_jpy=Decimal("1"), receipt_required=False,
+                match_status=StatementMatchStatus.IGNORED)
         return statement, item
 
     def test_submission_requires_receipt_or_no_usage_for_every_service(self):
@@ -3993,7 +4001,7 @@ class FinalWorkflowAcceptanceTests(TestCase):
         self.assertFalse(Receipt.objects.filter(pk=receipt.pk).exists())
         self.assertFalse(receipt_path.exists())
 
-    def test_statement_payload_treats_selected_month_as_statement_month(self):
+    def test_statement_payload_rejects_payment_month_selected_as_usage_month(self):
         self.assertEqual(receipt_month_for_statement(date(2026, 7, 1)), date(2026, 7, 1))
         result = build_statement_result_from_payload(
             {
@@ -4020,8 +4028,9 @@ class FinalWorkflowAcceptanceTests(TestCase):
             target_month="2026-07",
             allowed_catalog_ids={self.subscription_catalog.pk, self.api_catalog.pk},
         )
-        self.assertEqual(result.status, CardStatementStatus.COMPLETED)
-        self.assertEqual(result.statement_period, "2026-07")
+        self.assertEqual(result.status, CardStatementStatus.NEEDS_REVIEW)
+        self.assertEqual(result.statement_period, "2026-06")
+        self.assertFalse(result.period_validation["valid"])
         self.assertEqual(result.payment_date, date(2026, 7, 29))
         self.assertEqual(result.items[0].transaction_date, date(2026, 6, 3))
         self.assertEqual(result.items[0].service_catalog_id, self.subscription_catalog.pk)
@@ -4091,7 +4100,7 @@ class FinalWorkflowAcceptanceTests(TestCase):
             items=(
                 StatementAnalysisItem(
                     line_reference="0302",
-                    transaction_date=date(2026, 6, 16),
+                    transaction_date=date(2026, 7, 16),
                     merchant_name="OPENAI",
                     amount_jpy=Decimal("8236"),
                     original_amount=Decimal("49.92"),
@@ -4117,7 +4126,7 @@ class FinalWorkflowAcceptanceTests(TestCase):
             ).exists()
         )
         self.assertTrue(item.needs_highlight)
-        self.assertEqual(item.receipt_status_label, "未提出")
+        self.assertEqual(item.receipt_status_label, "領収書未確認")
         self.assertIn("対応する提出書類", item.match_memo)
         self.assertIn("未一致1件", statement.ai_admin_memo)
 
@@ -4613,7 +4622,7 @@ class FinalWorkflowAcceptanceTests(TestCase):
         self.assertIsNone(item.matched_receipt)
         self.assertEqual(item.match_status, StatementMatchStatus.UNMATCHED)
         self.assertEqual(item.row_class, "statement-unmatched-row")
-        self.assertEqual(item.receipt_status_label, "未提出")
+        self.assertEqual(item.receipt_status_label, "領収書未確認")
 
     @mock.patch("receipts.statement_processing.generate_card_statement_analysis")
     def test_statement_does_not_match_different_amount_even_when_payee_and_date_match(self, mocked_analysis):
@@ -5728,6 +5737,12 @@ class FinalWorkflowAcceptanceTests(TestCase):
             receipt_required=True,
         )
 
+        CardStatementItem.objects.create(
+            statement=statement, sequence=2, line_reference="CURRENT-MONTH-ANCHOR",
+            transaction_date=date(2026, 7, 1), merchant_name="OUT OF RECEIPT SCOPE",
+            amount_jpy=Decimal("1"), receipt_required=False,
+            match_status=StatementMatchStatus.IGNORED)
+
         available_ids = {
             receipt.pk
             for receipt in _available_receipts_for_statement_month(
@@ -6207,7 +6222,7 @@ class FinalWorkflowAcceptanceTests(TestCase):
         self.assertEqual(earlier.unmatched_receipt_components, [])
 
     def test_version_file_is_present_without_web_display_requirement(self):
-        self.assertEqual(Path("VERSION").read_text(encoding="utf-8").strip(), "1.16.2")
+        self.assertRegex(Path("VERSION").read_text(encoding="utf-8").strip(), r"^\d+\.\d+\.\d+$")
 
 
 @override_settings(PASSWORD_HASHERS=FAST_PASSWORD_HASHERS)

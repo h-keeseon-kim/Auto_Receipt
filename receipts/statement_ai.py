@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date
 from decimal import Decimal
 from typing import Any, Iterable
@@ -20,6 +20,7 @@ from .ai_filename import (
     target_card_last4,
 )
 from .models import CardStatementStatus, StatementMatchStatus, receipt_month_for_statement
+from .statement_matching import assess_statement_period
 
 
 @dataclass(frozen=True)
@@ -51,6 +52,7 @@ class StatementAnalysisResult:
     payment_date: date | None = None
     items: tuple[StatementAnalysisItem, ...] = ()
     admin_memo: str = ""
+    period_validation: dict[str, Any] = field(default_factory=dict)
 
 
 def statement_ai_enabled() -> bool:
@@ -113,8 +115,11 @@ def generate_card_statement_analysis(
         f"管理対象のご利用代金明細月: {target_month}\n"
         f"この明細と照合する領収書発行月: {target_receipt_month}\n"
         f"確認対象カード末尾4桁: {target_last4}\n"
-        "statement_period は利用日ではなく、明細書の請求・支払対象月を YYYY-MM で返してください。"
-        "例えば利用日が6月で支払日が7月29日なら statement_period は 2026-07 です。"
+        "statement_period は支払月ではなく、利用明細が属する照合対象月を YYYY-MM で返してください。"
+        "例えば利用日が8月で支払日が9月28日なら statement_period は2026-08、payment_dateは2026-09-28です。"
+        "支払日やファイル名の年月から利用月を決めたり、支払月から機械的に1か月引いたりしないでください。"
+        "選択月以外の利用しかないときは、選択月に合わせず実際の利用月を返してください。"
+        "前月の利用が混在しても全行を抽出し、利用日と支払日は別項目として保持してください。"
         "ReceiptHubは、明細月に加えて明細内の各利用日の年月も領収書候補月として参照します。"
         "例えば2026-07明細に2026-06-28の利用行があれば、2026-06と2026-07の領収書を照合します。"
         "領収書発行月Mのファイルは内部的には提出サイクルM+1に保存されます。\n"
@@ -196,7 +201,7 @@ def statement_schema() -> dict[str, Any]:
             "additionalProperties": False,
             "properties": {
                 "card_last4": {"type": ["string", "null"]},
-                "statement_period": {"type": ["string", "null"], "description": "明細書の請求・支払月 YYYY-MM"},
+                "statement_period": {"type": ["string", "null"], "description": "利用明細の照合対象月 YYYY-MM。支払月とは別。"},
                 "payment_date": {"type": ["string", "null"], "description": "支払日 YYYY-MM-DD"},
                 "summary_reason": {"type": "string"},
                 "items": {
@@ -273,8 +278,6 @@ def build_statement_result_from_payload(
     issues: list[str] = []
     if card_last4 != target_last4:
         issues.append(f"カード末尾が{target_last4}ではなく{card_last4 or '確認不可'}として解析されました。")
-    if statement_period != target_month:
-        issues.append(f"明細月が{target_month}ではなく{statement_period or '確認不可'}として解析されました。")
 
     items: list[StatementAnalysisItem] = []
     for index, raw in enumerate(payload.get("items") or [], start=1):
@@ -316,17 +319,25 @@ def build_statement_result_from_payload(
     if not items:
         issues.append("利用明細行を抽出できませんでした。")
 
+    validation = assess_statement_period(
+        target_month=date.fromisoformat(target_month + "-01"),
+        transaction_dates=[item.transaction_date for item in items],
+        payment_date=payment_date, reported_period=statement_period,
+    )
+    issues.extend(validation["errors"])
     summary_reason = str(payload.get("summary_reason") or "").strip()
+    validation["source_summary"] = summary_reason[:5000]
     memo_parts = list(dict.fromkeys(issues))
-    if summary_reason:
-        memo_parts.append(summary_reason)
+    memo_parts.append(validation["summary"])
+    memo_parts.append(f"利用明細{len(items)}行を抽出しました。領収書照合は抽出後に実行します。")
 
     status = CardStatementStatus.NEEDS_REVIEW if issues else CardStatementStatus.COMPLETED
     return StatementAnalysisResult(
         status=status,
         card_last4=card_last4,
-        statement_period=statement_period,
+        statement_period=validation["verified_period"],
         payment_date=payment_date,
         items=tuple(items),
         admin_memo=" ".join(dict.fromkeys(memo_parts))[:4000],
+        period_validation=validation,
     )

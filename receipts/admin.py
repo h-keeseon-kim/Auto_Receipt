@@ -386,7 +386,7 @@ class CardStatementAdmin(admin.ModelAdmin):
     list_filter = ("status", "period_month", "file_deleted_at")
     search_fields = ("original_filename", "ai_admin_memo", "items__merchant_name", "items__matched_user__username")
     readonly_fields = (
-        "unmatched_receipt_components",
+        "unmatched_receipt_components", "period_validation",
         "uploaded_at", "processed_at", "reconciled_at", "expires_at",
         "file_deleted_at", "file_delete_reason", "updated_at",
     )
@@ -412,6 +412,7 @@ class CardStatementItemAdmin(admin.ModelAdmin):
     )
     list_filter = ("match_status", "receipt_required", "statement__period_month")
     search_fields = ("merchant_name", "line_reference", "matched_user__username", "matched_service__name", "match_memo", "receipt_evidences__filename_snapshot", "receipt_evidences__transaction_reference_snapshot")
+    readonly_fields = ("submitter_candidates",)
     inlines = [CardStatementPlanChangeInferenceInline, CardStatementReceiptEvidenceInline]
 
 

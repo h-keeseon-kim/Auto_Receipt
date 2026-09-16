@@ -681,5 +681,81 @@ class StatementMatchingEngineTests(unittest.TestCase):
         self.assertEqual(result.assignments["L"].match_type, MATCH_DIRECT)
 
 
+
+class StatementUsagePeriodTests(unittest.TestCase):
+    def assess(self, dates, *, selected=date(2026, 8, 1), payment=date(2026, 9, 28), reported="2026-09"):
+        from receipts.statement_matching import assess_statement_period
+        return assess_statement_period(target_month=selected, transaction_dates=dates,
+                                       payment_date=payment, reported_period=reported)
+
+    def test_august_usage_is_not_september_even_when_payment_and_ai_say_september(self):
+        result = self.assess([date(2026, 8, day) for day in (1, 3, 10, 19, 27)])
+        self.assertTrue(result["valid"])
+        self.assertEqual(result["verified_period"], "2026-08")
+        self.assertEqual(result["reported_period"], "2026-09")
+        self.assertEqual(result["payment_date"], "2026-09-28")
+        self.assertFalse(result["errors"])
+
+    def test_sixty_seven_august_rows_remain_sixty_seven(self):
+        result = self.assess([date(2026, 8, (i % 27) + 1) for i in range(67)])
+        self.assertEqual(result["transaction_month_counts"], {"2026-08": 67})
+
+    def test_wrong_upload_is_not_relabelled_to_selected_month(self):
+        result = self.assess([date(2026, 8, 12)], selected=date(2026, 9, 1))
+        self.assertFalse(result["valid"])
+        self.assertEqual(result["verified_period"], "2026-08")
+        self.assertTrue(result["errors"])
+
+    def test_payment_month_alone_cannot_validate_an_empty_statement(self):
+        result = self.assess([None, None])
+        self.assertFalse(result["valid"])
+        self.assertEqual(result["verified_period"], "")
+
+    def test_late_previous_month_transactions_are_retained(self):
+        result = self.assess([date(2026, 7, 28), date(2026, 8, 3)])
+        self.assertTrue(result["valid"])
+        self.assertEqual(result["transaction_months"], ["2026-07", "2026-08"])
+
+    def test_future_dated_transactions_require_review(self):
+        result = self.assess([date(2026, 8, 3), date(2026, 9, 2)])
+        self.assertFalse(result["valid"])
+
+    def test_previous_only_statement_is_not_assumed_current(self):
+        result = self.assess([date(2026, 7, 28)])
+        self.assertFalse(result["valid"])
+        self.assertEqual(result["verified_period"], "2026-07")
+
+    def test_december_usage_with_january_payment(self):
+        result = self.assess([date(2026, 12, 31)], selected=date(2026, 12, 1),
+                             payment=date(2027, 1, 27), reported="2027-01")
+        self.assertTrue(result["valid"])
+        self.assertEqual(result["verified_period"], "2026-12")
+
+    def test_payment_two_months_later_does_not_shift_usage_month(self):
+        result = self.assess([date(2026, 8, 3)], payment=date(2026, 10, 28), reported="2026-10")
+        self.assertTrue(result["valid"])
+        self.assertEqual(result["verified_period"], "2026-08")
+
+    def test_missing_payment_date_can_still_validate_usage(self):
+        result = self.assess([date(2026, 8, 3)], payment=None, reported="")
+        self.assertTrue(result["valid"])
+        self.assertEqual(result["payment_date"], "")
+
+    def test_no_month_number_is_hardcoded(self):
+        for year in (2025, 2026, 2027):
+            for month in range(1, 13):
+                result = self.assess([date(year, month, 15)], selected=date(year, month, 1), payment=None)
+                self.assertTrue(result["valid"])
+                self.assertEqual(result["verified_period"], f"{year}-{month:02d}")
+
+    def test_integer_amount_display_keeps_trailing_zeroes(self):
+        from receipts.statement_matching import format_evidence_calculation
+        receipt = EvidenceComponent(key="display", receipt_id=1, receipt_order=0,
+            filename="example.pdf", merchant_key="EXAMPLE", signed_amount=Decimal("220"),
+            currency="USD", event_date=date(2026, 8, 1))
+        rendered = format_evidence_calculation([receipt], AmountOption(Decimal("220"), "USD"))
+        self.assertIn("220 USD", rendered)
+        self.assertNotIn("= 22 USD", rendered)
+
 if __name__ == "__main__":
     unittest.main()

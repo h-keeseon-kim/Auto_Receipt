@@ -2154,17 +2154,17 @@ def prepare_statement_result_display(statements, result_filter: str):
         inferred_items = [
             item
             for item in all_items
-            if item.receipt_required and item.match_status == StatementMatchStatus.INFERRED
+            if item.receipt_required and item.effective_match_status == StatementMatchStatus.INFERRED
         ]
         unmatched_items = [
             item
             for item in all_items
-            if item.receipt_required and item.match_status == StatementMatchStatus.UNMATCHED
+            if item.receipt_required and item.effective_match_status == StatementMatchStatus.UNMATCHED
         ]
         review_items = [
             item
             for item in all_items
-            if item.receipt_required and item.match_status == StatementMatchStatus.NEEDS_REVIEW
+            if item.receipt_required and item.effective_match_status == StatementMatchStatus.NEEDS_REVIEW
         ]
         unused_receipts = list(statement.unmatched_receipt_components or [])
 
@@ -2228,6 +2228,15 @@ def global_statement_queryset(period_month):
     )
 
 
+def statement_display_stats(statements):
+    return {
+        "line_count": sum(statement.items.count() for statement in statements),
+        "unresolved_count": sum(statement.unresolved_count for statement in statements),
+        "review_count": sum(statement.manual_review_count for statement in statements),
+        "unused_receipt_count": sum(len(statement.unmatched_receipt_components or []) for statement in statements),
+    }
+
+
 @staff_member_required
 def staff_card_statements(request):
     selected_month, month_form = parse_statement_month_from_request(request)
@@ -2237,12 +2246,7 @@ def staff_card_statements(request):
     statement_queryset = global_statement_queryset(selected_month)
     statements = list(statement_queryset)
     result_filter_counts = prepare_statement_result_display(statements, result_filter)
-    stats = {
-        "line_count": sum(statement.items.count() for statement in statements),
-        "unresolved_count": sum(statement.unresolved_count for statement in statements),
-        "review_count": sum(statement.manual_review_count for statement in statements),
-        "unused_receipt_count": sum(len(statement.unmatched_receipt_components or []) for statement in statements),
-    }
+    stats = statement_display_stats(statements)
     return render(
         request,
         "receipts/staff_card_statements.html",
@@ -2294,9 +2298,9 @@ def staff_upload_card_statement(request):
         start_background_statement_processing(statement.pk)
         messages.success(
             request,
-            f"全ユーザー共通のご利用代金明細書をアップロードしました。AIで全明細行を抽出し、"
-            f"ご利用代金明細月 {selected_month:%Y年%m月} と同じ領収書発行月 "
-            f"{receipt_month_for_statement(selected_month):%Y年%m月} として登録された全ユーザー領収書と照合しています。",
+            f"明細書を受け付けました。選択した照合対象月は{selected_month:%Y年%m月}です。"
+            "これから利用明細の抽出と領収書照合を実行します。カードの支払月とは別に扱います。"
+            "完了後の結果を下欄に表示します。",
         )
     return redirect(f"{reverse('staff_card_statements')}?month={month_query(selected_month)}")
 
@@ -2326,7 +2330,8 @@ def staff_card_statement_status(request):
         request=request,
     )
     processing_count = sum(1 for statement in statements if statement.status == CardStatementStatus.PROCESSING)
-    return JsonResponse({"ok": True, "html": html, "processing_count": processing_count, "done": processing_count == 0})
+    return JsonResponse({"ok": True, "html": html, "processing_count": processing_count,
+                         "done": processing_count == 0, "stats": statement_display_stats(statements)})
 
 
 @staff_member_required

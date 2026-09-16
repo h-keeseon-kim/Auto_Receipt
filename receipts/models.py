@@ -1388,8 +1388,12 @@ class CardStatement(models.Model):
     content_type = models.CharField("Content-Type", max_length=120, blank=True)
     status = models.CharField("解析ステータス", max_length=20, choices=CardStatementStatus.choices, default=CardStatementStatus.PROCESSING)
     card_last4 = models.CharField("カード下4桁", max_length=4, blank=True)
-    statement_period = models.CharField("AI判定明細月", max_length=7, blank=True)
+    statement_period = models.CharField("利用日検証月", max_length=7, blank=True)
     payment_date = models.DateField("支払日", null=True, blank=True)
+    period_validation = models.JSONField(
+        "対象月の検証情報", default=dict, blank=True,
+        help_text="利用日による対象月検証と、支払日・元のAI判定・抽出メモを分離して保持します。",
+    )
     ai_admin_memo = models.TextField("AI管理者メモ", blank=True)
     unmatched_receipt_components = models.JSONField(
         "全明細で未消費の提出証拠",
@@ -1454,35 +1458,25 @@ class CardStatement(models.Model):
 
         return submission_month_for_receipt(self.period_month)
 
+    def _count_receipt_statuses(self, statuses) -> int:
+        return sum(1 for item in self.items.all()
+                   if item.receipt_required and item.effective_match_status in statuses)
+
     @property
     def missing_receipt_count(self) -> int:
-        return self.items.filter(
-            receipt_required=True,
-            match_status=StatementMatchStatus.UNMATCHED,
-        ).count()
+        return self._count_receipt_statuses({StatementMatchStatus.UNMATCHED})
 
     @property
     def unresolved_count(self) -> int:
-        """未一致と管理者確認前の推定対応をまとめた件数。"""
-
-        return self.items.filter(
-            receipt_required=True,
-            match_status__in=[StatementMatchStatus.UNMATCHED, StatementMatchStatus.INFERRED],
-        ).count()
+        return self._count_receipt_statuses({StatementMatchStatus.UNMATCHED, StatementMatchStatus.INFERRED})
 
     @property
     def manual_review_count(self) -> int:
-        return self.items.filter(
-            receipt_required=True,
-            match_status=StatementMatchStatus.NEEDS_REVIEW,
-        ).count()
+        return self._count_receipt_statuses({StatementMatchStatus.NEEDS_REVIEW})
 
     @property
     def inferred_count(self) -> int:
-        return self.items.filter(
-            receipt_required=True,
-            match_status=StatementMatchStatus.INFERRED,
-        ).count()
+        return self._count_receipt_statuses({StatementMatchStatus.INFERRED})
 
     def purge_file(self, reason: str = "expired") -> bool:
         if not self.file_available:
@@ -1553,6 +1547,10 @@ class CardStatementItem(models.Model):
         related_name="statement_items",
         verbose_name="一致領収書",
     )
+    submitter_candidates = models.JSONField(
+        "前月履歴による提出者候補", default=dict, blank=True,
+        help_text="前月履歴を参照した未確定の候補。今月の提出証拠・金額計算・使用済み台帳には使いません。",
+    )
     created_at = models.DateTimeField("作成日時", auto_now_add=True)
 
     class Meta:
@@ -1562,7 +1560,31 @@ class CardStatementItem(models.Model):
         verbose_name_plural = "カード明細項目"
 
     @property
+    def effective_match_status(self) -> str:
+        if not self.receipt_required:
+            return StatementMatchStatus.IGNORED
+        if self.match_status == StatementMatchStatus.MATCHED:
+            if self.match_reason_code == StatementMatchReason.PLAN_CHANGE_CONFIRMED:
+                # A confirmed inference is still not a submitted receipt.
+                return StatementMatchStatus.INFERRED
+            if not self.matched_receipt_id and not self.evidence_count:
+                return StatementMatchStatus.NEEDS_REVIEW
+        if self.match_status == StatementMatchStatus.AMBIGUOUS:
+            return StatementMatchStatus.NEEDS_REVIEW
+        return self.match_status
+
+    @property
+    def display_match_status(self) -> str:
+        if self.statement.status == CardStatementStatus.PROCESSING:
+            return "照合中"
+        return StatementMatchStatus(self.effective_match_status).label
+
+    @property
     def match_reason_label(self) -> str:
+        if self.statement.status == CardStatementStatus.PROCESSING:
+            return "領収書との照合中"
+        if self.match_status == StatementMatchStatus.MATCHED and self.effective_match_status == StatementMatchStatus.NEEDS_REVIEW:
+            return "証拠未確認・再照合が必要"
         try:
             return StatementMatchReason(self.match_reason_code).label
         except ValueError:
@@ -1572,13 +1594,15 @@ class CardStatementItem(models.Model):
     def receipt_status_label(self) -> str:
         if not self.receipt_required:
             return "対象外"
-        if self.match_status == StatementMatchStatus.MATCHED:
+        if self.statement.status == CardStatementStatus.PROCESSING:
+            return "照合中"
+        if self.effective_match_status == StatementMatchStatus.MATCHED:
             return "提出済み"
-        if self.match_status == StatementMatchStatus.INFERRED:
-            return "推定対応"
-        if self.match_status == StatementMatchStatus.NEEDS_REVIEW:
-            return "解析要確認"
-        return "未提出"
+        if self.effective_match_status == StatementMatchStatus.INFERRED:
+            return "推定対応（提出未確認）"
+        if self.effective_match_status == StatementMatchStatus.NEEDS_REVIEW:
+            return "照合要確認"
+        return "領収書未確認"
 
     @property
     def evidence_count(self) -> int:
@@ -1607,7 +1631,7 @@ class CardStatementItem(models.Model):
         for evidence in consuming:
             sign = "-" if evidence.role == StatementReceiptEvidenceRole.REFUND else ("+" if parts else "")
             amount = abs(evidence.signed_amount)
-            text = format(amount, "f").rstrip("0").rstrip(".") or "0"
+            text = (format(amount, "f").rstrip("0").rstrip(".") if "." in format(amount, "f") else format(amount, "f")) or "0"
             role_label = "返金" if evidence.role == StatementReceiptEvidenceRole.REFUND else "決済"
             parts.append(f"{sign}{text} {evidence.currency}（{role_label}・使用）")
 
@@ -1616,7 +1640,7 @@ class CardStatementItem(models.Model):
             statement_amount = self.original_amount if self.original_amount is not None else self.amount_jpy
             currency = self.original_currency or "JPY"
             total_text = (
-                format(statement_amount, "f").rstrip("0").rstrip(".")
+                (format(statement_amount, "f").rstrip("0").rstrip(".") if "." in format(statement_amount, "f") else format(statement_amount, "f"))
                 if statement_amount is not None
                 else "-"
             )
@@ -1626,7 +1650,7 @@ class CardStatementItem(models.Model):
             reference_parts = []
             for evidence in references:
                 amount = abs(evidence.signed_amount)
-                text = format(amount, "f").rstrip("0").rstrip(".") or "0"
+                text = (format(amount, "f").rstrip("0").rstrip(".") if "." in format(amount, "f") else format(amount, "f")) or "0"
                 role_label = "返金" if evidence.role == StatementReceiptEvidenceRole.REFUND else "決済"
                 reference_parts.append(f"{text} {evidence.currency}（{role_label}・参照のみ）")
             reference_text = "、".join(reference_parts)
@@ -1653,17 +1677,17 @@ class CardStatementItem(models.Model):
 
     @property
     def needs_highlight(self) -> bool:
-        return self.receipt_required and self.match_status == StatementMatchStatus.UNMATCHED
+        return self.receipt_required and self.effective_match_status == StatementMatchStatus.UNMATCHED
 
     @property
     def row_class(self) -> str:
-        if self.match_status == StatementMatchStatus.UNMATCHED and self.receipt_required:
+        if self.effective_match_status == StatementMatchStatus.UNMATCHED and self.receipt_required:
             return "statement-unmatched-row"
-        if self.match_status == StatementMatchStatus.INFERRED:
+        if self.effective_match_status == StatementMatchStatus.INFERRED:
             return "statement-inferred-row"
-        if self.match_status == StatementMatchStatus.NEEDS_REVIEW:
+        if self.effective_match_status == StatementMatchStatus.NEEDS_REVIEW:
             return "statement-review-row"
-        if self.match_status == StatementMatchStatus.IGNORED:
+        if self.effective_match_status == StatementMatchStatus.IGNORED:
             return "statement-ignored-row"
         return "statement-matched-row"
 
@@ -1852,7 +1876,7 @@ class CardStatementReceiptEvidence(models.Model):
     @property
     def amount_display(self) -> str:
         sign = "-" if self.signed_amount < 0 else "+"
-        text = format(abs(self.signed_amount), "f").rstrip("0").rstrip(".") or "0"
+        text = (format(abs(self.signed_amount), "f").rstrip("0").rstrip(".") if "." in format(abs(self.signed_amount), "f") else format(abs(self.signed_amount), "f")) or "0"
         return f"{sign}{text} {self.currency}"
 
     @property

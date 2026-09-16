@@ -181,5 +181,151 @@ class PlanChangeInferenceTests(unittest.TestCase):
         self.assertEqual(allocated["0343"].end_date_distance, 0)
 
 
+
+class PreviousMonthSubmitterTests(unittest.TestCase):
+    def history(self, user=1, day=11, amount="32000", merchant="GOOGLE_ONE", currency="JPY", **kwargs):
+        from .plan_change_matching import HistoricalSubmitterUsage
+        return HistoricalSubmitterUsage(user_id=user, user_label=f"user-{user}",
+            service_id=user, service_label="Example subscription", merchant_key=merchant,
+            event_date=date(2026, 7, day), amount=Decimal(amount), currency=currency,
+            receipt_id=user, filename=f"previous-{user}.pdf",
+            billing_type=kwargs.pop("billing_type", "subscription"), **kwargs)
+
+    def line(self, day=10, amount="32000", merchant="GOOGLE_PLAY", currency="JPY"):
+        return PlanStatementLine(key="current", transaction_date=date(2026, 8, day),
+            merchant_key=merchant, amount_options=(PlanAmountOption(Decimal(amount), currency),))
+
+    def suggest(self, history, line=None, **kwargs):
+        from .plan_change_matching import suggest_previous_month_submitters
+        return suggest_previous_month_submitters(line or self.line(), history, **kwargs)
+
+    def test_subscription_same_amount_near_monthly_day_is_strong_but_unconfirmed(self):
+        result = self.suggest([self.history()])
+        candidate = result["candidates"][0]
+        self.assertEqual(candidate["support_level"], 3)
+        self.assertEqual(candidate["date_distance"], 1)
+        self.assertIn("未確定", candidate["support_label"])
+        self.assertTrue(result["suggestion_only"])
+        self.assertFalse(result["consumes_receipts"])
+        self.assertTrue(candidate["reference_only"])
+
+    def test_near_billing_day_outranks_other_same_price_customer(self):
+        candidates = self.suggest([self.history(2, day=23), self.history(1)])["candidates"]
+        self.assertEqual(candidates[0]["user_id"], 1)
+        self.assertEqual(candidates[1]["support_level"], 1)
+
+    def test_equal_candidates_are_not_arbitrarily_resolved(self):
+        candidates = self.suggest([self.history(2), self.history(1)])["candidates"]
+        self.assertEqual(len(candidates), 2)
+        self.assertTrue(all(c["ambiguous"] for c in candidates))
+
+    def test_old_month_not_used_as_previous_month(self):
+        from dataclasses import replace
+        result = self.suggest([replace(self.history(), event_date=date(2026, 6, 11))])
+        self.assertEqual(result["candidates"], [])
+
+    def test_different_merchant_same_price_is_excluded(self):
+        self.assertEqual(self.suggest([self.history(merchant="GITHUB")])["candidates"], [])
+
+    def test_google_cloud_and_google_one_are_not_merged(self):
+        self.assertEqual(self.suggest([self.history(merchant="GOOGLE_CLOUD")])["candidates"], [])
+
+    def test_different_currency_is_not_converted_or_compared(self):
+        self.assertEqual(self.suggest([self.history(currency="USD")])["candidates"], [])
+
+    def test_metered_same_amount_is_only_reference(self):
+        h = self.history(amount="20", merchant="GROK", currency="USD", billing_type="metered")
+        c = self.suggest([h], self.line(amount="20", merchant="GROK", currency="USD"))["candidates"][0]
+        self.assertEqual(c["support_level"], 1)
+
+    def test_varying_metered_amount_needs_multiple_prior_events(self):
+        h = self.history(amount="20", merchant="GROK", currency="USD", billing_type="metered")
+        line = self.line(amount="35", merchant="GROK", currency="USD")
+        self.assertFalse(self.suggest([h], line)["candidates"])
+        from dataclasses import replace
+        second = replace(h, event_date=date(2026, 7, 13), receipt_id=2, source_key="different-event")
+        self.assertEqual(len(self.suggest([h, second], line)["candidates"]), 1)
+
+    def test_reuploaded_duplicate_does_not_count_as_multiple_events(self):
+        from dataclasses import replace
+        h = self.history(amount="20", merchant="GROK", currency="USD", billing_type="metered", source_key="one-event")
+        line = self.line(amount="35", merchant="GROK", currency="USD")
+        self.assertFalse(self.suggest([h, replace(h, receipt_id=99)], line)["candidates"])
+
+    def test_present_current_document_is_not_called_unsubmitted(self):
+        from dataclasses import replace
+        h = self.history()
+        current = replace(h, event_date=date(2026, 8, 11), receipt_id=11, filename="current.pdf")
+        c = self.suggest([h], current_charges=[current])["candidates"][0]
+        self.assertEqual(c["submission_state"], "uploaded_review")
+        self.assertEqual(c["current_receipts"][0]["receipt_id"], 11)
+
+    def test_another_users_document_does_not_hide_missing_candidate(self):
+        from dataclasses import replace
+        current = replace(self.history(2), event_date=date(2026, 8, 11))
+        c = self.suggest([self.history(1)], current_charges=[current])["candidates"][0]
+        self.assertEqual(c["submission_state"], "not_confirmed")
+
+    def test_other_current_top_up_does_not_imply_this_top_up_is_submitted(self):
+        from dataclasses import replace
+        current = replace(self.history(1), event_date=date(2026, 8, 25))
+        c = self.suggest([self.history(1)], current_charges=[current])["candidates"][0]
+        self.assertEqual(c["submission_state"], "not_confirmed")
+
+    def test_month_end_uses_clamped_calendar_date_not_30_days(self):
+        from dataclasses import replace
+        h = replace(self.history(), event_date=date(2028, 1, 31))
+        line = replace(self.line(), transaction_date=date(2028, 2, 29))
+        c = self.suggest([h], line)["candidates"][0]
+        self.assertEqual(c["date_distance"], 0)
+
+    def test_one_user_with_many_records_is_displayed_once(self):
+        self.assertEqual(len(self.suggest([self.history(), self.history(day=20)])["candidates"]), 1)
+
+    def test_limits_are_disclosed_instead_of_hiding_ambiguity(self):
+        result = self.suggest([self.history(i) for i in range(1, 8)])
+        self.assertEqual(result["total_candidates"], 7)
+        self.assertEqual(len(result["candidates"]), 5)
+        self.assertTrue(result["truncated"])
+        self.assertTrue(all(c["ambiguous"] for c in result["candidates"]))
+
+    def test_history_is_not_mutated_or_consumed_across_suggestions(self):
+        h = self.history()
+        first = self.suggest([h])
+        second = self.suggest([h])
+        self.assertEqual(first, second)
+        self.assertFalse(first["consumes_receipts"])
+
+    def test_amount_change_is_not_a_strong_candidate(self):
+        c = self.suggest([self.history(amount="35000")])["candidates"][0]
+        self.assertEqual(c["support_level"], 1)
+        self.assertTrue(any("金額が異なる" in r for r in c["reasons"]))
+
+    def test_non_finite_history_is_ignored(self):
+        self.assertEqual(self.suggest([self.history(amount="NaN")])["candidates"], [])
+
+    def test_negative_statement_amount_never_suggests_purchase_owner(self):
+        from dataclasses import replace
+        line = replace(self.line(), amount_options=(PlanAmountOption(Decimal("-32000"), "JPY"),))
+        self.assertEqual(self.suggest([self.history()], line)["candidates"], [])
+
+    def test_card_boundary_date_retains_original_document_date_and_source(self):
+        from dataclasses import replace
+        h = replace(self.history(), event_date=date(2026, 7, 1),
+                    historical_statement_id=10, historical_line_reference="PREV",
+                    document_event_date=date(2026, 6, 30), previously_matched=True)
+        line = replace(self.line(), transaction_date=date(2026, 8, 1))
+        c = self.suggest([h], line)["candidates"][0]
+        self.assertEqual(c["historical_document_date"], "2026-06-30")
+        self.assertEqual(c["historical_event_date"], "2026-07-01")
+        self.assertEqual(c["historical_statement_id"], 10)
+        self.assertEqual(c["support_level"], 3)
+
+    def test_non_finite_current_amount_is_not_proof_of_submission(self):
+        from dataclasses import replace
+        current = replace(self.history(amount="NaN"), event_date=date(2026, 8, 10))
+        c = self.suggest([self.history()], current_charges=[current])["candidates"][0]
+        self.assertEqual(c["submission_state"], "not_confirmed")
+
 if __name__ == "__main__":
     unittest.main()

@@ -59,18 +59,27 @@
         <div class="card"><span class="label">全明細で未消費の提出書類</span><strong class="{% if statement.unmatched_receipt_components %}warning{% endif %}">{{ statement.unmatched_receipt_components|length }}</strong></div>
     </section>
 
+    {% if statement.period_validation %}
+        <div class="message notice">照合対象月（利用分）: <strong>{{ statement.period_month|date:"Y-m" }}</strong> ／ カード支払日: <strong>{{ statement.payment_date|date:"Y-m-d"|default:"未確認" }}</strong> ／ 利用日による対象月検証: {% if statement.period_validation.valid %}確認済み{% else %}要確認{% endif %}</div>
+        {% if statement.period_validation.source_summary %}
+        <details class="muted small"><summary>AI抽出時のメモ（原文・未補正）を確認</summary>
+            <p>以下は抽出時の原文です。現在の月判定・提出状況は下の照合結果を参照してください。</p>
+            <p>{{ statement.period_validation.source_summary }}</p>
+        </details>
+        {% endif %}
+    {% endif %}
     {% if statement.ai_admin_memo %}
         <div class="message {% if statement.status == 'completed' %}success{% elif statement.status == 'processing' %}notice{% else %}error{% endif %}">{{ statement.ai_admin_memo }}</div>
     {% endif %}
 
     {% if statement.status == 'processing' %}
-        <div class="message notice processing-text">AIで全社明細の情報を抽出中です。完了した解析結果はこの画面へ自動反映されます。</div>
+        <div class="message notice processing-text">明細抽出・領収書照合中です。送信者・請求元を識別できても、証拠照合が完了するまでは提出済みとしません。完了後に件数と結果を更新します。</div>
     {% elif statement.items.count or statement.display_unused_receipts %}
         <div class="message notice statement-match-rule-notice">
             <strong>照合条件：</strong>
             通常取引は、金額・通貨完全一致、ご利用先・払先または本文上のサービス名の関連、明細利用日と領収書日付が±1日以内の候補を、明細全体で最大件数となるよう一対一割り当てします。前月利用行は前月の領収書も参照し、同一法人カード・同一請求元の返金は最大45日後まで厳密な金額一致で重複なく全体割り当てします。返品行は同日元決済と正味再計上を同一決済グループとして扱います。取引構成要素は再アップロード後も同一金融イベントとして識別し、<strong>金額計算に使用した構成要素は前月・翌月を含む他の明細では再使用しません。</strong>返品元確認などの参照だけは金額を消費せず、使用履歴と分けて保存します。
             法的な販売者名とサービス名は別に保持します。例えば「Google Asia Pacific Pte. Ltd.」が販売者でも、本文に「Google One」と明示されていればGoogle One明細として照合します。
-            通常照合では利用者の特定を判定条件に含めません。直接一致しない明細に限り、当月の契約変更書類にBill to利用者・旧プラン終了情報が明記され、過去領収書または前月カード明細の同一請求元・完全一致金額・請求周期が揃うときは「推定対応」として管理者確認に回します。前月カード明細は領収書提出の証拠ではなく、旧プランの定期請求実績を裏付ける補助証拠です。<strong>赤色は未一致、橙色は推定対応、黄色は提出ファイルの解析要確認です。</strong>
+            通常照合では利用者の特定を判定条件に含めません。直接一致しない明細に限り、当月の契約変更書類にBill to利用者・旧プラン終了情報が明記され、過去領収書または前月カード明細の同一請求元・完全一致金額・請求周期が揃うときは「推定対応」として管理者確認に回します。前月カード明細は領収書提出の証拠ではなく、旧プランの定期請求実績を裏付ける補助証拠です。前月履歴による提出者候補は参考情報として別欄に表示し、今月の提出済み判定や金額計算には使用しません。<strong>赤色は未一致、橙色は契約変更による推定対応、黄色は解析・照合要確認です。</strong>
         </div>
 
         {% if result_filter == 'unmatched' %}

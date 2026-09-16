@@ -1,5 +1,92 @@
 # Changelog
 
+## 1.16.6 — 利用月検証・提出者候補・表示整合性
+
+- 照合対象月とカード支払日を分離。AIの指示とサーバー側の利用日検証を統一。
+- 旧支払月判定の原文は監査メタデータへ保持し、保存済み利用行で再照合。選択月へ無条件には補正しない。
+- AIサービス分類を領収書一致として保存しない。証拠照合完了まで処理中を維持。
+- 画面・PDF・集計で同一の実効照合状態を使用。AJAX更新時に上部件数も更新。
+- 前月提出履歴から、根拠付きの未確定提出者候補を表示・保存。同額／周期・変動課金・同条件複数人・当月書類あり・停止状態を区別。
+- 候補は問い合わせ用参照であり、matched_user／matched_receipt／consume台帳を変更しない。
+- 月境界の前月領収書は、前月の直接照合済みカード利用日を周期の参考にでき、元の書類日も保持。
+- 既存の全期間二重消費防止、nullable関連のロック修正、URL/起動ファイル、ログ設定を維持。メール送信コード・Railway設定は変更なし。
+- 整数金額表示の末尾0が消える不具合も修正（220を22と表示しない）。
+- 必要な新規コードファイルはDB migration 0043の1件のみ。他は既存プログラム・テストへ追記。
+- 文書63件をREADME/CHANGELOGの2件へ集約。バージョン別MD・検証JSONの新設は行わない。
+
+### 今回の文書整理
+
+現行の運用・照合・デプロイ・検証手順をREADMEへ集約したうえで、以下の文書をパッケージから除外。
+既存リポジトリへの単純上書きでは削除されないため、資料を整理する際は次の**文書だけ**を削除する。
+プログラム・マイグレーション・設定ファイル・テスト・保存ファイルは削除対象ではない。
+
+- `BUILD_VALIDATION.md`
+- `RELEASE_NOTES_v1.16.2.md`
+- `RELEASE_NOTES_v1.16.3.md`
+- `RELEASE_NOTES_v1.16.4.md`
+- `RELEASE_NOTES_v1.16.5.md`
+- `docs/EMPIRICAL_AUDIT_2026-07.md`
+- `docs/FINAL_WORKFLOW_v1.0.0.md`
+- `docs/FINAL_WORKFLOW_v1.1.0.md`
+- `docs/FINAL_WORKFLOW_v1.1.1.md`
+- `docs/FINAL_WORKFLOW_v1.10.0.md`
+- `docs/FINAL_WORKFLOW_v1.10.1.md`
+- `docs/FINAL_WORKFLOW_v1.10.2.md`
+- `docs/FINAL_WORKFLOW_v1.10.3.md`
+- `docs/FINAL_WORKFLOW_v1.10.4.md`
+- `docs/FINAL_WORKFLOW_v1.11.0.md`
+- `docs/FINAL_WORKFLOW_v1.12.0.md`
+- `docs/FINAL_WORKFLOW_v1.13.0.md`
+- `docs/FINAL_WORKFLOW_v1.14.0.md`
+- `docs/FINAL_WORKFLOW_v1.14.1.md`
+- `docs/FINAL_WORKFLOW_v1.14.2.md`
+- `docs/FINAL_WORKFLOW_v1.15.0.md`
+- `docs/FINAL_WORKFLOW_v1.15.1.md`
+- `docs/FINAL_WORKFLOW_v1.15.2.md`
+- `docs/FINAL_WORKFLOW_v1.15.3.md`
+- `docs/FINAL_WORKFLOW_v1.15.4.md`
+- `docs/FINAL_WORKFLOW_v1.15.5.md`
+- `docs/FINAL_WORKFLOW_v1.16.0.md`
+- `docs/FINAL_WORKFLOW_v1.16.1.md`
+- `docs/FINAL_WORKFLOW_v1.16.2.md`
+- `docs/FINAL_WORKFLOW_v1.2.0.md`
+- `docs/FINAL_WORKFLOW_v1.3.0.md`
+- `docs/FINAL_WORKFLOW_v1.3.1.md`
+- `docs/FINAL_WORKFLOW_v1.4.0.md`
+- `docs/FINAL_WORKFLOW_v1.4.1.md`
+- `docs/FINAL_WORKFLOW_v1.4.2.md`
+- `docs/FINAL_WORKFLOW_v1.5.0.md`
+- `docs/FINAL_WORKFLOW_v1.5.1.md`
+- `docs/FINAL_WORKFLOW_v1.5.3.md`
+- `docs/FINAL_WORKFLOW_v1.5.4.md`
+- `docs/FINAL_WORKFLOW_v1.6.0.md`
+- `docs/FINAL_WORKFLOW_v1.7.0.md`
+- `docs/FINAL_WORKFLOW_v1.7.1.md`
+- `docs/FINAL_WORKFLOW_v1.7.2.md`
+- `docs/FINAL_WORKFLOW_v1.8.0.md`
+- `docs/FINAL_WORKFLOW_v1.8.1.md`
+- `docs/FINAL_WORKFLOW_v1.8.2.md`
+- `docs/FINAL_WORKFLOW_v1.8.3.md`
+- `docs/FINAL_WORKFLOW_v1.9.0.md`
+- `docs/FINAL_WORKFLOW_v1.9.1.md`
+- `docs/MATCHING_RULES_v1.12.0.md`
+- `docs/MATCHING_RULES_v1.13.0.md`
+- `docs/MATCHING_RULES_v1.14.0.md`
+- `docs/MATCHING_RULES_v1.14.1.md`
+- `docs/MATCHING_RULES_v1.15.0.md`
+- `docs/MATCHING_RULES_v1.15.1.md`
+- `docs/MATCHING_RULES_v1.15.5.md`
+- `docs/MATCHING_RULES_v1.16.0.md`
+- `docs/MATCHING_RULES_v1.16.1.md`
+- `docs/MATCHING_RULES_v1.16.2.md`
+- `docs/RAILWAY_HEALTHCHECK_v1.16.3.md`
+- `docs/RAILWAY_PREDEPLOY_URL_FIX_v1.16.4.md`
+
+## 過去の変更履歴
+
+以下は過去バージョン当時の記録です。旧仕様書名への言及があっても、現在の仕様・操作はREADMEを参照してください。
+
+
 ## v1.16.5
 
 - PostgreSQL nullable receipt JOINとSELECT FOR UPDATEの併用を2か所で解消。

@@ -2591,3 +2591,7 @@ body.tutorial-open { overflow-x: hidden; }
         text-align: left;
     }
 }
+
+.statement-submitter-candidates { margin-top: 1rem; border-top: 1px solid #dfe3eb; }
+.statement-submitter-candidate + .statement-submitter-candidate { margin-top: .8rem; padding-top: .8rem; border-top: 1px dashed #dfe3eb; }
+.statement-submitter-candidate p { overflow-wrap: anywhere; }
