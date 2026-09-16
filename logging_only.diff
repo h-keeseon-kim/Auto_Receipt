@@ -1,0 +1,42 @@
+--- a/auto_receipt/settings.py
++++ b/auto_receipt/settings.py
+@@ -191,3 +191,39 @@
+     SESSION_COOKIE_HTTPONLY = True
+     CSRF_COOKIE_HTTPONLY = False
+     X_FRAME_OPTIONS = "DENY"
++
++
++# Production error visibility. Keep DEBUG=False on Railway.
++# Gunicorn access logs record HTTP status codes, but Django handles request
++# exceptions itself. Send those exceptions to stderr so Railway captures them.
++# This formatter does not dump request bodies, cookies, settings, or locals.
++# Exception messages can still contain sensitive data: review before sharing.
++LOGGING = {
++    "version": 1,
++    "disable_existing_loggers": False,
++    "formatters": {
++        "railway_error": {
++            "format": "%(asctime)s [%(levelname)s] %(name)s: %(message)s",
++        },
++    },
++    "handlers": {
++        "railway_error_console": {
++            "class": "logging.StreamHandler",
++            "level": "ERROR",
++            "stream": "ext://sys.stderr",
++            "formatter": "railway_error",
++        },
++    },
++    "loggers": {
++        "django.request": {
++            "handlers": ["railway_error_console"],
++            "level": "ERROR",
++            "propagate": False,
++        },
++        "receipts": {
++            "handlers": ["railway_error_console"],
++            "level": "ERROR",
++            "propagate": False,
++        },
++    },
++}

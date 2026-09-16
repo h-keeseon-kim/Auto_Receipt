@@ -1,0 +1,17 @@
+{
+  "base_version": "1.16.4",
+  "base_settings_git_blob_sha": "b808340fa1acd57010445f1f92e19781504d6450",
+  "changed_application_files": [
+    "auto_receipt/settings.py"
+  ],
+  "change_scope": "Append LOGGING only; no business logic, schema, startup, or DEBUG changes",
+  "python_syntax": "passed",
+  "stdlib_logging_exception_to_stderr": "passed",
+  "exception_emitted_once": "passed",
+  "request_extra_not_dumped": "passed",
+  "info_messages_not_emitted": "passed",
+  "receipts_namespace_error_logged": "passed",
+  "django_integration_test": "not run; Django unavailable and dependency installation failed",
+  "railway_deployment": "not run",
+  "production_500_root_cause": "not yet confirmed"
+}
