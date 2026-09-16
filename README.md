@@ -1,3 +1,7 @@
+# v1.16.5: ご利用代金明細500修正
+
+適用方法と検証範囲は `RELEASE_NOTES_v1.16.5.md` を参照してください。
+
 # ReceiptHub
 
 ## Railway v1.16.4 deployment

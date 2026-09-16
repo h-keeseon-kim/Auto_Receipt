@@ -797,7 +797,10 @@ def _backfill_missing_evidence_fingerprints() -> int:
     rows = list(
         CardStatementReceiptEvidence.objects.select_for_update()
         .filter(component_fingerprint="")
-        .select_related("receipt", "statement_item__statement")
+        .select_related("statement_item__statement")
+        # Nullable receipts must not join the SELECT FOR UPDATE query.
+        # Prefetch keeps missing-receipt history and the evidence/item/statement locks.
+        .prefetch_related("receipt")
         .order_by(
             "statement_item__statement__period_month",
             "statement_item__statement__uploaded_at",
@@ -991,7 +994,9 @@ def _partition_global_consume_ownership(
         CardStatementReceiptEvidence.objects.select_for_update()
         .filter(usage_mode=StatementReceiptEvidenceUsageMode.CONSUME)
         .exclude(component_fingerprint="")
-        .select_related("statement_item__statement", "receipt")
+        .select_related("statement_item__statement")
+        # The receipt FK is nullable (SET_NULL); read it separately from locked rows.
+        .prefetch_related("receipt")
         .order_by(
             "statement_item__statement__period_month",
             "statement_item__statement__uploaded_at",

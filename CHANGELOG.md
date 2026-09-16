@@ -1,5 +1,12 @@
 # Changelog
 
+## v1.16.5
+
+- PostgreSQL nullable receipt JOINとSELECT FOR UPDATEの併用を2か所で解消。
+- ロック・全期間の使用済み制約を維持し、receiptは別クエリでprefetch。
+- クエリ構造回帰テスト8件とDB回帰テスト6件（本ビルドでは未実行）を追加。
+
+
 ## v1.16.4
 
 - `staff_start_receipt_ai_processing`を復元し、単票AI検査・明示的再解析を再有効化。
