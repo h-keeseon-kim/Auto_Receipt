@@ -385,6 +385,8 @@ KNOWN_SERVICE_LABEL_PATTERNS: tuple[tuple[str, str], ...] = (
     ("Suno", r"\bSuno\b"),
     ("Grok", r"\bGrok\b"),
     ("Figma", r"\bFigma\b"),
+    ("Runway", r"\bRunway(?:ML)?\b"),
+    ("Higgsfield", r"\bHiggsfield\b"),
 )
 
 
@@ -655,7 +657,7 @@ def _extract_financial_references(text: str) -> tuple[str, str]:
         text,
         (
             r"^[ \t]*Transaction[ \t]+ID[ \t]*[:：]?[ \t]*([^\s]+)",
-            r"^[ \t]*Invoice[ \t]+(?:number|#|reference)[ \t]*[:：]?[ \t]*([^\s]+)",
+            r"^[ \t]*Invoice[ \t]+(?:number|#|reference)[ \t]*[:：]?[ \t]*(?:\r?\n[ \t]*)?([^\s]+)",
             r"^[ \t]*Reference[ \t]+number[ \t]*[:：]?[ \t]*([^\s]+)",
             r"^[ \t]*Receipt[ \t]+number[ \t]*[:：]?[ \t]*([^\s]+)",
             r"^[ \t]*請求書番号[ \t]*[:：]?[ \t]*([^\s]+)",
@@ -703,7 +705,7 @@ def _extract_invoice_number(text: str) -> str:
     return _extract_reference(
         text,
         (
-            r"^[ \t]*Invoice[ \t]+(?:number|#|reference)[ \t]*[:：]?[ \t]*([^\s]+)",
+            r"^[ \t]*Invoice[ \t]+(?:number|#|reference)[ \t]*[:：]?[ \t]*(?:\r?\n[ \t]*)?([^\s]+)",
             r"^[ \t]*請求書番号[ \t]*[:：]?[ \t]*([^\s]+)",
         ),
     )
@@ -769,6 +771,95 @@ def _extract_payment_history_component(text: str, *, payee: str, invoice_number:
     return None
 
 
+
+FINANCIAL_METADATA_VERSION = 3
+
+
+def _parse_charged_conversion(source: str) -> tuple[Decimal, str, str] | None:
+    """Parse the paid amount literally printed after Charged, not a tax FX note."""
+    normalized = unicodedata.normalize("NFKC", str(source or ""))
+    pattern = (
+        rf"^\s*Charged\s+(?P<token>{_CURRENCY_TOKEN_PATTERN})\s*"
+        rf"(?P<amount>{_AMOUNT_TOKEN_PATTERN})\s+using\s+1(?:\.0+)?\s+"
+        rf"(?P<source>[A-Z]{{3}})\s*=\s*(?P<rate>\d+(?:\.\d+)?)\s+"
+        rf"(?P<target>[A-Z]{{3}})\s*$"
+    )
+    match = re.fullmatch(pattern, normalized, flags=re.I)
+    if not match:
+        return None
+    amount = parse_signed_amount(match.group("amount"))
+    currency = _normalize_currency_token(match.group("token"))
+    target = match.group("target").upper()
+    original_currency = match.group("source").upper()
+    if (amount is None or amount <= 0 or currency != target
+            or original_currency not in _CURRENCY_CODES or target not in _CURRENCY_CODES
+            or target == original_currency or Decimal(match.group("rate")) <= 0):
+        return None
+    return amount, currency, original_currency
+
+
+def normalize_documented_amount_options(values: Any, *, original_currency: str) -> list[dict[str, str]]:
+    """Keep only literal, independently checkable settlement amounts for one event."""
+    options: list[dict[str, str]] = []
+    if not isinstance(values, (list, tuple)):
+        return options
+    seen: set[tuple[str, str]] = set()
+    for raw in values:
+        if not isinstance(raw, dict) or raw.get("basis") != "receipt_charged":
+            continue
+        source = str(raw.get("source_text") or "").strip()
+        parsed = _parse_charged_conversion(source)
+        if parsed is None:
+            continue
+        amount, currency, source_currency = parsed
+        if (source_currency != original_currency.upper()
+                or parse_signed_amount(raw.get("amount")) != amount
+                or str(raw.get("currency") or "").upper() != currency):
+            continue
+        key = (format(amount, "f"), currency)
+        if key not in seen:
+            seen.add(key)
+            options.append({"amount": key[0], "currency": currency,
+                            "basis": "receipt_charged", "source_text": source[:300]})
+    return options
+
+
+def _attach_documented_charge_amounts(text: str, components: list[dict[str, Any]]) -> None:
+    """USD and the Charged JPY line are alternatives, never two payments.
+
+    Limit to a single unambiguous payment-history row. Multiple payments need a
+    row-level association and must not inherit a document-wide conversion.
+    """
+    if not re.search(r"(?i)payment\s+history", text):
+        return
+    section = re.split(r"(?i)payment\s+history", text, maxsplit=1)[1]
+    charges = [component for component in components if component.get("role") == "charge"]
+    conversions = list(re.finditer(r"(?im)^\s*Charged[^\n]*(?:\n[ \t]*using[^\n]*)?", section))
+    dates = list(re.finditer(
+        r"(?i)(?:January|February|March|April|May|June|July|August|September|October|November|December)"
+        r"\s+\d{1,2},?\s+20\d{2}", section))
+    if len(charges) != 1 or len(conversions) != 1 or len(dates) != 1:
+        return
+    charge = charges[0]
+    if _parse_labeled_date_value(dates[0].group(0)) != parse_iso_date(charge.get("transaction_date")):
+        return
+    source = re.sub(r"\s+", " ", conversions[0].group(0)).strip()
+    parsed = _parse_charged_conversion(source)
+    if parsed is None or parsed[2] != charge.get("currency"):
+        return
+    # The primary amount must also occur literally in the payment-history row.
+    primary_amount = parse_signed_amount(charge.get("signed_amount"))
+    primary_currency = charge.get("currency")
+    money_tokens = re.finditer(
+        rf"(?P<currency>{_CURRENCY_TOKEN_PATTERN})\s*(?P<amount>{_AMOUNT_TOKEN_PATTERN})", section,
+        flags=re.I,
+    )
+    if not any(_normalize_currency_token(m.group("currency")) == primary_currency
+               and parse_signed_amount(m.group("amount")) == primary_amount for m in money_tokens):
+        return
+    charge["amount_options"] = [{"amount": format(parsed[0], "f"), "currency": parsed[1],
+                                  "basis": "receipt_charged", "source_text": source}]
+
 def _build_fallback_transaction_components(
     *,
     text: str,
@@ -824,6 +915,9 @@ def _build_fallback_transaction_components(
                 "confidence": 0.96,
             }
         )
+    _attach_documented_charge_amounts(text, components)
+    for component in components:
+        component["metadata_version"] = FINANCIAL_METADATA_VERSION
     return tuple(components)
 
 
@@ -885,6 +979,11 @@ def normalize_transaction_components(
                 "source_label": str(raw.get("source_label") or "").strip()[:120],
                 "confidence": confidence,
                 "document_kind": str(raw.get("document_kind") or fallback_kind).strip().lower(),
+                "amount_options": normalize_documented_amount_options(
+                    raw.get("amount_options"), original_currency=currency,
+                ),
+                "metadata_version": FINANCIAL_METADATA_VERSION if raw.get("metadata_version") == FINANCIAL_METADATA_VERSION else 0,
+
             }
         )
     return tuple(normalized)
@@ -1079,10 +1178,48 @@ def merge_payload_with_text_fallback(
             )
 
         combined = [dict(component) for component in existing_components]
+        # A literal single-payment Charged line represents the same event in a
+        # second currency. A model may have emitted the two currencies as two
+        # rows; replace those rows with one documentary event, never add them.
+        for literal in fallback_components:
+            options = literal.get("amount_options") or []
+            if literal.get("role") != "charge" or not options:
+                continue
+            money = {(parse_signed_amount(literal.get("signed_amount")), literal.get("currency"))}
+            money.update((parse_signed_amount(option.get("amount")), option.get("currency"))
+                         for option in options)
+            invoice = re.sub(r"[^A-Za-z0-9]", "", str(literal.get("invoice_number") or "").upper())
+            literal_payee = _normalized_relation_text(str(literal.get("payee") or ""))
+            kept = []
+            for existing in combined:
+                existing_invoice = re.sub(r"[^A-Za-z0-9]", "", str(existing.get("invoice_number") or "").upper())
+                existing_payee = _normalized_relation_text(str(existing.get("payee") or ""))
+                same_invoice = bool(invoice and existing_invoice == invoice)
+                payee_compatible = (not existing_payee or not literal_payee
+                                    or existing_payee in literal_payee or literal_payee in existing_payee)
+                same_payment = (
+                    existing.get("role") == "charge"
+                    and existing.get("transaction_date") == literal.get("transaction_date")
+                    and (parse_signed_amount(existing.get("signed_amount")), existing.get("currency")) in money
+                    and (same_invoice or not existing_invoice)
+                    and payee_compatible
+                )
+                if same_payment:
+                    fallback_used = True
+                else:
+                    kept.append(existing)
+            combined = kept
         seen = {component_identity(component) for component in combined}
         for component in fallback_components:
             identity = component_identity(component)
             if identity in seen:
+                for position, existing in enumerate(combined):
+                    if component_identity(existing) == identity:
+                        # Literal financial references and settlement evidence take
+                        # precedence for the same event; do not lose amount_options.
+                        combined[position] = {**existing, **component}
+                        fallback_used = True
+                        break
                 continue
             combined.append(dict(component))
             seen.add(identity)
@@ -1097,6 +1234,10 @@ def merge_payload_with_text_fallback(
         )
         fallback_used = True
 
+    if (str(merged.get("service_label") or "").strip().lower()
+            in {"pro", "standard", "premium", "starter"} and fallback.service_label):
+        merged["service_label"] = fallback.service_label
+        fallback_used = True
     service_label_value = normalize_service_label(
         str(merged.get("service_label") or fallback.service_label or "")
     )

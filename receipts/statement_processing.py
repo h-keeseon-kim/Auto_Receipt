@@ -13,11 +13,14 @@ from typing import Any
 
 from django.conf import settings
 from django.contrib.auth import get_user_model
-from django.db import IntegrityError, close_old_connections, transaction
+from django.db import IntegrityError, close_old_connections, connection, transaction
 from django.db.models import Q
 from django.utils import timezone
 
-from .ai_filename import extract_embedded_pdf_text, extract_receipt_text_fallback
+from .ai_filename import (
+    extract_embedded_pdf_text, extract_receipt_text_fallback,
+    FINANCIAL_METADATA_VERSION, normalize_documented_amount_options,
+)
 from .models import (
     CardStatement,
     CardStatementItem,
@@ -77,6 +80,9 @@ from .statement_matching import (
     USAGE_MODE_REFERENCE,
     StatementLine,
     format_evidence_calculation,
+    evidence_amount_options,
+    matching_amount_pair,
+    component_relevant_to_statement,
     merchant_keys_compatible,
     reconcile_statement,
 )
@@ -162,6 +168,8 @@ KNOWN_MERCHANT_PATTERNS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("SUNO", ("SUNO",)),
     ("GROK", ("GROK", "XAI")),
     ("FIGMA", ("FIGMA",)),
+    ("HIGGSFIELD", ("HIGGSFIELD",)),
+    ("RUNWAY", ("RUNWAY",)),
 )
 
 
@@ -523,6 +531,9 @@ def _enrich_receipt_financial_metadata(receipt: Receipt) -> None:
     if (
         receipt.financial_metadata_checked_at is not None
         and receipt.plan_change_metadata_checked_at is not None
+        and receipt.financial_transaction_components
+        and all(isinstance(raw, dict) and raw.get("metadata_version") == FINANCIAL_METADATA_VERSION
+                for raw in receipt.financial_transaction_components)
     ):
         return
 
@@ -560,7 +571,10 @@ def _enrich_receipt_financial_metadata(receipt: Receipt) -> None:
         if fallback.payee and not receipt.ai_extracted_payee:
             receipt.ai_extracted_payee = fallback.payee[:160]
             update_fields.append("ai_extracted_payee")
-        if fallback.service_label and not receipt.ai_extracted_service_label:
+        if fallback.service_label and (
+            not receipt.ai_extracted_service_label
+            or receipt.ai_extracted_service_label.strip().lower() in {"pro", "standard", "premium", "starter"}
+        ):
             receipt.ai_extracted_service_label = fallback.service_label[:160]
             update_fields.append("ai_extracted_service_label")
         if fallback.plan_name and not receipt.ai_extracted_plan_name:
@@ -599,6 +613,15 @@ def _enrich_receipt_financial_metadata(receipt: Receipt) -> None:
                 "confidence": 0.7,
                 "document_kind": receipt.financial_document_kind,
             }
+        ]
+        update_fields.append("financial_transaction_components")
+
+    # JSON-local versioning forces one literal re-read of already parsed PDFs
+    # after this upgrade, without a new table/column or paid AI reprocessing.
+    if receipt.financial_transaction_components:
+        receipt.financial_transaction_components = [
+            {**raw, "metadata_version": FINANCIAL_METADATA_VERSION}
+            for raw in receipt.financial_transaction_components if isinstance(raw, dict)
         ]
         update_fields.append("financial_transaction_components")
 
@@ -678,26 +701,68 @@ def _component_fingerprint_for_receipt(
 
 def _evidence_component_fingerprint(evidence: CardStatementReceiptEvidence) -> str:
     receipt = evidence.receipt
-    file_sha256 = _ensure_receipt_file_sha256(receipt) if receipt is not None else ""
     merchant_key = (
         _known_merchant_key(evidence.service_label_snapshot)
         or _known_merchant_key(evidence.payee_snapshot)
     )
+    if receipt is not None:
+        _enrich_receipt_financial_metadata(receipt)
+        candidates = []
+        for raw in receipt.financial_transaction_components or []:
+            if not isinstance(raw, dict) or str(raw.get("role") or ROLE_CHARGE) != evidence.role:
+                continue
+            amount = _parse_decimal(raw.get("signed_amount"))
+            currency = str(raw.get("currency") or "").upper()
+            if amount is None:
+                continue
+            amount = -abs(amount) if evidence.role == ROLE_REFUND else abs(amount)
+            options = [(amount, currency)]
+            options.extend((Decimal(option["amount"]), option["currency"])
+                           for option in normalize_documented_amount_options(
+                               raw.get("amount_options"), original_currency=currency))
+            if (evidence.signed_amount, evidence.currency) not in options:
+                continue
+            raw_merchant = (_known_merchant_key(str(raw.get("service_label") or ""))
+                            or _known_merchant_key(str(raw.get("payee") or "")))
+            if merchant_key and raw_merchant and merchant_key != raw_merchant:
+                continue
+            old_invoice = re.sub(r"[^A-Z0-9]", "", (evidence.invoice_number_snapshot or "").upper())
+            invoice = str(raw.get("invoice_number") or "")
+            raw_invoice = re.sub(r"[^A-Z0-9]", "", invoice.upper())
+            if old_invoice and raw_invoice and old_invoice != raw_invoice:
+                continue
+            event_date = _parse_date(raw.get("transaction_date"))
+            # Same invoice identifies a charge even when invoice/payment dates
+            # differ; refunds still require the actual refund event date.
+            if not (evidence.role == ROLE_CHARGE and old_invoice and old_invoice == raw_invoice):
+                if event_date is None or event_date != evidence.event_date:
+                    continue
+            if not (invoice or raw.get("transaction_id")):
+                continue
+            fingerprint = _component_fingerprint_for_receipt(
+                receipt, raw_key=str(raw.get("component_key") or ""),
+                merchant_key=raw_merchant or merchant_key,
+                payee=str(raw.get("payee") or evidence.payee_snapshot),
+                role=evidence.role, amount=amount, currency=currency, event_date=event_date,
+                invoice_number=invoice, transaction_id=str(raw.get("transaction_id") or ""),
+                related_transaction_id=str(raw.get("related_transaction_id") or ""),
+            )
+            candidates.append(fingerprint)
+        if len(set(candidates)) == 1:
+            return candidates[0]
+    file_sha256 = _ensure_receipt_file_sha256(receipt) if receipt is not None else ""
+    if not (evidence.invoice_number_snapshot or evidence.transaction_reference_snapshot
+            or evidence.related_transaction_reference_snapshot or file_sha256):
+        # Without new documentary identity, preserve the existing consume lock.
+        return evidence.component_fingerprint or ""
     return component_fingerprint(
-        merchant_key=merchant_key,
-        payee=evidence.payee_snapshot,
-        role=evidence.role,
-        signed_amount=evidence.signed_amount,
-        currency=evidence.currency,
-        event_date=evidence.event_date,
-        invoice_number=evidence.invoice_number_snapshot,
+        merchant_key=merchant_key, payee=evidence.payee_snapshot, role=evidence.role,
+        signed_amount=evidence.signed_amount, currency=evidence.currency,
+        event_date=evidence.event_date, invoice_number=evidence.invoice_number_snapshot,
         transaction_id=evidence.transaction_reference_snapshot,
         related_transaction_id=evidence.related_transaction_reference_snapshot,
         file_sha256=file_sha256,
-        source_component_key=source_component_key(
-            evidence.component_key,
-            evidence.receipt_id,
-        ),
+        source_component_key=source_component_key(evidence.component_key, evidence.receipt_id),
         receipt_id=evidence.receipt_id,
     )
 
@@ -815,7 +880,6 @@ def _backfill_missing_evidence_fingerprints() -> int:
 
     rows = list(
         CardStatementReceiptEvidence.objects.select_for_update()
-        .filter(component_fingerprint="")
         .select_related("statement_item__statement")
         # Nullable receipts must not join the SELECT FOR UPDATE query.
         # Prefetch keeps missing-receipt history and the evidence/item/statement locks.
@@ -828,6 +892,9 @@ def _backfill_missing_evidence_fingerprints() -> int:
             "pk",
         )
     )
+    # Prefetched receipt instances are not necessarily shared by Django.
+    # Reuse them to avoid re-opening one PDF for each of its evidence rows.
+    enriched_receipts: dict[int, Receipt] = {}
     updated = 0
     cleared_item_ids: set[int] = set()
     for evidence in rows:
@@ -835,8 +902,13 @@ def _backfill_missing_evidence_fingerprints() -> int:
             continue
         if not CardStatementReceiptEvidence.objects.filter(pk=evidence.pk).exists():
             continue
+        if evidence.receipt_id and evidence.receipt is not None:
+            if evidence.receipt_id in enriched_receipts:
+                evidence.receipt = enriched_receipts[evidence.receipt_id]
+            else:
+                enriched_receipts[evidence.receipt_id] = evidence.receipt
         fingerprint = _evidence_component_fingerprint(evidence)
-        if not fingerprint:
+        if not fingerprint or fingerprint == evidence.component_fingerprint:
             continue
 
         usage_mode = evidence.usage_mode or StatementReceiptEvidenceUsageMode.CONSUME
@@ -1293,6 +1365,12 @@ def _receipt_components(
                     payee=evidence_payee[:160],
                     service_label=service_label[:160],
                     fingerprint=fingerprint,
+                    amount_options=tuple(
+                        AmountOption(Decimal(option["amount"]), option["currency"], option["basis"])
+                        for option in normalize_documented_amount_options(
+                            raw.get("amount_options"), original_currency=currency,
+                        )
+                    ),
                 )
             )
             valid_count += 1
@@ -1847,6 +1925,10 @@ def _match_type_label(match_type: str) -> str:
 
 
 def _target_amount_option(line: StatementLine, components: list[EvidenceComponent]) -> AmountOption | None:
+    if len(components) == 1:
+        pair = matching_amount_pair(line, components[0])
+        if pair is not None:
+            return pair[0]
     total = sum((component.signed_amount for component in components), Decimal("0"))
     currency = components[0].currency if components else ""
     return next((option for option in line.amount_options if option.currency == currency and option.amount == total), None)
@@ -1862,6 +1944,14 @@ def _create_evidence_records(
     records: list[CardStatementReceiptEvidence] = []
     for sequence, component in enumerate(components, start=1):
         receipt = receipt_by_id.get(component.receipt_id)
+        source_label = component.source_label
+        if len(components) == 1:
+            target = _target_amount_option(_statement_line(item, []), components)
+            if target is not None and target.currency != component.currency:
+                source_label = (
+                    f"領収書記載の決済額: {target.amount} {target.currency}"
+                    f"（元表示 {component.signed_amount} {component.currency}）"
+                )
         records.append(
             CardStatementReceiptEvidence(
                 statement_item=item,
@@ -1889,7 +1979,7 @@ def _create_evidence_records(
                 invoice_number_snapshot=component.invoice_number[:160],
                 transaction_reference_snapshot=component.transaction_id[:160],
                 related_transaction_reference_snapshot=component.related_transaction_id[:160],
-                source_label=component.source_label[:120],
+                source_label=source_label[:120],
             )
         )
     return records
@@ -1931,8 +2021,7 @@ def _shortage_note(
         for component in components
         if component.role == ROLE_CHARGE
         and merchant_keys_compatible(line.merchant_key, component.merchant_key)
-        and component.currency == option.currency
-        and component.signed_amount == option.amount
+        and matching_amount_pair(line, component) is not None
     )
     if same_lines > 1 and support < same_lines:
         return (
@@ -1974,12 +2063,13 @@ def _unused_component_reason(
     amount_compatible: list[tuple[StatementLine, AmountOption]] = []
     same_currency: list[tuple[StatementLine, AmountOption]] = []
     for line in merchant_lines:
-        option = _line_amount_for_currency(line, component.currency)
-        if option is None:
-            continue
-        same_currency.append((line, option))
-        if option.amount == component.signed_amount:
-            amount_compatible.append((line, option))
+        pair = matching_amount_pair(line, component)
+        if pair is not None:
+            amount_compatible.append((line, pair[0]))
+        for receipt_option in evidence_amount_options(component):
+            option = _line_amount_for_currency(line, receipt_option.currency)
+            if option is not None:
+                same_currency.append((line, option))
 
     def date_distance(line: StatementLine) -> int:
         if line.transaction_date and component.event_date:
@@ -2067,6 +2157,7 @@ def _build_unmatched_receipt_snapshot(
     global_usage_history: dict[str, list[dict[str, Any]]],
     global_reference_history: dict[str, list[dict[str, Any]]],
     current_component_usage: dict[str, list[dict[str, Any]]],
+    target_month: date | None = None,
 ) -> list[dict[str, Any]]:
     """Build one row per PDF that still has a globally unconsumed component.
 
@@ -2110,7 +2201,7 @@ def _build_unmatched_receipt_snapshot(
                 "available": False,
                 "used_in": [*current_consumes, *current_references],
             }
-        if current_references:
+        if current_references and not global_usage_history.get(component.fingerprint):
             return {
                 "status": "current_reference",
                 "status_label": "今回明細で参照（未消費）",
@@ -2124,12 +2215,12 @@ def _build_unmatched_receipt_snapshot(
         if history:
             return {
                 "status": "past_consumed",
-                "status_label": "他の明細で金額計算に使用済み",
+                "status_label": "他の明細で金額計算に使用済み" + ("・今回は参照のみ" if current_references else ""),
                 "usage_mode": USAGE_MODE_CONSUME,
                 "consumed": True,
-                "referenced": False,
+                "referenced": bool(current_references),
                 "available": False,
-                "used_in": history,
+                "used_in": [*history, *current_references],
             }
         reference_history = (
             global_reference_history.get(component.fingerprint, [])
@@ -2184,8 +2275,14 @@ def _build_unmatched_receipt_snapshot(
                 component.key,
             ),
         )
+        relevant_unused = [
+            component for component in receipt_unused_components
+            if target_month is None or component_relevant_to_statement(component, target_month, lines)
+        ]
+        if not relevant_unused:
+            continue
         ordered_unused = sorted(
-            receipt_unused_components,
+            relevant_unused,
             key=lambda component: (
                 0 if component.role == ROLE_REFUND else 1,
                 component.event_date or date.min,
@@ -2658,11 +2755,29 @@ def _reconcile_card_statement_items_impl(
                 ),
             )
         else:
-            _mark_unmatched(
-                item,
-                base_memo=_base_match_memo(item.match_memo),
-                reason=_shortage_note(item, items, list(component_by_key.values()), catalogs),
-            )
+            currency_candidates = [
+                component for component in component_by_key.values()
+                if component.key in reconciliation.unused_component_keys
+                and component.role == ROLE_CHARGE
+                and merchant_keys_compatible(line.merchant_key, component.merchant_key)
+                and component.event_date and line.transaction_date
+                and abs((component.event_date - line.transaction_date).days) <= DATE_MATCH_TOLERANCE_DAYS
+                and not ({option.currency for option in line.amount_options}
+                         & {option.currency for option in evidence_amount_options(component)})
+            ]
+            if currency_candidates:
+                receipt = receipt_by_id.get(currency_candidates[0].receipt_id) if len(currency_candidates) == 1 else None
+                _mark_review(
+                    item, receipt, base_memo=_base_match_memo(item.match_memo),
+                    reason=("同じ請求元・近接日付の提出書類はありますが、明細と共通する決済通貨・金額を"
+                            "確認できません。未提出ではなく、決済通貨の確認が必要です。推測換算で一致にはしません。"),
+                )
+            else:
+                _mark_unmatched(
+                    item,
+                    base_memo=_base_match_memo(item.match_memo),
+                    reason=_shortage_note(item, items, list(component_by_key.values()), catalogs),
+                )
 
     used_receipt_ids = {
         component.receipt_id
@@ -2700,6 +2815,7 @@ def _reconcile_card_statement_items_impl(
         global_usage_history=global_usage_history,
         global_reference_history=global_reference_history,
         current_component_usage=current_component_usage,
+        target_month=statement.period_month,
     )
 
     _attach_previous_month_submitter_candidates(
@@ -2887,6 +3003,19 @@ def _reconcile_card_statement_items_impl(
     return statement
 
 
+def _lock_component_ledger_for_reconciliation() -> None:
+    """Serialize cross-month identity repair before acquiring any row locks.
+
+    Reconciliation can update evidence owned by another statement. A single
+    transaction-scoped PostgreSQL lock prevents two month jobs from taking
+    statement/receipt/evidence locks in opposite order. SQLite development
+    databases retain their normal transaction behavior.
+    """
+    if connection.vendor == "postgresql":
+        with connection.cursor() as cursor:
+            cursor.execute("SELECT pg_advisory_xact_lock(%s)", [0x524850434C454447])
+
+
 def reconcile_card_statement_items(
     statement_id: int,
     *,
@@ -2905,6 +3034,7 @@ def reconcile_card_statement_items(
     for attempt in range(2):
         try:
             with transaction.atomic():
+                _lock_component_ledger_for_reconciliation()
                 statement = (
                     CardStatement.objects.select_for_update()
                     .get(pk=statement_id)

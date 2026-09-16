@@ -62,6 +62,7 @@
                                     <span class="statement-evidence-filename">{{ evidence.filename_snapshot }}</span>
                                 {% endif %}
                                 <span class="muted small statement-evidence-meta">{{ evidence.amount_display }}{% if evidence.event_date %} / {{ evidence.event_date|date:"Y-m-d" }}{% endif %}</span>
+                                {% if evidence.settlement_note %}<span class="statement-evidence-service">{{ evidence.settlement_note }}</span>{% endif %}
                                 {% if evidence.service_label_snapshot %}<span class="statement-evidence-service">サービス: {{ evidence.service_label_snapshot }}</span>{% endif %}
                                 {% if evidence.payee_snapshot and evidence.payee_snapshot != evidence.service_label_snapshot %}<span class="muted small statement-evidence-payee">販売者: {{ evidence.payee_snapshot }}</span>{% endif %}
                             </div>

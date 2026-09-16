@@ -86,8 +86,16 @@ class StatementLockQueryContractTests(unittest.TestCase):
     def test_ownership_keeps_deleted_receipt_history(self):
         self.assert_deleted_receipt_history_not_filtered(self.OWNERSHIP)
 
-    def test_backfill_selection_is_unchanged(self):
-        self.assertIn(("filter", (), {"component_fingerprint": ""}), row_query(self.BACKFILL))
+    def test_backfill_covers_stale_nonempty_identities_as_well_as_missing_ids(self):
+        # A refund's original payment may already have a nonempty legacy hash.
+        # A blank-only repair silently misses those previously consumed events.
+        calls = row_query(self.BACKFILL)
+        self.assertNotIn(("filter", (), {"component_fingerprint": ""}), calls)
+        self.assertIn(("order_by", (
+            "statement_item__statement__period_month",
+            "statement_item__statement__uploaded_at",
+            "statement_item__statement_id", "statement_item__sequence", "pk",
+        ), {}), calls)
 
     def test_ownership_selection_and_order_are_unchanged(self):
         calls = row_query(self.OWNERSHIP)

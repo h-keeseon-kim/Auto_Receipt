@@ -1,3 +1,13 @@
+## v1.16.9（2026-09-17）
+
+- 明細の証拠バッジとファイル名を上下へ分離し、ファイル名へパネル全幅を確保。管理者操作は下段へ移動。未使用カードの高さ引き伸ばしを解消。
+- 領収書 Payment history の Charged 欄に明記された円建て決済額を、同じ金融イベントの別通貨表現として完全一致照合。推測換算・消費税円額の流用・二重計上は行わない。
+- 既存PDFの金融情報を一度再抽出し、通常価格だけの Pro 表示、USD/JPYの重複構成要素を補正。
+- 未消費表示をPDF単位でなく未消費取引の日付と対象月の関係で判定。消費済み返金に付随する無関係な過去の元決済を当月件数に含めない。
+- 同一請求書の過去使用履歴を文書に基づき再正規化し、全明細での消費制約・管理者確定優先を維持。PostgreSQLの再照合は取引台帳のトランザクションロックで直列化。
+- DBフィールド・マイグレーション・依存ライブラリの変更なし。テンプレート33件と既存配布内容を保持。
+- 回帰テスト: `python -m unittest receipts.test_statement_matching receipts.test_receipt_component_identity receipts.test_plan_change_matching receipts.test_statement_lock_query_contract receipts.test_statement_v169_regressions -v`
+
 # Changelog
 
 ## 1.16.6 — 利用月検証・提出者候補・表示整合性

@@ -31,7 +31,7 @@ contribute multiple components (for example an original payment and a later
 refund shown on the same credit note).
 """
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import date
 from decimal import Decimal
 from typing import Iterable, Sequence
@@ -151,6 +151,7 @@ class EvidenceComponent:
     payee: str = ""
     service_label: str = ""
     fingerprint: str = ""
+    amount_options: tuple[AmountOption, ...] = ()
 
     def __post_init__(self):
         object.__setattr__(self, "signed_amount", Decimal(str(self.signed_amount)))
@@ -172,6 +173,55 @@ class EvidenceComponent:
             return 1
         return 3
 
+
+
+def evidence_amount_options(component: EvidenceComponent) -> tuple[AmountOption, ...]:
+    """Monetary representations of one event; these are not additive."""
+    primary = AmountOption(component.signed_amount, component.currency, "original")
+    candidates = tuple(
+        option for option in component.amount_options
+        if option.basis == "receipt_charged" and option.currency != component.currency
+        and option.amount > 0 and component.role == ROLE_CHARGE
+    )
+    # Conflicting settlement amounts for the same event/currency require review,
+    # not selecting whichever happens to equal the statement.
+    alternatives = tuple(dict.fromkeys(
+        option for option in candidates
+        if len({other.amount for other in candidates if other.currency == option.currency}) == 1
+    ))
+    return (primary, *alternatives)
+
+
+def matching_amount_pair(line: StatementLine, component: EvidenceComponent) -> tuple[AmountOption, AmountOption] | None:
+    options = evidence_amount_options(component)
+    # A known native-currency mismatch may not be bypassed by an alternative.
+    native_lines = [option for option in line.amount_options if option.currency == component.currency]
+    if native_lines and not any(option.amount == component.signed_amount for option in native_lines):
+        return None
+    for receipt_option in options:
+        for statement_option in line.amount_options:
+            if (statement_option.currency == receipt_option.currency
+                    and statement_option.amount == receipt_option.amount):
+                return statement_option, receipt_option
+    return None
+
+
+def component_relevant_to_statement(component: EvidenceComponent, target_month: date, lines: Sequence[StatementLine]) -> bool:
+    """Display scope for an *unused event*, not for the PDF containing it."""
+    if component.event_date is None:
+        return False
+    if component.event_date.replace(day=1) == target_month.replace(day=1):
+        return True
+    for line in lines:
+        if line.transaction_date is None or not merchant_keys_compatible(line.merchant_key, component.merchant_key):
+            continue
+        distance = (component.event_date - line.transaction_date).days
+        if component.role == ROLE_REFUND:
+            if -DEFAULT_REFUND_LOOKBACK_DAYS <= distance <= DEFAULT_REFUND_LOOKAHEAD_DAYS:
+                return True
+        elif abs(distance) <= 1:
+            return True
+    return False
 
 @dataclass(frozen=True)
 class MatchAssignment:
@@ -279,9 +329,14 @@ def deduplicate_components(components: Iterable[EvidenceComponent]) -> tuple[lis
         candidate_rank = (component.quality_rank, component.receipt_order, component.key)
         if candidate_rank < current_rank:
             removed.add(current.key)
-            selected[identity] = component
+            winner, other = component, current
         else:
             removed.add(component.key)
+            winner, other = current, component
+        # Equivalent documents may carry different representations of the same
+        # payment. Preserve literal settlement evidence, but not another capacity.
+        options = tuple(dict.fromkeys((*winner.amount_options, *other.amount_options)))
+        selected[identity] = replace(winner, amount_options=options)
 
     unique.extend(selected.values())
     unique.sort(key=lambda component: (component.receipt_order, component.key))
@@ -295,10 +350,13 @@ def _matching_amount_basis(line: StatementLine, component: EvidenceComponent) ->
     # 場合は、重複排除時に支払済み領収書を優先する。
     if component.role != ROLE_CHARGE or component.signed_amount < 0:
         return None
-    for option in line.amount_options:
-        if option.currency == component.currency and option.amount == component.signed_amount:
-            return option.basis or option.currency
-    return None
+    pair = matching_amount_pair(line, component)
+    if pair is None:
+        return None
+    statement_option, receipt_option = pair
+    if receipt_option.basis == "receipt_charged":
+        return "領収書記載の決済額"
+    return statement_option.basis or statement_option.currency
 
 
 def _direct_edge_cost(
@@ -920,6 +978,14 @@ def reconcile_statement(
             )
         else:
             memo = f"金額・通貨完全一致、請求元一致、{date_note}"
+        pair = matching_amount_pair(line, component)
+        if pair is not None and pair[1].basis == "receipt_charged":
+            memo = (
+                f"領収書の元表示は{component.signed_amount} {component.currency}です。"
+                f"同じ支払のCharged欄に明記された決済額{pair[1].amount} {pair[1].currency}と"
+                f"カード明細が完全一致します。請求元一致、{date_note}"
+                "推測による為替換算ではなく、元資料に記載された決済額を使用しています。"
+            )
         result.assignments[line.key] = MatchAssignment(
             line_key=line.key,
             match_type=match_type,
@@ -975,6 +1041,17 @@ def reconcile_statement(
 
 
 def format_evidence_calculation(components: Sequence[EvidenceComponent], target: AmountOption | None = None) -> str:
+    if len(components) == 1 and target is not None:
+        component = components[0]
+        if component.currency != target.currency and any(
+            option.currency == target.currency and option.amount == target.amount
+            for option in evidence_amount_options(component)
+        ):
+            return (
+                f"{component.signed_amount} {component.currency}（元の表示額） → "
+                f"{target.amount} {target.currency}（領収書に明記された決済額）"
+                f" = 明細 {target.amount} {target.currency}"
+            )
     parts: list[str] = []
     for component in components:
         amount = abs(component.signed_amount)

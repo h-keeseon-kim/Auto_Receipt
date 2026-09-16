@@ -1644,7 +1644,12 @@ class CardStatementItem(models.Model):
                 if statement_amount is not None
                 else "-"
             )
-            result = " ".join(parts) + f" = {total_text} {currency}"
+            if len(consuming) == 1 and consuming[0].currency != currency:
+                proof = consuming[0].source_label or ""
+                label = "領収書記載の決済額で照合" if proof.startswith("領収書記載の決済額:") else "通貨が異なるため根拠確認が必要"
+                result = " ".join(parts) + f" → {total_text} {currency}（{label}）"
+            else:
+                result = " ".join(parts) + f" = {total_text} {currency}"
 
         if references:
             reference_parts = []
@@ -1872,6 +1877,11 @@ class CardStatementReceiptEvidence(models.Model):
     @property
     def is_reference_only(self) -> bool:
         return self.usage_mode == StatementReceiptEvidenceUsageMode.REFERENCE
+
+    @property
+    def settlement_note(self) -> str:
+        label = self.source_label or ""
+        return label if label.startswith("領収書記載の決済額:") else ""
 
     @property
     def amount_display(self) -> str:
