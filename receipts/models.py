@@ -1572,7 +1572,7 @@ class CardStatementItem(models.Model):
             return {}
         if value.get("version") != SUBMITTER_HINT_VERSION:
             return {"candidates": [], "stale": True,
-                    "no_candidate_reason": "候補の判定ルールが更新されています。「最新の領収書と再照合」で再評価してください。"}
+                    "no_candidate_reason": "候補の判定ルールが更新されています。「前月から確認先を再推定」で再評価してください。"}
         return value
 
     @property
@@ -1624,6 +1624,8 @@ class CardStatementItem(models.Model):
     def evidence_count(self) -> int:
         if hasattr(self, "_prefetched_objects_cache") and "receipt_evidences" in self._prefetched_objects_cache:
             return len(self.receipt_evidences.all())
+        if hasattr(self, "_display_has_evidence"):
+            return int(bool(self._display_has_evidence))
         return self.receipt_evidences.count()
 
     @property

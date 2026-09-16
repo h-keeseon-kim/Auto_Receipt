@@ -57,6 +57,7 @@ urlpatterns = [
     path("staff/card-statements/<int:pk>/report.pdf", views.staff_download_card_statement_report, name="staff_download_card_statement_report"),
     path("staff/card-statements/<int:pk>/delete/", views.staff_delete_card_statement, name="staff_delete_card_statement"),
     path("staff/card-statements/<int:pk>/reconcile/", views.staff_reconcile_card_statement, name="staff_reconcile_card_statement"),
+    path("staff/card-statements/<int:pk>/candidates/", views.staff_refresh_statement_candidates, name="staff_refresh_statement_candidates"),
     path("staff/card-statement-items/<int:pk>/update/", views.staff_update_statement_item, name="staff_update_statement_item"),
     path("staff/submissions/<int:pk>/", views.staff_submission_detail, name="staff_submission_detail"),
     path("staff/download/month/", views.staff_download_month, name="staff_download_month"),

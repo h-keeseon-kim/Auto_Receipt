@@ -378,3 +378,81 @@ class StatementPeriodAndSubmitterDatabaseTests(TestCase):
         self.assertEqual(i.matched_receipt_id, r.pk)
         self.assertEqual(i.effective_match_status, StatementMatchStatus.MATCHED)
         self.assertEqual(i.submitter_candidates, {})
+
+    def test_v1611_page_and_filter_get_are_read_only_even_with_pending_markers(self):
+        s, _ = self.statement()
+        self.client.force_login(self.admin)
+        with mock.patch("receipts.views.reconcile_pending_card_statement_month_semantics") as settle, \
+                mock.patch("receipts.views.reconcile_card_statement_items") as reconcile, \
+                mock.patch("receipts.statement_processing.generate_card_statement_analysis") as ai:
+            page = self.client.get(reverse("staff_card_statements") + "?month=2026-08")
+            status = self.client.get(reverse("staff_card_statement_status") + "?month=2026-08&result=unmatched")
+        self.assertEqual(page.status_code, 200)
+        self.assertEqual(status.status_code, 200)
+        self.assertContains(page, "照合結果の更新待ち")
+        self.assertEqual(status.json()["result_filter"], "unmatched")
+        self.assertIn("statement_display;dur=", page["Server-Timing"])
+        settle.assert_not_called(); reconcile.assert_not_called(); ai.assert_not_called()
+        s.refresh_from_db()
+        self.assertIn(STATEMENT_PERIOD_AND_SUBMITTER_RECONCILE_MARKER, s.ai_admin_memo)
+
+    def test_v1611_filter_loads_details_for_visible_items_in_constant_query_count(self):
+        from django.test.utils import CaptureQueriesContext
+        from django.template.loader import render_to_string
+        from django.db import connection
+        from receipts.views import load_statement_result_display, build_statement_result_filter_options
+        s, first = self.statement(reported="2026-08")
+        CardStatement.objects.filter(pk=s.pk).update(ai_admin_memo="")
+        r = self.receipt(date(2026, 8, 3))
+        for n in range(66):
+            obj = CardStatementItem.objects.create(statement=s, sequence=n+2,
+                line_reference=str(n+2), merchant_name="OpenAI", transaction_date=date(2026,8,3),
+                original_amount=Decimal("22.00"), original_currency="USD", receipt_required=True,
+                matched_receipt=r if n < 64 else None,
+                match_status=StatementMatchStatus.MATCHED if n < 64 else StatementMatchStatus.UNMATCHED,
+                match_reason_code=StatementMatchReason.AUTO_STRONG)
+        with CaptureQueriesContext(connection) as queries:
+            statements, counts = load_statement_result_display(s.period_month, "unmatched")
+        self.assertLessEqual(len(queries), 4)
+        self.assertEqual(counts["all"], 67)
+        self.assertEqual(counts["unmatched"], 3)
+        self.assertEqual(len(statements[0].display_unmatched_items), 3)
+        self.assertFalse(any("financial_transaction_components" in q["sql"] for q in queries))
+        context = {"selected_month": s.period_month, "statements": statements,
+            "result_filter": "unmatched", "result_filter_label": "未一致",
+            "result_filter_counts": counts, "result_filter_count": 3,
+            "statement_result_filter_options": build_statement_result_filter_options(counts, "unmatched")}
+        with CaptureQueriesContext(connection) as rendering_queries:
+            html = render_to_string("receipts/_staff_card_statements.html", context)
+        self.assertEqual(len(rendering_queries), 0)
+        self.assertIn("未一致", html)
+
+    def test_v1611_stopped_registration_does_not_erase_prior_confirmed_contact(self):
+        from receipts.statement_processing import refresh_statement_submitter_candidates
+        old_receipt = self.receipt(date(2026, 7, 3))
+        old_statement, old_item = self.statement(month=date(2026,7,1), event=date(2026,7,3), reported="2026-07")
+        old_item.match_status = StatementMatchStatus.MATCHED
+        old_item.match_reason_code = StatementMatchReason.AUTO_STRONG
+        old_item.matched_receipt = old_receipt
+        old_item.matched_user = self.user
+        old_item.save()
+        CardStatementReceiptEvidence.objects.create(statement_item=old_item, receipt=old_receipt,
+            role="charge", usage_mode="consume", component_key="primary", signed_amount=Decimal("22.00"),
+            currency="USD", event_date=date(2026,7,3), payee_snapshot="OpenAI",
+            service_label_snapshot="ChatGPT", filename_snapshot=old_receipt.original_filename,
+            invoice_number_snapshot=old_receipt.financial_transaction_reference)
+        current_statement, current_item = self.statement(reported="2026-08")
+        CardStatement.objects.filter(pk=current_statement.pk).update(ai_admin_memo="")
+        self.user.is_active=False; self.user.save(update_fields=["is_active"])
+        RegisteredService.objects.filter(pk=self.service.pk).update(is_active=False, uses_p_card=False)
+        old_evidence=list(CardStatementReceiptEvidence.objects.values())
+        with mock.patch("receipts.statement_processing.extract_embedded_pdf_text") as pdf, \
+                mock.patch("receipts.statement_processing.generate_card_statement_analysis") as ai:
+            count=refresh_statement_submitter_candidates(current_statement.pk)
+        self.assertEqual(count,1)
+        current_item.refresh_from_db()
+        self.assertEqual(current_item.submitter_candidates["candidates"][0]["user_id"],self.user.pk)
+        self.assertEqual(current_item.match_status,StatementMatchStatus.UNMATCHED)
+        self.assertIsNone(current_item.matched_receipt_id)
+        self.assertEqual(list(CardStatementReceiptEvidence.objects.values()),old_evidence)
+        pdf.assert_not_called(); ai.assert_not_called()

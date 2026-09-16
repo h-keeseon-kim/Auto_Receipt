@@ -1,6 +1,7 @@
 <nav class="statement-result-filter-tabs" aria-label="照合結果の絞り込み">
     {% for option in statement_result_filter_options %}
         <a
+            data-statement-filter-link
             class="statement-result-filter-tab{% if option.active %} active{% endif %}"
             href="{% url 'staff_card_statements' %}?month={{ selected_month|date:'Y-m' }}&result={{ option.target_key }}"
             {% if option.active %}aria-current="page"{% endif %}
@@ -39,6 +40,11 @@
                     <input type="hidden" name="result" value="{{ result_filter }}">
                     <button type="submit" class="button small">最新の領収書と再照合</button>
                 </form>
+                <form method="post" action="{% url 'staff_refresh_statement_candidates' statement.pk %}">
+                    {% csrf_token %}
+                    <input type="hidden" name="result" value="{{ result_filter }}">
+                    <button type="submit" class="button small">前月から確認先を再推定</button>
+                </form>
                 {% if statement.items.count %}
                     <a class="button small primary" href="{% url 'staff_download_card_statement_report' statement.pk %}" title="Slack共有用の照合結果PDFをダウンロード">照合結果PDF</a>
                 {% endif %}
@@ -59,6 +65,9 @@
         <div class="card"><span class="label">全明細で未消費の提出書類</span><strong class="{% if statement.unmatched_receipt_components %}warning{% endif %}">{{ statement.unmatched_receipt_components|length }}</strong></div>
     </section>
 
+    {% if statement.display_refresh_pending %}
+        <div class="message notice"><strong>照合結果の更新待ちです。</strong>保存済みの結果を表示しています。「最新の領収書と再照合」で更新してください。画面移動や絞り込みだけでは再照合しません。</div>
+    {% endif %}
     {% if statement.period_validation %}
         <div class="message notice">照合対象月（利用分）: <strong>{{ statement.period_month|date:"Y-m" }}</strong> ／ カード支払日: <strong>{{ statement.payment_date|date:"Y-m-d"|default:"未確認" }}</strong> ／ 利用日による対象月検証: {% if statement.period_validation.valid %}確認済み{% else %}要確認{% endif %}</div>
         {% if statement.period_validation.source_summary %}
@@ -129,7 +138,7 @@
         {% else %}
             <div class="card statement-filter-empty">
                 <strong>{{ result_filter_label }}に該当する明細はありません。</strong>
-                <a href="{% url 'staff_card_statements' %}?month={{ selected_month|date:'Y-m' }}&result=all">すべての結果を表示</a>
+                <a data-statement-filter-link href="{% url 'staff_card_statements' %}?month={{ selected_month|date:'Y-m' }}&result=all">すべての結果を表示</a>
             </div>
         {% endif %}
 

@@ -144,5 +144,11 @@
         {% if hint.explained_history_truncated %}<p class="muted small">除外履歴の先頭10件を表示しています。</p>{% endif %}
     </details>
     {% endif %}
+    {% if hint.history_diagnostics %}
+    <details class="muted small statement-candidate-diagnostics">
+        <summary>参照した前月履歴を確認</summary>
+        <p>{{ hint.history_diagnostics.previous_month }}の確定済み明細 {{ hint.history_diagnostics.confirmed_source_lines }}件を参照。当月の照合済み {{ hint.history_diagnostics.current_confirmed_lines }}件と突き合わせ、同じ取引の翌月分が説明済みの履歴を除外しています。現在のサービス登録状態だけでは前月の支払履歴を除外しません。</p>
+    </details>
+    {% endif %}
     {% endwith %}
 </article>

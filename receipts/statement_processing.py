@@ -174,6 +174,33 @@ KNOWN_MERCHANT_PATTERNS: tuple[tuple[str, tuple[str, ...]], ...] = (
 )
 
 
+PENDING_STATEMENT_RECONCILE_MARKERS = (
+    CARD_STATEMENT_MONTH_SEMANTICS_RECONCILE_MARKER,
+    CARD_STATEMENT_SAME_MONTH_RECEIPT_RECONCILE_MARKER,
+    CARD_STATEMENT_MATCHING_RULES_RECONCILE_MARKER,
+    CARD_LAST4_EVIDENCE_RECONCILE_MARKER,
+    EXACT_AMOUNT_MATCHING_RECONCILE_MARKER,
+    SIMPLE_RECEIPT_MATCHING_RECONCILE_MARKER,
+    EMPIRICAL_MATCHING_RECONCILE_MARKER,
+    SERVICE_LABEL_RECONCILE_MARKER,
+    BILLING_DESCRIPTOR_BRIDGE_RECONCILE_MARKER,
+    PLAN_CHANGE_INFERENCE_RECONCILE_MARKER,
+    PLAN_CHANGE_METADATA_REFRESH_RECONCILE_MARKER,
+    PLAN_CHANGE_USER_INFERENCE_RECONCILE_MARKER,
+    RECEIPT_CHANGE_RECONCILE_MARKER,
+    CROSS_MONTH_CARD_NETTING_RECONCILE_MARKER,
+    UNMATCHED_RECEIPT_EVENT_SCOPE_RECONCILE_MARKER,
+    GLOBAL_COMPONENT_USAGE_RECONCILE_MARKER,
+    STATEMENT_PERIOD_AND_SUBMITTER_RECONCILE_MARKER,
+)
+
+
+def statement_reconciliation_pending(statement) -> bool:
+    """Inspect saved invalidation markers without queries or side effects."""
+    memo = statement.ai_admin_memo or ""
+    return any(marker in memo for marker in PENDING_STATEMENT_RECONCILE_MARKERS)
+
+
 def reconcile_pending_card_statement_month_semantics(*, period_month=None, statement_id=None) -> int:
     """Reconcile pending statements in chronological order until ownership settles.
 
@@ -184,25 +211,9 @@ def reconcile_pending_card_statement_month_semantics(*, period_month=None, state
     have been cleared. In normal operation convergence takes one or two rounds.
     """
 
-    marker_filter = (
-        Q(ai_admin_memo__contains=CARD_STATEMENT_MONTH_SEMANTICS_RECONCILE_MARKER)
-        | Q(ai_admin_memo__contains=CARD_STATEMENT_SAME_MONTH_RECEIPT_RECONCILE_MARKER)
-        | Q(ai_admin_memo__contains=CARD_STATEMENT_MATCHING_RULES_RECONCILE_MARKER)
-        | Q(ai_admin_memo__contains=CARD_LAST4_EVIDENCE_RECONCILE_MARKER)
-        | Q(ai_admin_memo__contains=EXACT_AMOUNT_MATCHING_RECONCILE_MARKER)
-        | Q(ai_admin_memo__contains=SIMPLE_RECEIPT_MATCHING_RECONCILE_MARKER)
-        | Q(ai_admin_memo__contains=EMPIRICAL_MATCHING_RECONCILE_MARKER)
-        | Q(ai_admin_memo__contains=SERVICE_LABEL_RECONCILE_MARKER)
-        | Q(ai_admin_memo__contains=BILLING_DESCRIPTOR_BRIDGE_RECONCILE_MARKER)
-        | Q(ai_admin_memo__contains=PLAN_CHANGE_INFERENCE_RECONCILE_MARKER)
-        | Q(ai_admin_memo__contains=PLAN_CHANGE_METADATA_REFRESH_RECONCILE_MARKER)
-        | Q(ai_admin_memo__contains=PLAN_CHANGE_USER_INFERENCE_RECONCILE_MARKER)
-        | Q(ai_admin_memo__contains=RECEIPT_CHANGE_RECONCILE_MARKER)
-        | Q(ai_admin_memo__contains=CROSS_MONTH_CARD_NETTING_RECONCILE_MARKER)
-        | Q(ai_admin_memo__contains=UNMATCHED_RECEIPT_EVENT_SCOPE_RECONCILE_MARKER)
-        | Q(ai_admin_memo__contains=GLOBAL_COMPONENT_USAGE_RECONCILE_MARKER)
-        | Q(ai_admin_memo__contains=STATEMENT_PERIOD_AND_SUBMITTER_RECONCILE_MARKER)
-    )
+    marker_filter = Q()
+    for marker in PENDING_STATEMENT_RECONCILE_MARKERS:
+        marker_filter |= Q(ai_admin_memo__contains=marker)
 
     def pending_ids() -> list[int]:
         queryset = CardStatement.objects.filter(marker_filter).exclude(
@@ -1405,6 +1416,23 @@ def _historical_receipts_for_statement_month(statement_month: date) -> list[Rece
 
 
 
+
+def _submitter_review_notes(user, service) -> tuple[str, ...]:
+    """Current account state affects follow-up, not the truth of past payments.
+
+    No email, notification, or submission-state change is made by contact hints.
+    Do not access a lazily loaded profile here (one query per historical row).
+    """
+    notes = []
+    cached_relations = getattr(getattr(user, "_state", None), "fields_cache", {})
+    profile = cached_relations.get("profile")
+    if not getattr(user, "is_active", True) or getattr(profile, "account_status", "") == "stopped":
+        notes.append("現在は利用者アカウントが停止中です。前月の照合実績として参照し、管理者が契約継続・連絡可否を確認してください")
+    if service is not None and not getattr(service, "is_active", True):
+        notes.append("現在のサービス登録は停止中です。過去の支払実績は除外せず、契約状況を要確認としています")
+    return tuple(notes)
+
+
 def _submitter_usage_rows(receipts, catalogs, *, active_user_ids, active_service_ids,
                           target_card_last4=""):
     """Read financial metadata, with one canonical identity per charge (not per PDF)."""
@@ -1412,9 +1440,9 @@ def _submitter_usage_rows(receipts, catalogs, *, active_user_ids, active_service
     target_card = target_card_last4 or str(getattr(settings, "RECEIPT_CARD_LAST4", "7210"))[-4:]
     for receipt in receipts:
         user = receipt.submission.user
-        if user.pk not in active_user_ids:
+        if active_user_ids is not None and user.pk not in active_user_ids:
             continue
-        if receipt.service_id and receipt.service_id not in active_service_ids:
+        if active_service_ids is not None and receipt.service_id and receipt.service_id not in active_service_ids:
             continue
         if receipt.ai_extracted_card_last4 and receipt.ai_extracted_card_last4 != target_card:
             continue
@@ -1458,6 +1486,7 @@ def _submitter_usage_rows(receipts, catalogs, *, active_user_ids, active_service
                 card_last4=receipt.ai_extracted_card_last4,
                 # Use explicit provider data only; never infer an account/plan from a price.
                 contract_key=str(raw.get("subscription_id") or raw.get("contract_id") or ""),
+                review_notes=_submitter_review_notes(user, receipt.service),
                 amount_options=tuple(PlanAmountOption(Decimal(option["amount"]), option["currency"])
                     for option in normalize_documented_amount_options(raw.get("amount_options"), original_currency=currency)),
             ))
@@ -1507,10 +1536,10 @@ def _submitter_rows_from_confirmed_evidence(evidences, catalogs, *, active_user_
             service = old_item.matched_service
             billing_type = service.billing_type if service else ""
             service_label = evidence.service_label_snapshot
-        if user is None or user.pk not in active_user_ids:
+        if user is None or (active_user_ids is not None and user.pk not in active_user_ids):
             continue
         service_id = service.pk if service is not None else None
-        if service_id is not None and service_id not in active_service_ids:
+        if active_service_ids is not None and service_id is not None and service_id not in active_service_ids:
             continue
         amount = _parse_decimal(evidence.signed_amount)
         currency = str(evidence.currency or "").upper()
@@ -1547,6 +1576,7 @@ def _submitter_rows_from_confirmed_evidence(evidences, catalogs, *, active_user_
             source_key=source, previously_matched=True, card_last4=card,
             historical_statement_id=old_item.statement_id,
             historical_line_reference=old_item.line_reference or str(old_item.sequence),
+            review_notes=_submitter_review_notes(user, service),
         ))
     return rows
 
@@ -1636,12 +1666,11 @@ def _attach_previous_month_submitter_candidates(statement, items, receipts, hist
                       and not _statement_item_is_reversal(item)]
     if not candidates_for:
         return
-    active_users = set(get_user_model().objects.filter(
-        is_active=True, is_staff=False, is_superuser=False,
-        profile__account_status=UserAccountStatus.ACTIVE,
-    ).values_list("pk", flat=True))
-    services = _registered_services_for_period(statement.period_month)
-    service_ids = {service.pk for service in services}
+    # Contact inference is a read-only analysis of documented transactions, not
+    # the reminder-mail audience. Current account/service activity must NOT erase
+    # a confirmed prior buyer (including deleted/replaced service registrations).
+    active_users = None
+    service_ids = None
     target_card = statement.card_last4 or str(getattr(settings, "RECEIPT_CARD_LAST4", "7210"))[-4:]
     # Do not restrict this query to the receipt storage-month pool: confirmed
     # prior allocations remain useful when a PDF was uploaded into another cycle,
@@ -1652,8 +1681,8 @@ def _attach_previous_month_submitter_candidates(statement, items, receipts, hist
         statement_item__match_status=StatementMatchStatus.MATCHED,
         usage_mode=StatementReceiptEvidenceUsageMode.CONSUME,
         role=StatementReceiptEvidenceRole.CHARGE,
-    ).select_related("statement_item__statement", "statement_item__matched_user",
-        "statement_item__matched_service", "receipt__submission__user", "receipt__service"))
+    ).select_related("statement_item__statement", "statement_item__matched_user__profile",
+        "statement_item__matched_service", "receipt__submission__user__profile", "receipt__service"))
     options = dict(active_user_ids=active_users, active_service_ids=service_ids,
                    target_card_last4=target_card)
     history = _submitter_usage_rows(historical_receipts, catalogs, **options)
@@ -1671,8 +1700,8 @@ def _attach_previous_month_submitter_candidates(statement, items, receipts, hist
         statement_item_id__in=persisted_item_ids,
         usage_mode=StatementReceiptEvidenceUsageMode.CONSUME,
         role=StatementReceiptEvidenceRole.CHARGE,
-    ).select_related("statement_item__statement", "statement_item__matched_user",
-        "statement_item__matched_service", "receipt__submission__user", "receipt__service")) if persisted_item_ids else []
+    ).select_related("statement_item__statement", "statement_item__matched_user__profile",
+        "statement_item__matched_service", "receipt__submission__user__profile", "receipt__service")) if persisted_item_ids else []
     item_by_id = {item.pk: item for item in items}
     allocations.extend((e, item_by_id[e.statement_item_id], e.usage_mode) for e in persisted)
     current = _merge_submitter_history_rows(current,
@@ -1710,9 +1739,45 @@ def _attach_previous_month_submitter_candidates(statement, items, receipts, hist
                 candidate["submission_label"] = "同サービスの解析未完了書類あり・当該取引との対応は未確認"
                 candidate["current_receipts"] = [
                     {"receipt_id": r.pk, "filename": r.display_filename} for r in possible[:5]]
+        previous_month = add_months(month, -1)
+        previous_rows = [row for row in history if row.event_date.replace(day=1) == previous_month]
+        hint["history_diagnostics"] = {
+            "previous_month": previous_month.strftime("%Y-%m"),
+            "confirmed_source_lines": len({(row.historical_statement_id, row.historical_line_reference)
+                for row in previous_rows if row.historical_statement_id is not None}),
+            "metadata_rows": len(previous_rows),
+            "current_confirmed_lines": len({row.confirmed_line_key for row in current
+                if row.confirmed_line_key and row.event_date.replace(day=1) == month}),
+            "current_registration_filter_applied": False,
+        }
         hint["statement_month"] = statement.period_month.isoformat()
         hint["generated_at"] = timezone.now().isoformat()
         item.submitter_candidates = hint
+
+
+
+def refresh_statement_submitter_candidates(statement_id: int) -> int:
+    """Refresh contact hints from persisted data, without touching the money ledger.
+
+    This is an explicit POST-only operation. No PDF open/enrichment, external API,
+    previous-month reconciliation, or filesystem-availability probing is performed.
+    The statement lock serializes against its own monetary reconciliation.
+    """
+    with transaction.atomic():
+        statement = CardStatement.objects.select_for_update().get(pk=statement_id)
+        if statement.status in {CardStatementStatus.PROCESSING, CardStatementStatus.FAILED}:
+            raise ValueError("明細解析が完了してから確認先を再推定してください。")
+        if statement_reconciliation_pending(statement):
+            raise ValueError("先に「最新の領収書と再照合」で保存済みの照合結果を更新してください。")
+        items = list(statement.items.order_by("sequence", "pk"))
+        receipts = _available_receipts_for_statement_month(statement.period_month,
+            transaction_dates=[item.transaction_date for item in items if item.transaction_date])
+        history = _historical_receipts_for_statement_month(statement.period_month)
+        catalogs = list(ServiceCatalog.objects.all().order_by("pk"))
+        _attach_previous_month_submitter_candidates(statement, items, receipts, history, catalogs)
+        CardStatementItem.objects.bulk_update(items, ["submitter_candidates"])
+        statement.save(update_fields=["updated_at"])
+        return sum(bool(item.submitter_candidates.get("candidates")) for item in items)
 
 
 def _refresh_statement_period_validation(statement, items):

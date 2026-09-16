@@ -329,7 +329,7 @@ def allocate_unique_plan_change_candidates(
 
 # This version is independent of monetary matching and the consume ledger.
 # Old, persisted contact hints must not be displayed under the new rules.
-SUBMITTER_HINT_VERSION = 2
+SUBMITTER_HINT_VERSION = 3
 
 
 @dataclass(frozen=True)
@@ -358,6 +358,7 @@ class HistoricalSubmitterUsage:
     confirmed_statement_id: int | None = None
     confirmed_line_key: str = ""
     confirmed_line_reference: str = ""
+    review_notes: tuple[str, ...] = ()
 
     def __post_init__(self):
         from decimal import InvalidOperation
@@ -396,7 +397,8 @@ def _submitter_rows_compatible(old: HistoricalSubmitterUsage, new: HistoricalSub
     from .statement_matching import merchant_keys_compatible
     if old.user_id != new.user_id or not merchant_keys_compatible(old.merchant_key, new.merchant_key):
         return False
-    if old.service_id is not None and new.service_id is not None and old.service_id != new.service_id:
+    if (old.service_id is not None and new.service_id is not None and old.service_id != new.service_id
+            and not (old.contract_key and old.contract_key == new.contract_key)):
         return False
     if old.contract_key and new.contract_key and old.contract_key != new.contract_key:
         return False
@@ -550,10 +552,15 @@ def _submitter_support(line, h, tolerance):
     if not (amounts & _submitter_amounts(h)):
         # Neither nearby dates nor invented price changes justify naming a person.
         return None
-    if h.billing_type == "one_time":
-        return None
     expected = _next_month_same_day(h.event_date)
     distance = abs((line.transaction_date - expected).days)
+    # A confirmed prior association is stronger than today's registration flags.
+    # Even metered/"other" charges can identify a contact; they do not prove a
+    # recurring obligation or this month's buyer. Never turn a hint into MATCHED.
+    if h.previously_matched and distance <= tolerance:
+        return (3, "有力な確認先候補（前月照合実績・未確定）", distance, expected)
+    if h.billing_type == "one_time":
+        return None
     if h.billing_type == "metered":
         return (1, "参考候補（従量課金・未確定）", distance, expected)
     if distance > tolerance:
@@ -627,14 +634,15 @@ def suggest_previous_month_submitters(
             competing = sorted({k for k, d in supports if d == closest and k != line.key})
         reasons = ["前月の同じ請求元（または既知の決済名義）の提出履歴",
                    f"前月利用日 {h.event_date.isoformat()}", "書類に記載された金額・通貨が一致"]
-        if h.billing_type == "metered":
-            reasons.append("従量課金の同額実績であり、毎月の請求や今回の購入者を確定する根拠ではありません")
+        if h.billing_type in {"metered", "one_time"}:
+            reasons.append(f"翌月同日から{distance}日差。定期契約とは断定せず、前月の同額取引の確認先として表示しています")
         else:
             reasons.append(f"翌月同日から{distance}日差")
         if h.previously_matched:
             reasons.append("前月明細と提出書類の紐付け実績あり")
         if h.historical_statement_id is not None:
             reasons.append(f"前月明細 {h.historical_line_reference} の確定済み対応を参照")
+        reasons.extend(h.review_notes)
         current, seen = [], set()
         for c in current_charges:
             if not _submitter_rows_compatible(h, c) or not c.event_date or c.confirmed_line_key:
@@ -663,6 +671,7 @@ def suggest_previous_month_submitters(
             "submission_state": "uploaded_review" if current else "not_confirmed",
             "submission_label": "当該取引の書類あり・照合要確認" if current else "当該取引の提出状況は未確認",
             "reference_only": True,
+            "review_notes": list(h.review_notes),
         }
         if competing:
             candidate["support_label"] = "複数明細の確認先候補（未確定）"

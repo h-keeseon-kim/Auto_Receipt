@@ -7,6 +7,7 @@ import zipfile
 from datetime import date, timedelta
 from io import BytesIO, StringIO
 from pathlib import Path
+from time import perf_counter
 
 from django.conf import settings
 from django.contrib import messages
@@ -19,7 +20,7 @@ from django.contrib.auth.views import PasswordChangeView
 from django.core.exceptions import PermissionDenied, ValidationError
 from django.core.paginator import Paginator
 from django.db import IntegrityError, transaction
-from django.db.models import Case, Count, IntegerField, Prefetch, Q, When
+from django.db.models import Case, Count, Exists, IntegerField, OuterRef, Prefetch, Q, When, prefetch_related_objects
 from django.http import FileResponse, Http404, HttpResponse, JsonResponse
 from django.utils.http import url_has_allowed_host_and_scheme
 from django.shortcuts import get_object_or_404, redirect, render
@@ -105,6 +106,8 @@ from .statement_processing import (
     reconcile_card_statement_items,
     reconcile_pending_card_statement_month_semantics,
     start_background_statement_processing,
+    statement_reconciliation_pending,
+    refresh_statement_submitter_candidates,
 )
 from .statement_pdf import build_card_statement_reconciliation_pdf, reconciliation_report_filename
 
@@ -2228,6 +2231,55 @@ def global_statement_queryset(period_month):
     )
 
 
+
+def load_statement_result_display(period_month, result_filter):
+    """Read saved results only. Never parse PDFs, run AI, reconcile, or repair the ledger.
+
+    All items are small status records for accurate total counts. Related PDF
+    metadata and inference documents are fetched only for the visible subset.
+    This deliberately does not cache personal data across requests or users.
+    """
+    items_query = CardStatementItem.objects.annotate(
+        _display_has_evidence=Exists(CardStatementReceiptEvidence.objects.filter(
+            statement_item_id=OuterRef("pk")))
+    ).order_by("sequence", "pk")
+    statements = list(CardStatement.objects.filter(period_month=period_month)
+        .prefetch_related(Prefetch("items", queryset=items_query))
+        .order_by("-uploaded_at", "-pk"))
+    counts = prepare_statement_result_display(statements, result_filter)
+    visible = []
+    for statement in statements:
+        statement.display_refresh_pending = statement_reconciliation_pending(statement)
+        if result_filter == "unmatched":
+            visible.extend(statement.display_inferred_items)
+            visible.extend(statement.display_unmatched_items)
+        else:
+            visible.extend(statement.display_items)
+    if visible:
+        evidence_query = CardStatementReceiptEvidence.objects.select_related("receipt").only(
+            *[field.name for field in CardStatementReceiptEvidence._meta.concrete_fields],
+            "receipt__id", "receipt__file", "receipt__file_deleted_at",
+        ).order_by("sequence", "pk")
+        inference_query = CardStatementPlanChangeInference.objects.select_related(
+            "change_receipt", "historical_receipt", "reviewed_by"
+        ).only(*[field.name for field in CardStatementPlanChangeInference._meta.concrete_fields],
+            "change_receipt__id", "change_receipt__file", "change_receipt__file_deleted_at",
+            "historical_receipt__id", "historical_receipt__file", "historical_receipt__file_deleted_at",
+            "reviewed_by__id", "reviewed_by__username")
+        prefetch_related_objects(visible,
+            Prefetch("receipt_evidences", queryset=evidence_query),
+            Prefetch("plan_change_inference", queryset=inference_query))
+    return statements, counts
+
+
+def _statement_response_timing(response, started, *, period_month, result_filter):
+    elapsed_ms = (perf_counter() - started) * 1000
+    response["Server-Timing"] = f"statement_display;dur={elapsed_ms:.2f}"
+    response["Cache-Control"] = "private, no-store"
+    logger.info("statement_display month=%s filter=%s duration_ms=%.2f",
+                period_month, result_filter, elapsed_ms)
+    return response
+
 def statement_display_stats(statements):
     return {
         "line_count": sum(statement.items.count() for statement in statements),
@@ -2239,15 +2291,13 @@ def statement_display_stats(statements):
 
 @staff_member_required
 def staff_card_statements(request):
+    started = perf_counter()
     selected_month, month_form = parse_statement_month_from_request(request)
-    reconcile_pending_card_statement_month_semantics(period_month=selected_month)
-    # 全社明細月と領収書発行月は同じ月。対象ファイルは翌月の提出サイクルに保存される。
+    # Display/filter GET requests must remain read-only, including pending months.
     result_filter = normalize_statement_result_filter(request.GET.get("result"))
-    statement_queryset = global_statement_queryset(selected_month)
-    statements = list(statement_queryset)
-    result_filter_counts = prepare_statement_result_display(statements, result_filter)
+    statements, result_filter_counts = load_statement_result_display(selected_month, result_filter)
     stats = statement_display_stats(statements)
-    return render(
+    response = render(
         request,
         "receipts/staff_card_statements.html",
         {
@@ -2267,6 +2317,9 @@ def staff_card_statements(request):
             ),
         },
     )
+
+    return _statement_response_timing(response, started, period_month=selected_month,
+                                      result_filter=result_filter)
 
 
 @staff_member_required
@@ -2307,11 +2360,10 @@ def staff_upload_card_statement(request):
 
 @staff_member_required
 def staff_card_statement_status(request):
+    started = perf_counter()
     selected_month = parse_month_value(request.GET.get("month"))
-    reconcile_pending_card_statement_month_semantics(period_month=selected_month)
     result_filter = normalize_statement_result_filter(request.GET.get("result"))
-    statements = list(global_statement_queryset(selected_month))
-    result_filter_counts = prepare_statement_result_display(statements, result_filter)
+    statements, result_filter_counts = load_statement_result_display(selected_month, result_filter)
     html = render_to_string(
         "receipts/_staff_card_statements.html",
         {
@@ -2330,8 +2382,11 @@ def staff_card_statement_status(request):
         request=request,
     )
     processing_count = sum(1 for statement in statements if statement.status == CardStatementStatus.PROCESSING)
-    return JsonResponse({"ok": True, "html": html, "processing_count": processing_count,
-                         "done": processing_count == 0, "stats": statement_display_stats(statements)})
+    response = JsonResponse({"ok": True, "html": html, "processing_count": processing_count,
+        "done": processing_count == 0, "stats": statement_display_stats(statements),
+        "month": month_query(selected_month), "result_filter": result_filter})
+    return _statement_response_timing(response, started, period_month=selected_month,
+                                      result_filter=result_filter)
 
 
 @staff_member_required
@@ -2346,10 +2401,10 @@ def staff_download_card_statement(request, pk: int):
 @staff_member_required
 def staff_download_card_statement_report(request, pk: int):
     base_statement = get_object_or_404(CardStatement, pk=pk)
-    # A direct report download must settle any earlier pending ownership changes
-    # first; otherwise the selected statement could be exported with a component
-    # that an older statement is about to reclaim.
-    reconcile_pending_card_statement_month_semantics(period_month=base_statement.period_month)
+    # Do not mutate financial allocations in a download GET. Reject stale
+    # exports and ask for an explicit reconciliation instead.
+    if statement_reconciliation_pending(base_statement):
+        raise Http404("結果の更新待ちです。「最新の領収書と再照合」を実行してから出力してください。")
     statement = get_object_or_404(global_statement_queryset(base_statement.period_month), pk=pk)
     if statement.status in {CardStatementStatus.PROCESSING, CardStatementStatus.FAILED}:
         raise Http404("AI解析・照合が完了してから照合結果PDFをダウンロードしてください。")
@@ -2393,12 +2448,36 @@ def staff_reconcile_card_statement(request, pk: int):
     elif statement.status == CardStatementStatus.FAILED:
         messages.error(request, "AI解析に失敗した明細書は再照合できません。明細書を削除して再アップロードしてください。")
     else:
+        # Chronological cross-month repair belongs to this explicit write action,
+        # never to page loads, filter GETs or status polling.
+        reconcile_pending_card_statement_month_semantics(period_month=statement.period_month)
         reconcile_card_statement_items(statement.pk)
+        reconcile_pending_card_statement_month_semantics(period_month=statement.period_month)
         messages.success(request, "対象領収書月に提出された領収書と再照合しました。")
     return redirect(
         f"{reverse('staff_card_statements')}?month={month_query(statement.period_month)}&result={result_filter}"
         f"#statement-{statement.pk}"
     )
+
+
+@staff_member_required
+@require_POST
+def staff_refresh_statement_candidates(request, pk: int):
+    statement = get_object_or_404(CardStatement, pk=pk)
+    result_filter = normalize_statement_result_filter(request.POST.get("result"))
+    if statement.status in {CardStatementStatus.PROCESSING, CardStatementStatus.FAILED}:
+        messages.info(request, "明細解析が完了してから確認先を再推定してください。")
+    elif statement_reconciliation_pending(statement):
+        messages.warning(request, "照合結果の更新待ちです。先に「最新の領収書と再照合」を実行してください。")
+    else:
+        try:
+            count = refresh_statement_submitter_candidates(statement.pk)
+        except ValueError as exc:
+            messages.warning(request, str(exc))
+        else:
+            messages.success(request, f"前月の確定済み照合履歴から確認先候補を更新しました（候補あり{count}明細）。金額照合・提出済み判定は変更していません。")
+    return redirect(f"{reverse('staff_card_statements')}?month={month_query(statement.period_month)}"
+                    f"&result={result_filter}#statement-{statement.pk}")
 
 
 @staff_member_required

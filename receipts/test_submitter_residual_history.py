@@ -288,7 +288,7 @@ def adapter(evidences=(), active=(1,2), service_ids=(1,2), gate=()):
     def add_months(d,n):
         yy,mm=divmod(d.year*12+d.month-1+n,12)
         return date(yy,mm+1,1)
-    helpers=load_processing('_submitter_usage_rows','_submitter_rows_from_confirmed_evidence',
+    helpers=load_processing('_submitter_review_notes','_submitter_usage_rows','_submitter_rows_from_confirmed_evidence',
         '_merge_submitter_history_rows','_confirm_current_submitter_rows','_attach_previous_month_submitter_candidates',
         HistoricalSubmitterUsage=Usage,PlanAmountOption=Money,replace=replace,
         _parse_decimal=parse_decimal,_parse_date=parse_date,
@@ -410,10 +410,15 @@ class AdapterFlowTests(unittest.TestCase):
         a._attach_previous_month_submitter_candidates(missing.statement,[missing],[],[],[])
         self.assertEqual(missing.submitter_candidates['candidates'],[])
 
-    def test_inactive_user_excluded(self):
+    def test_inactive_user_history_is_retained_as_review_only(self):
         a=adapter(active=(1,));h=receipt(2,2,11,10,'USD');missing=item(492,11,10,'USD')
+        h.submission.user.is_active=False
         a._attach_previous_month_submitter_candidates(missing.statement,[missing],[],[h],[])
-        self.assertEqual(missing.submitter_candidates['candidates'],[])
+        candidate=missing.submitter_candidates['candidates'][0]
+        self.assertEqual(candidate['user_id'],2)
+        self.assertTrue(candidate['reference_only'])
+        self.assertIn('停止中',candidate['review_notes'][0])
+        self.assertEqual(missing.match_status,'unmatched')
 
     def test_wrong_price_current_document_not_described_as_unparsed(self):
         a=adapter();h=receipt(1,1,11,10,'USD');c=receipt(50,1,13,4500,month=8);missing=item(492,11,10,'USD')
@@ -495,7 +500,8 @@ class AdapterFlowTests(unittest.TestCase):
     def test_main_reconcile_passes_new_in_memory_components(self):
         source=Path(__file__).with_name('statement_processing.py').read_text()
         tree=ast.parse(source)
-        calls=[n for n in ast.walk(tree) if isinstance(n,ast.Call) and isinstance(n.func,ast.Name)
+        main=next(n for n in tree.body if isinstance(n,ast.FunctionDef) and n.name=='_reconcile_card_statement_items_impl')
+        calls=[n for n in ast.walk(main) if isinstance(n,ast.Call) and isinstance(n.func,ast.Name)
                and n.func.id=='_attach_previous_month_submitter_candidates']
         self.assertEqual(len(calls),1)
         self.assertIn('evidence_components_by_item',{kw.arg for kw in calls[0].keywords})
