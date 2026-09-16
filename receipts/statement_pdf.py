@@ -106,9 +106,12 @@ def _evidence_text(item: CardStatementItem) -> str:
                 f"{_decimal_text(inference.amount)} {inference.currency}",
             ]
             return "\n".join(parts)
-        candidates = (item.submitter_candidates or {}).get("candidates", [])
+        hint = item.current_submitter_candidates or {}
+        if hint.get("stale"):
+            return "候補ルールが更新されています。最新の領収書と再照合してください。"
+        candidates = hint.get("candidates", [])
         if candidates:
-            return "提出者候補（未確定・前月参照のみ）\n" + "\n".join(
+            return "提出者候補（未確定・当月照合済み履歴を除外）\n" + "\n".join(
                 f"{_short_text(c['user_label'], 50)} / {c['support_label']} / {c['submission_label']}\n"
                 f"前月: {c['historical_event_date']} {c['historical_amount']} {c['currency']} / "
                 f"{_short_text(c['historical_filename'], 65)}" for c in candidates[:3])

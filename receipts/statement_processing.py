@@ -54,6 +54,7 @@ from .plan_change_matching import (
     HistoricalPlanReceipt,
     HistoricalSubmitterUsage,
     suggest_previous_month_submitters,
+    resolve_submitted_recurring_history,
     PlanAmountOption,
     PlanChangeDocument,
     PlanStatementLine,
@@ -1404,19 +1405,19 @@ def _historical_receipts_for_statement_month(statement_month: date) -> list[Rece
 
 
 
-def _submitter_usage_rows(receipts, catalogs, *, active_user_ids, active_service_ids, matched_ids):
-    """Read stored metadata only. Do not hash files, reserve or consume receipts."""
+def _submitter_usage_rows(receipts, catalogs, *, active_user_ids, active_service_ids,
+                          target_card_last4=""):
+    """Read financial metadata, with one canonical identity per charge (not per PDF)."""
     rows = []
+    target_card = target_card_last4 or str(getattr(settings, "RECEIPT_CARD_LAST4", "7210"))[-4:]
     for receipt in receipts:
         user = receipt.submission.user
         if user.pk not in active_user_ids:
             continue
         if receipt.service_id and receipt.service_id not in active_service_ids:
             continue
-        if receipt.ai_extracted_card_last4 and receipt.ai_extracted_card_last4 != str(
-                getattr(settings, "RECEIPT_CARD_LAST4", "7210"))[-4:]:
+        if receipt.ai_extracted_card_last4 and receipt.ai_extracted_card_last4 != target_card:
             continue
-        # Refunds/cancellations must not masquerade as recurring purchases.
         if receipt.financial_document_kind == ReceiptFinancialDocumentKind.REFUND:
             continue
         raw_rows = receipt.financial_transaction_components or []
@@ -1436,23 +1437,196 @@ def _submitter_usage_rows(receipts, catalogs, *, active_user_ids, active_service
             merchant = _known_merchant_key(label) or _canonical_merchant_key(payee, catalogs)
             if amount is None or not amount.is_finite() or amount <= 0 or not event_date or not currency or not merchant:
                 continue
-            source = str(raw.get("transaction_id") or raw.get("invoice_number")
-                         or receipt.financial_transaction_reference or receipt.file_sha256 or receipt.pk)
+            source = component_fingerprint(
+                merchant_key=merchant, payee=payee, role=ROLE_CHARGE,
+                signed_amount=amount, currency=currency, event_date=event_date,
+                invoice_number=str(raw.get("invoice_number") or ""),
+                transaction_id=str(raw.get("transaction_id") or receipt.financial_transaction_reference or ""),
+                file_sha256=receipt.file_sha256, receipt_id=receipt.pk,
+                source_component_key=source_component_key(str(raw.get("component_key") or "primary"), receipt.pk),
+            )
+            billing_type = receipt.billing_type_snapshot or (
+                receipt.service.billing_type if receipt.service_id else "")
             rows.append(HistoricalSubmitterUsage(
                 user_id=user.pk, user_label=user.get_full_name() or user.get_username(),
                 service_id=receipt.service_id,
                 service_label=receipt.service_display_name_snapshot or label,
                 merchant_key=merchant, event_date=event_date, amount=amount, currency=currency,
                 receipt_id=receipt.pk, filename=receipt.display_filename,
-                billing_type=receipt.billing_type_snapshot,
-                source_key=f"{merchant}:{source}:{event_date}:{amount}:{currency}",
-                previously_matched=receipt.pk in matched_ids,
+                billing_type=billing_type, source_key=source,
+                previously_matched=False,  # Strengthened only by the exact confirmed component below.
+                card_last4=receipt.ai_extracted_card_last4,
+                # Use explicit provider data only; never infer an account/plan from a price.
+                contract_key=str(raw.get("subscription_id") or raw.get("contract_id") or ""),
+                amount_options=tuple(PlanAmountOption(Decimal(option["amount"]), option["currency"])
+                    for option in normalize_documented_amount_options(raw.get("amount_options"), original_currency=currency)),
             ))
     return rows
 
 
-def _attach_previous_month_submitter_candidates(statement, items, receipts, historical_receipts, catalogs):
-    """Persist suggestions separately from matched_user and the evidence ledger."""
+def _submitter_rows_from_confirmed_evidence(evidences, catalogs, *, active_user_ids,
+                                           active_service_ids, target_card_last4):
+    """Recover retained, owner-backed prior history even when PDF metadata is absent.
+
+    A merchant classification, an inferred owner, or a refund/net aggregate must
+    not manufacture a historical owner. Deleted receipts can fall back to the
+    matched_user only for a direct, single-charge confirmed association.
+    """
+    rows = []
+    direct_reasons = {StatementMatchReason.AUTO_STRONG, StatementMatchReason.MANUAL_CONFIRMED,
+                      StatementMatchReason.ORIGINAL_CHARGE}
+    charge_counts = {}
+    for evidence in evidences:
+        charge_counts[evidence.statement_item_id] = charge_counts.get(evidence.statement_item_id, 0) + 1
+    for evidence in evidences:
+        old_item = evidence.statement_item
+        old_statement = old_item.statement
+        if (old_item.match_status != StatementMatchStatus.MATCHED or
+                _statement_item_is_reversal(old_item) or
+                evidence.role != StatementReceiptEvidenceRole.CHARGE or
+                evidence.usage_mode != StatementReceiptEvidenceUsageMode.CONSUME):
+            continue
+        card = old_statement.card_last4 or ""
+        if card and target_card_last4 and card != target_card_last4:
+            continue
+        receipt = evidence.receipt
+        if receipt is not None:
+            user = receipt.submission.user
+            service = receipt.service
+            if receipt.financial_document_kind == ReceiptFinancialDocumentKind.REFUND:
+                continue
+            card = receipt.ai_extracted_card_last4 or card
+            if card and target_card_last4 and card != target_card_last4:
+                continue
+            billing_type = receipt.billing_type_snapshot or (service.billing_type if service else "")
+            service_label = receipt.service_display_name_snapshot or evidence.service_label_snapshot
+        else:
+            if old_item.match_reason_code not in direct_reasons or charge_counts[evidence.statement_item_id] != 1:
+                continue
+            user = old_item.matched_user
+            service = old_item.matched_service
+            billing_type = service.billing_type if service else ""
+            service_label = evidence.service_label_snapshot
+        if user is None or user.pk not in active_user_ids:
+            continue
+        service_id = service.pk if service is not None else None
+        if service_id is not None and service_id not in active_service_ids:
+            continue
+        amount = _parse_decimal(evidence.signed_amount)
+        currency = str(evidence.currency or "").upper()
+        document_date = evidence.event_date
+        if amount is None or not amount.is_finite() or amount <= 0 or not currency or not document_date:
+            continue
+        merchant = (_known_merchant_key(evidence.service_label_snapshot) or
+                    _canonical_merchant_key(evidence.payee_snapshot, catalogs))
+        if not merchant:
+            continue
+        # Prefer a proved card date for boundary renewals, never for a net/plan inference.
+        event_date = document_date
+        if (old_item.match_reason_code in direct_reasons and old_item.transaction_date and
+                abs((old_item.transaction_date - document_date).days) <= DATE_MATCH_TOLERANCE_DAYS):
+            event_date = old_item.transaction_date
+        source = component_fingerprint(
+            merchant_key=merchant, payee=evidence.payee_snapshot, role=ROLE_CHARGE,
+            signed_amount=amount, currency=currency, event_date=document_date,
+            invoice_number=evidence.invoice_number_snapshot,
+            transaction_id=evidence.transaction_reference_snapshot,
+            file_sha256=receipt.file_sha256 if receipt else "", receipt_id=evidence.receipt_id,
+            source_component_key=source_component_key(evidence.component_key, evidence.receipt_id),
+        )
+        # A retained fingerprint is authoritative only when the raw reference
+        # fields are absent. Old fingerprint schemas must not split reuploads.
+        if not evidence.invoice_number_snapshot and not evidence.transaction_reference_snapshot and evidence.component_fingerprint:
+            source = evidence.component_fingerprint
+        rows.append(HistoricalSubmitterUsage(
+            user_id=user.pk, user_label=user.get_full_name() or user.get_username(),
+            service_id=service_id, service_label=service_label,
+            merchant_key=merchant, event_date=event_date, document_event_date=document_date,
+            amount=amount, currency=currency, receipt_id=evidence.receipt_id,
+            filename=evidence.filename_snapshot, billing_type=billing_type,
+            source_key=source, previously_matched=True, card_last4=card,
+            historical_statement_id=old_item.statement_id,
+            historical_line_reference=old_item.line_reference or str(old_item.sequence),
+        ))
+    return rows
+
+
+def _merge_submitter_history_rows(metadata_rows, evidence_rows):
+    """Unify raw PDF rows and confirmed snapshots without counting aliases twice."""
+    merged = list(metadata_rows)
+    for evidence_row in evidence_rows:
+        aliases = [row for row in merged if row.receipt_id is not None
+            and row.receipt_id == evidence_row.receipt_id
+            and row.user_id == evidence_row.user_id
+            and row.merchant_key == evidence_row.merchant_key
+            and row.amount == evidence_row.amount and row.currency == evidence_row.currency
+            and (row.document_event_date or row.event_date) ==
+                (evidence_row.document_event_date or evidence_row.event_date)]
+        if aliases:
+            alias = aliases[0]
+            # Raw metadata can include documented alternate settlement amounts
+            # and explicit subscription ids absent from the legacy snapshot.
+            evidence_row = replace(evidence_row, source_key=alias.source_key,
+                amount_options=alias.amount_options, contract_key=alias.contract_key,
+                billing_type=alias.billing_type or evidence_row.billing_type,
+                card_last4=alias.card_last4 or evidence_row.card_last4)
+            merged = [replace(row, previously_matched=True) if row in aliases else row for row in merged]
+        if evidence_row not in merged:
+            merged.append(evidence_row)
+    return merged
+
+
+def _confirm_current_submitter_rows(rows, allocations):
+    """Attach this run's confirmed allocation, before bulk_create() writes evidence.
+
+    Each allocation is (component/evidence, statement item, usage_mode). A shared
+    receipt_id is insufficient: all financial fields of the charge must agree.
+    """
+    by_receipt, by_fingerprint = {}, {}
+    owner_by_receipt = {row.receipt_id: row.user_id for row in rows if row.receipt_id is not None}
+    for component, item, mode in allocations:
+        if (item.match_status != StatementMatchStatus.MATCHED or _statement_item_is_reversal(item) or
+                mode != USAGE_MODE_CONSUME or component.role != ROLE_CHARGE):
+            continue
+        by_receipt.setdefault(component.receipt_id, []).append((component, item))
+        fp = getattr(component, "fingerprint", "") or getattr(component, "component_fingerprint", "")
+        if fp:
+            by_fingerprint.setdefault(fp, []).append((component, item))
+    confirmed = []
+    for row in rows:
+        matches = list(by_fingerprint.get(row.source_key, []))
+        if row.receipt_id is not None:
+            matches += by_receipt.get(row.receipt_id, [])
+        matched_items = {}
+        for component, item in matches:
+            if (component.receipt_id != row.receipt_id and
+                    owner_by_receipt.get(component.receipt_id) != row.user_id):
+                # A duplicate uploaded by someone else is not proof that this
+                # user's separate contract has been paid or submitted.
+                continue
+            if (component.signed_amount != row.amount or component.currency != row.currency or
+                    component.event_date != (row.document_event_date or row.event_date)):
+                continue
+            matched_items[item.pk] = item
+        if not matched_items:
+            confirmed.append(row)
+            continue
+        for item in matched_items.values():
+            value = replace(row, confirmed_statement_id=item.statement_id,
+                confirmed_line_key=str(item.pk),
+                confirmed_line_reference=item.line_reference or str(item.sequence))
+            confirmed.append(value)
+            if (item.transaction_date and
+                    abs((item.transaction_date - row.event_date).days) <= DATE_MATCH_TOLERANCE_DAYS and
+                    item.transaction_date != row.event_date):
+                confirmed.append(replace(value, event_date=item.transaction_date,
+                                         document_event_date=row.document_event_date or row.event_date))
+    return confirmed
+
+
+def _attach_previous_month_submitter_candidates(statement, items, receipts, historical_receipts, catalogs,
+        *, evidence_components_by_item=None, evidence_usage_mode_by_item=None):
+    """Build hints from residual history; never change matched_user or financial ownership."""
     for item in items:
         item.submitter_candidates = {}
     if _statement_gate_errors(statement):
@@ -1468,61 +1642,72 @@ def _attach_previous_month_submitter_candidates(statement, items, receipts, hist
     ).values_list("pk", flat=True))
     services = _registered_services_for_period(statement.period_month)
     service_ids = {service.pk for service in services}
-    # Confirmed previous allocations only strengthen a historical clue. Merely
-    # existing in the ledger (reference rows, or AI service classification) does not.
+    target_card = statement.card_last4 or str(getattr(settings, "RECEIPT_CARD_LAST4", "7210"))[-4:]
+    # Do not restrict this query to the receipt storage-month pool: confirmed
+    # prior allocations remain useful when a PDF was uploaded into another cycle,
+    # its parsed metadata is incomplete, or its file has expired.
     historical_allocations = list(CardStatementReceiptEvidence.objects.filter(
+        statement_item__statement__period_month__gte=add_months(statement.period_month, -3),
         statement_item__statement__period_month__lt=statement.period_month,
         statement_item__match_status=StatementMatchStatus.MATCHED,
         usage_mode=StatementReceiptEvidenceUsageMode.CONSUME,
         role=StatementReceiptEvidenceRole.CHARGE,
-        receipt_id__in=[r.pk for r in historical_receipts],
-    ).select_related("statement_item__statement"))
-    matched_ids = {evidence.receipt_id for evidence in historical_allocations}
-    options = dict(active_user_ids=active_users, active_service_ids=service_ids, matched_ids=matched_ids)
+    ).select_related("statement_item__statement", "statement_item__matched_user",
+        "statement_item__matched_service", "receipt__submission__user", "receipt__service"))
+    options = dict(active_user_ids=active_users, active_service_ids=service_ids,
+                   target_card_last4=target_card)
     history = _submitter_usage_rows(historical_receipts, catalogs, **options)
-    # A June 30 receipt can support a confirmed July 1 card transaction. Use
-    # that card date for cadence only when it is a direct, amount-identical
-    # association within the normal one-day window. Never use an inferred/net
-    # allocation to change the date, and do not create any new evidence usage.
-    card_dated_history = []
-    for history_row in history:
-        for evidence in historical_allocations:
-            old_item = evidence.statement_item
-            if (evidence.receipt_id != history_row.receipt_id or
-                    old_item.match_reason_code not in {
-                        StatementMatchReason.AUTO_STRONG, StatementMatchReason.MANUAL_CONFIRMED} or
-                    not old_item.transaction_date or _statement_item_is_reversal(old_item) or
-                    evidence.signed_amount != history_row.amount or evidence.currency != history_row.currency or
-                    abs((old_item.transaction_date - history_row.event_date).days) > DATE_MATCH_TOLERANCE_DAYS):
-                continue
-            card_dated_history.append(replace(
-                history_row, event_date=old_item.transaction_date,
-                historical_statement_id=old_item.statement_id,
-                historical_line_reference=old_item.line_reference or str(old_item.sequence),
-                document_event_date=history_row.event_date,
-            ))
-    history.extend(card_dated_history)
+    history = _merge_submitter_history_rows(history,
+        _submitter_rows_from_confirmed_evidence(historical_allocations, catalogs,
+            active_user_ids=active_users, active_service_ids=service_ids, target_card_last4=target_card))
     current = _submitter_usage_rows(receipts, catalogs, **options)
-    for item in candidates_for:
-        line = _statement_line(item, catalogs)
-        hint = suggest_previous_month_submitters(_plan_statement_line(line), history, current_charges=current)
-        # Absence of parseable current charges is not proof of non-submission.
+    component_map = evidence_components_by_item or {}
+    mode_map = evidence_usage_mode_by_item or {}
+    allocations = [(component, item, mode_map.get(item.pk, USAGE_MODE_CONSUME))
+                   for item in items for component in component_map.get(item.pk, [])]
+    persisted_item_ids = [item.pk for item in items if item.match_status == StatementMatchStatus.MATCHED
+                         and item.pk not in component_map]
+    persisted = list(CardStatementReceiptEvidence.objects.filter(
+        statement_item_id__in=persisted_item_ids,
+        usage_mode=StatementReceiptEvidenceUsageMode.CONSUME,
+        role=StatementReceiptEvidenceRole.CHARGE,
+    ).select_related("statement_item__statement", "statement_item__matched_user",
+        "statement_item__matched_service", "receipt__submission__user", "receipt__service")) if persisted_item_ids else []
+    item_by_id = {item.pk: item for item in items}
+    allocations.extend((e, item_by_id[e.statement_item_id], e.usage_mode) for e in persisted)
+    current = _merge_submitter_history_rows(current,
+        _submitter_rows_from_confirmed_evidence(persisted, catalogs,
+            active_user_ids=active_users, active_service_ids=service_ids, target_card_last4=target_card))
+    current = _confirm_current_submitter_rows(current, allocations)
+    lines = [_plan_statement_line(_statement_line(item, catalogs)) for item in candidates_for]
+    covered_by_month = {}
+    # Unparsed-upload fallback is restricted to PDFs without any usable charge.
+    # A completely parsed document matched elsewhere is not 'related missing data'.
+    parseable_receipt_ids = {r.receipt_id for r in current}
+    allocated_receipt_ids = {c.receipt_id for c, item, mode in allocations
+                             if mode == USAGE_MODE_CONSUME and item.match_status == StatementMatchStatus.MATCHED}
+    for item, line in zip(candidates_for, lines):
+        if not line.transaction_date:
+            continue
+        month = line.transaction_date.replace(day=1)
+        if month not in covered_by_month:
+            covered_by_month[month] = resolve_submitted_recurring_history(history, current, month=month)
+        hint = suggest_previous_month_submitters(line, history, current_charges=current,
+            target_lines=lines, resolved_history=covered_by_month[month])
         for candidate in hint["candidates"]:
             if candidate["current_receipts"]:
                 continue
-            possible = [r for r in receipts
-                        if r.submission.user_id == candidate["user_id"]
+            possible = [r for r in receipts if r.pk not in parseable_receipt_ids
+                        and r.pk not in allocated_receipt_ids
+                        and r.submission.user_id == candidate["user_id"]
                         and r.submission.period_month == statement.submission_month
-                        and candidate["service_id"] is not None
-                        and r.service_id == candidate["service_id"]
+                        and candidate["service_id"] is not None and r.service_id == candidate["service_id"]
                         and r.financial_document_kind != ReceiptFinancialDocumentKind.REFUND
-                        and (r.issued_on is None or
-                             (r.issued_on.year, r.issued_on.month) ==
-                             (item.transaction_date.year, item.transaction_date.month))
+                        and (r.issued_on is None or abs((r.issued_on - line.transaction_date).days) <= 3)
                         and r.file_available]
             if possible:
                 candidate["submission_state"] = "uploaded_review"
-                candidate["submission_label"] = "当月の同サービス書類あり・不足／解析内容を要確認"
+                candidate["submission_label"] = "同サービスの解析未完了書類あり・当該取引との対応は未確認"
                 candidate["current_receipts"] = [
                     {"receipt_id": r.pk, "filename": r.display_filename} for r in possible[:5]]
         hint["statement_month"] = statement.period_month.isoformat()
@@ -2820,6 +3005,8 @@ def _reconcile_card_statement_items_impl(
 
     _attach_previous_month_submitter_candidates(
         statement, items, receipts, historical_receipts, catalogs,
+        evidence_components_by_item=evidence_components_by_item,
+        evidence_usage_mode_by_item=evidence_usage_mode_by_item,
     )
 
     no_usage_conflicts: list[str] = []

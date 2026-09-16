@@ -1560,6 +1560,22 @@ class CardStatementItem(models.Model):
         verbose_name_plural = "カード明細項目"
 
     @property
+    def current_submitter_candidates(self) -> dict:
+        """Hide obsolete contact hints; a GET must not silently re-run matching."""
+        from .plan_change_matching import SUBMITTER_HINT_VERSION
+        if not self.receipt_required or self.match_status not in {
+            StatementMatchStatus.UNMATCHED, StatementMatchStatus.NEEDS_REVIEW,
+        }:
+            return {}
+        value = self.submitter_candidates
+        if not isinstance(value, dict) or not value:
+            return {}
+        if value.get("version") != SUBMITTER_HINT_VERSION:
+            return {"candidates": [], "stale": True,
+                    "no_candidate_reason": "候補の判定ルールが更新されています。「最新の領収書と再照合」で再評価してください。"}
+        return value
+
+    @property
     def effective_match_status(self) -> str:
         if not self.receipt_required:
             return StatementMatchStatus.IGNORED

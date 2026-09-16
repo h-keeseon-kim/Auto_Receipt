@@ -209,10 +209,10 @@ class PreviousMonthSubmitterTests(unittest.TestCase):
         self.assertFalse(result["consumes_receipts"])
         self.assertTrue(candidate["reference_only"])
 
-    def test_near_billing_day_outranks_other_same_price_customer(self):
+    def test_subscription_wrong_billing_day_is_excluded_even_at_same_price(self):
         candidates = self.suggest([self.history(2, day=23), self.history(1)])["candidates"]
         self.assertEqual(candidates[0]["user_id"], 1)
-        self.assertEqual(candidates[1]["support_level"], 1)
+        self.assertEqual(len(candidates), 1)
 
     def test_equal_candidates_are_not_arbitrarily_resolved(self):
         candidates = self.suggest([self.history(2), self.history(1)])["candidates"]
@@ -238,13 +238,13 @@ class PreviousMonthSubmitterTests(unittest.TestCase):
         c = self.suggest([h], self.line(amount="20", merchant="GROK", currency="USD"))["candidates"][0]
         self.assertEqual(c["support_level"], 1)
 
-    def test_varying_metered_amount_needs_multiple_prior_events(self):
+    def test_multiple_metered_events_do_not_justify_an_unrelated_price(self):
         h = self.history(amount="20", merchant="GROK", currency="USD", billing_type="metered")
         line = self.line(amount="35", merchant="GROK", currency="USD")
         self.assertFalse(self.suggest([h], line)["candidates"])
         from dataclasses import replace
         second = replace(h, event_date=date(2026, 7, 13), receipt_id=2, source_key="different-event")
-        self.assertEqual(len(self.suggest([h, second], line)["candidates"]), 1)
+        self.assertFalse(self.suggest([h, second], line)["candidates"])
 
     def test_reuploaded_duplicate_does_not_count_as_multiple_events(self):
         from dataclasses import replace
@@ -296,10 +296,8 @@ class PreviousMonthSubmitterTests(unittest.TestCase):
         self.assertEqual(first, second)
         self.assertFalse(first["consumes_receipts"])
 
-    def test_amount_change_is_not_a_strong_candidate(self):
-        c = self.suggest([self.history(amount="35000")])["candidates"][0]
-        self.assertEqual(c["support_level"], 1)
-        self.assertTrue(any("金額が異なる" in r for r in c["reasons"]))
+    def test_unsupported_price_change_is_not_a_candidate(self):
+        self.assertFalse(self.suggest([self.history(amount="35000")])["candidates"])
 
     def test_non_finite_history_is_ignored(self):
         self.assertEqual(self.suggest([self.history(amount="NaN")])["candidates"], [])

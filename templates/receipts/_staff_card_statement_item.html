@@ -108,24 +108,41 @@
             </form>
         </section>
     </div>
-    {% if item.submitter_candidates.candidates %}
+    {% with hint=item.current_submitter_candidates %}
+    {% if hint.candidates %}
     <section class="statement-result-panel statement-submitter-candidates">
-        <h4>提出者候補（前月履歴からの推定・未確定）</h4>
-        <p class="muted small">過去の提出履歴を参照した連絡先候補です。今月の領収書提出や購入者を確定するものではなく、過去領収書は金額計算にも使用していません。</p>
-        {% for candidate in item.submitter_candidates.candidates %}
+        <h4>提出者候補（前月履歴・当月の照合済み取引を確認／未確定）</h4>
+        <p class="muted small">当月の照合済み取引では説明されていない前月履歴に基づく、確認先の候補です。未提出者・購入者の確定ではありません。過去領収書は当月の金額計算に使用しません。</p>
+        {% for candidate in hint.candidates %}
         <div class="statement-submitter-candidate">
             <p><strong>{{ candidate.user_label }}</strong> — {{ candidate.service_label }}
                 <span class="badge neutral">{{ candidate.support_label }}</span>
                 <span class="badge draft">{{ candidate.submission_label }}</span>
             </p>
-            <p class="muted small">前月の書類: {{ candidate.historical_filename }} ／ {{ candidate.historical_event_date }} ／ {{ candidate.historical_amount }} {{ candidate.currency }}</p>
+            <p class="muted small">前月の書類: {{ candidate.historical_filename }} ／ {{ candidate.historical_event_date }} ／ {{ candidate.historical_amount }} {{ candidate.currency }}{% if candidate.historical_line_reference %} ／ 前月明細 {{ candidate.historical_line_reference }}{% endif %}</p>
             <p class="muted small">根拠: {{ candidate.reasons|join:" ／ " }}</p>
-            {% if candidate.current_receipts %}<p class="small">関連する当月書類: {% for document in candidate.current_receipts %}{{ document.filename }}{% if not forloop.last %} ／ {% endif %}{% endfor %}</p>{% endif %}
+            {% if candidate.current_receipts %}<p class="small">当該取引との照合を確認する書類: {% for document in candidate.current_receipts %}{{ document.filename }}{% if not forloop.last %} ／ {% endif %}{% endfor %}</p>{% endif %}
         </div>
         {% endfor %}
-        {% if item.submitter_candidates.truncated %}<p class="muted small">候補{{ item.submitter_candidates.total_candidates }}人のうち上位5人を表示しています。候補者は確定していません。</p>{% endif %}
+        {% if hint.truncated %}<p class="muted small">候補{{ hint.total_candidates }}人のうち上位5人を表示しています。候補者は確定していません。</p>{% endif %}
     </section>
+    {% elif hint.stale %}
+        <p class="muted small">{{ hint.no_candidate_reason }}</p>
     {% elif item.effective_match_status == 'unmatched' and item.receipt_required %}
-        <p class="muted small">前月履歴から提出者候補を絞り込める情報はありません。購入者・登録サービスを確認してください。</p>
+        <p class="muted small">{{ hint.no_candidate_reason|default:"前月履歴と当月照合から確認先を絞り込めません。購入者は未特定です。" }}</p>
     {% endif %}
+    {% if hint.explained_history %}
+    <details class="statement-result-panel statement-submitter-exclusions">
+        <summary>候補対象外の履歴：当月分を照合済み（{{ hint.explained_history_count }}件）</summary>
+        {% for explanation in hint.explained_history %}
+        <div class="statement-submitter-candidate">
+            <p><strong>{{ explanation.user_label }}</strong> ／ 前月 {{ explanation.historical_event_date }} ／ {{ explanation.historical_amount }} {{ explanation.currency }}</p>
+            <p class="muted small">{{ explanation.reason }}</p>
+            {% for match in explanation.current_matches %}<p class="small">当月明細 {{ match.line_reference }} ／ {{ match.event_date }} ／ {{ match.amount }} {{ match.currency }} ／ {{ match.filename }}</p>{% endfor %}
+        </div>
+        {% endfor %}
+        {% if hint.explained_history_truncated %}<p class="muted small">除外履歴の先頭10件を表示しています。</p>{% endif %}
+    </details>
+    {% endif %}
+    {% endwith %}
 </article>

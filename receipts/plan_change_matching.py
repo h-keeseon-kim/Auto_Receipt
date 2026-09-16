@@ -327,9 +327,14 @@ def allocate_unique_plan_change_candidates(
     return allocated
 
 
+# This version is independent of monetary matching and the consume ledger.
+# Old, persisted contact hints must not be displayed under the new rules.
+SUBMITTER_HINT_VERSION = 2
+
+
 @dataclass(frozen=True)
 class HistoricalSubmitterUsage:
-    """Read-only history for finding a contact; never current payment evidence."""
+    """Read-only financial history. Confirmation applies to ONE charge, not a PDF/user."""
 
     user_id: int
     user_label: str
@@ -347,6 +352,21 @@ class HistoricalSubmitterUsage:
     historical_statement_id: int | None = None
     historical_line_reference: str = ""
     document_event_date: date | None = None
+    amount_options: tuple[PlanAmountOption, ...] = ()
+    card_last4: str = ""
+    contract_key: str = ""
+    confirmed_statement_id: int | None = None
+    confirmed_line_key: str = ""
+    confirmed_line_reference: str = ""
+
+    def __post_init__(self):
+        from decimal import InvalidOperation
+        try:
+            amount = Decimal(str(self.amount))
+        except (InvalidOperation, TypeError, ValueError):
+            amount = Decimal("NaN")
+        object.__setattr__(self, "amount", amount)
+        object.__setattr__(self, "currency", (self.currency or "").strip().upper())
 
 
 def _next_month_same_day(value: date) -> date:
@@ -356,84 +376,282 @@ def _next_month_same_day(value: date) -> date:
     return date(year, month, min(value.day, monthrange(year, month)[1]))
 
 
+def _submitter_event_key(row: HistoricalSubmitterUsage) -> str:
+    # source_key is the canonical financial identity, shared by reuploads and
+    # the document-date/card-date views of the same event. User scope prevents
+    # an upload by a different user being silently treated as their contract.
+    source = row.source_key or (
+        f"receipt:{row.receipt_id}:{row.document_event_date or row.event_date}:"
+        f"{row.merchant_key}:{row.amount}:{row.currency}")
+    return f"user:{row.user_id}:{source}"
+
+
+def _submitter_amounts(row: HistoricalSubmitterUsage) -> set[tuple[str, Decimal]]:
+    options = (PlanAmountOption(row.amount, row.currency), *row.amount_options)
+    return {(a.currency, a.amount) for a in options
+            if a.currency and a.amount.is_finite() and a.amount > 0}
+
+
+def _submitter_rows_compatible(old: HistoricalSubmitterUsage, new: HistoricalSubmitterUsage) -> bool:
+    from .statement_matching import merchant_keys_compatible
+    if old.user_id != new.user_id or not merchant_keys_compatible(old.merchant_key, new.merchant_key):
+        return False
+    if old.service_id is not None and new.service_id is not None and old.service_id != new.service_id:
+        return False
+    if old.contract_key and new.contract_key and old.contract_key != new.contract_key:
+        return False
+    if old.card_last4 and new.card_last4 and old.card_last4 != new.card_last4:
+        return False
+    if old.billing_type and new.billing_type and old.billing_type != new.billing_type:
+        return False
+    return True
+
+
+def _history_groups(rows: list[HistoricalSubmitterUsage]) -> dict[str, list[HistoricalSubmitterUsage]]:
+    groups: dict[str, list[HistoricalSubmitterUsage]] = {}
+    for row in rows:
+        if not row.user_id or not row.event_date or not row.amount.is_finite() or row.amount <= 0:
+            continue
+        key = _submitter_event_key(row)
+        if row not in groups.setdefault(key, []):
+            groups[key].append(row)
+    return groups
+
+
+def resolve_submitted_recurring_history(
+    history: list[HistoricalSubmitterUsage], current_charges: list[HistoricalSubmitterUsage],
+    *, month: date, date_tolerance_days: int = 3,
+) -> dict[str, dict]:
+    """Explain prior charges by confirmed current renewals, one event to one event.
+
+    This is NOT an evidence allocation and writes nothing. Positive and negative
+    histories remain intact. Never exclude a whole user just because one receipt
+    matched. Unknown billing types can be explained by a precise monthly pair,
+    but metered and one-time purchases have no assumed monthly obligation.
+
+    Unique mutual-best pairs are resolved first. A completely covered ambiguous
+    component can be excluded as a group; a partially covered tie stays unresolved
+    rather than arbitrarily hiding a different contract's missing receipt.
+    """
+    tolerance = max(0, min(int(date_tolerance_days), 7))
+    previous = _previous_month(month)
+    old_groups = _history_groups([h for h in history
+        if h.event_date and (h.event_date.year, h.event_date.month) == previous
+        and h.billing_type not in {"metered", "one_time"}])
+    new_groups = _history_groups([c for c in current_charges
+        if c.confirmed_line_key and c.event_date
+        and (c.event_date.year, c.event_date.month) == (month.year, month.month)])
+    edges: dict[tuple[str, str], tuple] = {}
+    for hk, olds in old_groups.items():
+        for ck, news in new_groups.items():
+            ranks = []
+            for h in olds:
+                for c in news:
+                    if not _submitter_rows_compatible(h, c) or not (_submitter_amounts(h) & _submitter_amounts(c)):
+                        continue
+                    distance = abs((c.event_date - _next_month_same_day(h.event_date)).days)
+                    if distance <= tolerance:
+                        ranks.append((0 if h.contract_key and c.contract_key else 1,
+                                      0 if h.service_id is not None and h.service_id == c.service_id else 1,
+                                      0 if (h.currency, h.amount) == (c.currency, c.amount) else 1,
+                                      distance))
+            if ranks:
+                edges[hk, ck] = min(ranks)
+    result: dict[str, dict] = {}
+
+    def explain(hk, current_keys, *, group_covered=False):
+        h = min(old_groups[hk], key=lambda r: (not r.previously_matched,
+                                             r.historical_statement_id is None, r.event_date, r.filename))
+        current = []
+        seen = set()
+        for ck in sorted(current_keys):
+            for c in new_groups[ck]:
+                identity = (c.confirmed_statement_id, c.confirmed_line_key)
+                if identity in seen:
+                    continue
+                seen.add(identity)
+                current.append({"statement_id": c.confirmed_statement_id,
+                    "line_reference": c.confirmed_line_reference or c.confirmed_line_key,
+                    "receipt_id": c.receipt_id, "filename": c.filename,
+                    "event_date": c.event_date.isoformat(), "amount": format(c.amount, "f"),
+                    "currency": c.currency})
+        result[hk] = {"history_key": hk, "user_id": h.user_id, "user_label": h.user_label,
+            "historical_receipt_id": h.receipt_id, "historical_filename": h.filename,
+            "historical_event_date": h.event_date.isoformat(),
+            "historical_amount": format(h.amount, "f"), "currency": h.currency,
+            "current_matches": current, "group_covered": group_covered,
+            "reason": ("同条件の前月取引は当月の照合済み取引で全件説明済みです。個別対応は未確定です。"
+                       if group_covered else "この前月取引の翌月分は別の当月明細で照合済みのため、候補から除外しました。")}
+
+    remaining = dict(edges)
+    while remaining:
+        old_best, new_best = {}, {}
+        for (h, c), rank in remaining.items():
+            old_best[h] = min(old_best.get(h, rank), rank)
+            new_best[c] = min(new_best.get(c, rank), rank)
+        pairs = []
+        for (h, c), rank in sorted(remaining.items()):
+            if rank != old_best[h] or rank != new_best[c]:
+                continue
+            if sum(1 for (hh, _), r in remaining.items() if hh == h and r == rank) != 1:
+                continue
+            if sum(1 for (_, cc), r in remaining.items() if cc == c and r == rank) != 1:
+                continue
+            pairs.append((h, c))
+        if not pairs:
+            break
+        for h, c in pairs:
+            explain(h, [c])
+        hs, cs = {h for h, _ in pairs}, {c for _, c in pairs}
+        remaining = {(h, c): rank for (h, c), rank in remaining.items() if h not in hs and c not in cs}
+
+    # Connected components, then maximum-cardinality matching. Do not equate
+    # counts alone with coverage (a Hall-deficient graph can have enough rows).
+    unseen = {h for h, _ in remaining}
+    while unseen:
+        hs, cs, todo = set(), set(), [min(unseen)]
+        while todo:
+            h = todo.pop()
+            if h in hs:
+                continue
+            hs.add(h)
+            for hh, c in remaining:
+                if hh != h:
+                    continue
+                if c not in cs:
+                    cs.add(c)
+                    todo.extend(other for other, cc in remaining if cc == c and other not in hs)
+        unseen -= hs
+        owner = {}
+        def augment(h, visited):
+            for c in sorted(cc for hh, cc in remaining if hh == h):
+                if c in visited:
+                    continue
+                visited.add(c)
+                if c not in owner or augment(owner[c], visited):
+                    owner[c] = h
+                    return True
+            return False
+        covered = all(augment(h, set()) for h in sorted(hs))
+        if covered:
+            for h in sorted(hs):
+                explain(h, cs, group_covered=True)
+    return result
+
+
+def _submitter_support(line, h, tolerance):
+    from .statement_matching import merchant_keys_compatible
+    if (not line.transaction_date or not h.event_date or
+            (h.event_date.year, h.event_date.month) != _previous_month(line.transaction_date) or
+            not merchant_keys_compatible(line.merchant_key, h.merchant_key)):
+        return None
+    amounts = {(a.currency, a.amount) for a in line.amount_options
+               if a.currency and a.amount.is_finite() and a.amount > 0}
+    if not (amounts & _submitter_amounts(h)):
+        # Neither nearby dates nor invented price changes justify naming a person.
+        return None
+    if h.billing_type == "one_time":
+        return None
+    expected = _next_month_same_day(h.event_date)
+    distance = abs((line.transaction_date - expected).days)
+    if h.billing_type == "metered":
+        return (1, "参考候補（従量課金・未確定）", distance, expected)
+    if distance > tolerance:
+        return None
+    if h.billing_type == "subscription":
+        return (3, "有力候補（未確定）", distance, expected)
+    return (2, "参考候補（金額・日付一致・未確定）", distance, expected)
+
+
 def suggest_previous_month_submitters(
-    line: PlanStatementLine,
-    history: list[HistoricalSubmitterUsage],
+    line: PlanStatementLine, history: list[HistoricalSubmitterUsage],
     *, current_charges: list[HistoricalSubmitterUsage] | None = None,
     date_tolerance_days: int = 3, limit: int = 5,
+    target_lines: list[PlanStatementLine] | None = None,
+    resolved_history: dict[str, dict] | None = None,
 ) -> dict:
-    """Return transparent, non-consuming candidate contacts, not an assignment.
+    """Find contacts from residual financial history, never certify non-submission.
 
-    Fixed subscriptions: exact amount + monthly cadence gives strong support.
-    Metered purchases have no assumed monthly cycle: exact amount is a weaker
-    clue, and varying amounts require at least two prior-month usages plus a
-    similar date. Ties remain ties; one contact may be a clue for several API
-    purchases. Existing current-month documents are shown as 'check matching',
-    never as a missing-receipt accusation.
+    Confirmed same-contract monthly renewals are removed first. Fixed/unknown
+    subscriptions require BOTH exact documented amount/currency and cadence.
+    Metered exact-price history is a reference only. A known closer unmatched
+    line takes precedence; ties stay alternative candidates with explicit warnings.
+    A current document already allocated elsewhere is never shown as a missing
+    document for this line. No database state or monetary evidence is changed.
     """
     from .statement_matching import merchant_keys_compatible
-
-    result = {"version": 1, "suggestion_only": True, "consumes_receipts": False,
-              "candidates": [], "total_candidates": 0, "truncated": False}
+    result = {"version": SUBMITTER_HINT_VERSION, "suggestion_only": True,
+              "consumes_receipts": False, "candidates": [], "total_candidates": 0,
+              "truncated": False, "explained_history": [], "explained_history_count": 0,
+              "no_candidate_reason": "前月の金額・通貨・請求周期と当月照合を確認しても、確認先を絞り込めません。"}
     if not line.transaction_date or not line.merchant_key or not line.amount_options:
         return result
     limit = max(1, min(int(limit), 20))
-    date_tolerance_days = max(0, min(int(date_tolerance_days), 7))
-    previous = _previous_month(line.transaction_date)
-    usable = [h for h in history if h.event_date and (h.event_date.year, h.event_date.month) == previous
-              and h.amount.is_finite() and h.amount > 0 and h.user_id
-              and merchant_keys_compatible(line.merchant_key, h.merchant_key)]
-    distinct_events: dict[tuple, set[str]] = {}
-    for h in usable:
-        group = (h.user_id, h.service_id, h.merchant_key)
-        distinct_events.setdefault(group, set()).add(h.source_key or f"{h.receipt_id}:{h.event_date}:{h.amount}")
+    tolerance = max(0, min(int(date_tolerance_days), 7))
+    current_charges = current_charges or []
+    covered = resolved_history if resolved_history is not None else resolve_submitted_recurring_history(
+        history, current_charges, month=line.transaction_date, date_tolerance_days=tolerance)
+    groups = _history_groups(history)
+    explained = [covered[key] for key, rows in groups.items() if key in covered
+                 and any(merchant_keys_compatible(line.merchant_key, h.merchant_key) for h in rows)]
+    explained.sort(key=lambda r: (r["user_label"], r["historical_event_date"], r["history_key"]))
+    result["explained_history_count"] = len(explained)
+    result["explained_history"] = explained[:10]
+    result["explained_history_truncated"] = len(explained) > 10
     best: dict[int, tuple[tuple, dict]] = {}
-    for h in usable:
-        same_currency = [a for a in line.amount_options if a.currency == h.currency
-                         and a.amount.is_finite() and a.amount > 0]
-        if not same_currency:
+    for key, variants in groups.items():
+        if key in covered:
             continue
-        exact = any(a.amount == h.amount for a in same_currency)
-        expected = _next_month_same_day(h.event_date)
-        distance = abs((line.transaction_date - expected).days)
-        recurring = h.billing_type == "subscription"
-        reasons = ["前月の同じ請求元（または既知の決済名義）の提出履歴", f"前月利用日 {h.event_date.isoformat()}"]
-        if exact and recurring and distance <= date_tolerance_days:
-            level, label = 3, "有力候補（未確定）"
-            reasons += ["金額・通貨が一致", f"翌月同日から{distance}日差の定期請求"]
-        elif exact:
-            level, label = 1, "参考候補（未確定）"
-            reasons += ["金額・通貨が一致", "請求周期の一致は未確認"]
-        elif recurring and distance <= date_tolerance_days:
-            level, label = 1, "参考候補（未確定）"
-            reasons += [f"翌月同日から{distance}日差", "金額が異なるため、値上げ・プラン変更・別取引を要確認"]
-        elif (h.billing_type == "metered" and distance <= date_tolerance_days
-              and len(distinct_events[(h.user_id, h.service_id, h.merchant_key)]) >= 2):
-            level, label = 1, "参考候補（従量課金・未確定）"
-            reasons += ["前月に複数の従量課金実績", "金額は異なり、今月の購入者を特定する根拠ではありません"]
+        eligible = []
+        for h in variants:
+            support = _submitter_support(line, h, tolerance)
+            if support:
+                eligible.append((support, h))
+        if not eligible:
+            continue
+        support, h = min(eligible, key=lambda pair: (-pair[0][0], pair[0][2],
+            not pair[1].previously_matched, pair[1].historical_statement_id is None,
+            pair[1].event_date, pair[1].filename))
+        level, label, distance, expected = support
+        competing = []
+        if h.billing_type != "metered":
+            supports = []
+            for other in target_lines or [line]:
+                scores = [_submitter_support(other, variant, tolerance) for variant in variants]
+                scores = [score for score in scores if score]
+                if scores:
+                    supports.append((other.key, min(score[2] for score in scores)))
+            closest = min((d for _, d in supports), default=distance)
+            if distance > closest:
+                continue
+            competing = sorted({k for k, d in supports if d == closest and k != line.key})
+        reasons = ["前月の同じ請求元（または既知の決済名義）の提出履歴",
+                   f"前月利用日 {h.event_date.isoformat()}", "書類に記載された金額・通貨が一致"]
+        if h.billing_type == "metered":
+            reasons.append("従量課金の同額実績であり、毎月の請求や今回の購入者を確定する根拠ではありません")
         else:
-            continue
+            reasons.append(f"翌月同日から{distance}日差")
         if h.previously_matched:
             reasons.append("前月明細と提出書類の紐付け実績あり")
         if h.historical_statement_id is not None:
-            reasons.append(f"利用日は前月明細 {h.historical_line_reference} の確定済み対応から参照")
-        current = []
-        for c in current_charges or []:
-            if c.user_id != h.user_id or not c.event_date or not c.amount.is_finite() or c.amount <= 0:
+            reasons.append(f"前月明細 {h.historical_line_reference} の確定済み対応を参照")
+        current, seen = [], set()
+        for c in current_charges:
+            if not _submitter_rows_compatible(h, c) or not c.event_date or c.confirmed_line_key:
                 continue
-            if not merchant_keys_compatible(line.merchant_key, c.merchant_key):
-                continue
-            # Limit 'already uploaded' to the relevant financial event, not all
-            # PDFs of this merchant or a different API top-up from this user.
-            if (any(a.currency == c.currency and a.amount == c.amount for a in line.amount_options)
-                    and abs((c.event_date - line.transaction_date).days) <= date_tolerance_days):
-                current.append({"receipt_id": c.receipt_id, "filename": c.filename})
-        current = list({(x["receipt_id"], x["filename"]): x for x in current}.values())
+            line_amounts = {(a.currency, a.amount) for a in line.amount_options}
+            if (line_amounts & _submitter_amounts(c) and
+                    abs((c.event_date - line.transaction_date).days) <= tolerance):
+                identity = _submitter_event_key(c)
+                if identity not in seen:
+                    seen.add(identity)
+                    current.append({"receipt_id": c.receipt_id, "filename": c.filename})
         candidate = {
             "user_id": h.user_id, "user_label": h.user_label,
             "service_id": h.service_id, "service_label": h.service_label,
             "support_level": level, "support_label": label,
-            "reasons": reasons, "ambiguous": False,
+            "reasons": reasons, "ambiguous": bool(competing),
+            "historical_source_key": key,
             "historical_receipt_id": h.receipt_id, "historical_filename": h.filename,
             "historical_statement_id": h.historical_statement_id,
             "historical_line_reference": h.historical_line_reference,
@@ -441,20 +659,23 @@ def suggest_previous_month_submitters(
             "historical_event_date": h.event_date.isoformat(),
             "historical_amount": format(h.amount, "f"), "currency": h.currency,
             "expected_date": expected.isoformat(), "date_distance": distance,
-            "current_receipts": current,
+            "current_receipts": current, "competing_line_keys": competing,
             "submission_state": "uploaded_review" if current else "not_confirmed",
-            "submission_label": "当月書類あり・照合要確認" if current else "当該取引の領収書は未確認",
+            "submission_label": "当該取引の書類あり・照合要確認" if current else "当該取引の提出状況は未確認",
             "reference_only": True,
         }
-        score = (level, int(h.previously_matched), -distance)
+        if competing:
+            candidate["support_label"] = "複数明細の確認先候補（未確定）"
+            reasons.append("同じ前月取引が複数の未一致明細の候補です。複数件の未提出や各明細の購入者を意味しません")
+        score = (level, -distance, int(h.previously_matched))
         if h.user_id not in best or score > best[h.user_id][0]:
             best[h.user_id] = (score, candidate)
     ranked = sorted(best.values(), key=lambda pair: (tuple(-v for v in pair[0]), pair[1]["user_label"]))
     top_score = ranked[0][0] if ranked else None
     top_tie = sum(1 for score, _ in ranked if score == top_score) > 1
     for score, candidate in ranked:
-        candidate["ambiguous"] = bool(top_tie and score == top_score)
-        if candidate["ambiguous"]:
+        if top_tie and score == top_score:
+            candidate["ambiguous"] = True
             candidate["reasons"].append("同条件の候補者が複数いるため一人に特定できません")
     result["candidates"] = [candidate for _, candidate in ranked[:limit]]
     result["total_candidates"] = len(ranked)
